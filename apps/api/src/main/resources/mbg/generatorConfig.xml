@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE generatorConfiguration
+        PUBLIC "-//mybatis.org//DTD MyBatis Generator Configuration 1.0//EN"
+        "https://mybatis.org/dtd/mybatis-generator-config_1_0.dtd">
+<generatorConfiguration>
+    <context id="ec" targetRuntime="MyBatis3">
+        <commentGenerator>
+            <property name="suppressAllComments" value="true"/>
+        </commentGenerator>
+
+        <jdbcConnection
+                driverClass="com.mysql.cj.jdbc.Driver"
+                connectionURL="jdbc:mysql://127.0.0.1:3306/ec?useInformationSchema=true"
+                userId="ec_user" password="ec_pass">
+            <property name="nullCatalogMeansCurrent" value="true"/>
+        </jdbcConnection>
+
+        <javaTypeResolver>
+            <property name="forceBigDecimals" value="false"/>
+        </javaTypeResolver>
+
+        <javaModelGenerator
+                targetPackage="com.nagi4757.ec.api.infra.mbg.model"
+                targetProject="build/generated/mbg/java"/>
+
+        <sqlMapGenerator
+                targetPackage="mapper/mbg"
+                targetProject="build/generated/mbg/resources"/>
+
+        <javaClientGenerator type="XMLMAPPER"
+                             targetPackage="com.nagi4757.ec.api.infra.mbg.mapper"
+                             targetProject="build/generated/mbg/java"/>
+
+        <table schema="ec" tableName="products" domainObjectName="Product">
+            <generatedKey column="id" sqlStatement="JDBC" identity="true"/>
+            <columnOverride column="image_url" property="imageUrl"/>
+        </table>
+
+        <table schema="ec" tableName="categories" domainObjectName="Category"/>
+    </context>
+</generatorConfiguration>
