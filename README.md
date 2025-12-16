@@ -3,20 +3,41 @@
 ```
 ec-portfolio/
 ├── apps/
-│   └── api/                # 백엔드(Spring Boot, Kotlin)
-│       ├── src/
-│       ├── build.gradle.kts
-│       └── ...
-├── store-web/               # 프론트엔드(React, TypeScript, Vite)
-│   ├── src/
-│   ├── public/
-│   ├── package.json
-│   └── ...
-├── packages/                # 공통 패키지(타입, UI 등)
-│   ├── contracts/
+│   ├── api/                # 백엔드(Spring Boot, Kotlin)
+│   │   ├── build.gradle.kts
+│   │   ├── gradlew
+│   │   ├── src/
+│   │   │   ├── main/
+│   │   │   │   ├── kotlin/
+│   │   │   │   └── resources/
+│   │   │   │       ├── application.properties
+│   │   │   │       ├── db/
+│   │   │   │       ├── mbg/
+│   │   │   │       ├── mapper/
+│   │   │   │       ├── static/
+│   │   │   │       └── templates/
+│   │   │   └── test/
+│   ├── admin-web/          # 어드민 프론트엔드(React, TypeScript, Vite)
+│   │   ├── package.json
+│   │   ├── public/
+│   │   └── src/
+│   │       ├── features/
+│   │       ├── lib/
+│   │       └── types/
+│   └── store-web/          # 스토어 프론트엔드(React, TypeScript, Vite)
+│       ├── package.json
+│       ├── public/
+│       └── src/
+│           ├── features/
+│           ├── lib/
+│           └── types/
+├── packages/               # 공통 패키지(타입, UI 등)
 │   ├── config/
+│   ├── contracts/
+│   │   └── src/
 │   └── ui/
-├── package.json             # 루트 워크스페이스 설정
+│       └── src/
+├── package.json            # 루트 워크스페이스 설정
 ├── README.md
 └── ...
 ```
@@ -32,16 +53,16 @@ ec-portfolio/
    ```
 
 2. **백엔드(API) 셋팅**
-  - JDK 17 이상 설치 필요
-  - Gradle Wrapper 사용
+   - JDK 17 이상 필요
+   - Gradle Wrapper 사용
    ```bash
    cd apps/api
    ./gradlew build
    ```
 
-3. **프론트엔드(store-web) 셋팅**
-  - Node.js 18 이상 설치 필요
-  - 루트에서 의존성 설치 (모노레포 워크스페이스)
+3. **프론트엔드 셋팅**
+   - Node.js 18 이상 필요
+   - 루트에서 의존성 설치 (모노레포 워크스페이스)
    ```bash
    npm install
    ```
@@ -58,14 +79,50 @@ cd apps/api
 ```
 - 기본 포트: `8080`
 
-### 프론트엔드(store-web) 실행
+### 어드민 프론트엔드 실행
 
 ```bash
-cd store-web
+cd apps/admin-web
 npm run dev
 ```
 - 기본 포트: `5173`
 - 브라우저에서 `http://localhost:5173` 접속
+
+### 스토어 프론트엔드 실행
+
+```bash
+cd apps/store-web
+npm run dev
+```
+- 기본 포트: `5174`
+- 브라우저에서 `http://localhost:5174` 접속
+
+---
+
+## 마이바티스 제네레이터(MBG) 설정 및 실행
+
+1. **설정 파일 위치**
+   - `apps/api/src/main/resources/mbg/generatorConfig.xml` 등에서 관리
+
+2. **Gradle 플러그인 및 설정**
+   - `apps/api/build.gradle.kts`에 아래와 같이 추가
+   ```kotlin
+   plugins {
+       id("com.thinkimi.gradle.MybatisGenerator") version "2.4"
+   }
+
+   mybatisGenerator {
+       configFile = "$projectDir/src/main/resources/mbg/generatorConfig.xml"
+   }
+   ```
+
+3. **제네레이터 실행**
+   ```bash
+   ./gradlew mybatisGenerator
+   ```
+   - 실행 후, `build/generated/mbg/java` 및 `build/generated/mbg/resources/mapper` 등에 코드가 생성됨
+
+4. **DB 접속 정보 등은 `generatorConfig.xml` 또는 `application.properties`에서 관리**
 
 ---
 
