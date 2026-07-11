@@ -9,7 +9,19 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
         const text = await res.text().catch(() => '')
         throw new Error(`HTTP ${res.status} ${res.statusText} :: ${text}`)
     }
-    return res.json() as Promise<T>
+
+    if (res.status === 204) {
+        return undefined as T
+    }
+
+    const contentType = res.headers.get('content-type') ?? ''
+    if (!contentType.includes('application/json')) {
+        const text = await res.text()
+        return (text ? (text as T) : (undefined as T))
+    }
+
+    const text = await res.text()
+    return (text ? JSON.parse(text) : undefined) as T
 }
 
 export const api = {

@@ -36,6 +36,8 @@
             <columnOverride column="image_url" property="imageUrl"/>
         </table>
 
-        <table schema="ec" tableName="categories" domainObjectName="Category"/>
+        <table schema="ec" tableName="categories" domainObjectName="Category">
+            <generatedKey column="id" sqlStatement="JDBC" identity="true"/>
+        </table>
     </context>
 </generatorConfiguration>

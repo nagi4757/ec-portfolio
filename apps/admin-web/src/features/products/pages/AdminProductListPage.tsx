@@ -31,6 +31,11 @@ export default function AdminProductListPage() {
     return (
         <div style={{ padding: 24 }}>
             <h1>Admin - Products</h1>
+            <div style={{ marginBottom: 16 }}>
+                <strong>Products</strong>
+                {' | '}
+                <Link to="/categories">Categories</Link>
+            </div>
 
             <div style={{ marginBottom: 16 }}>
                 <button onClick={() => navigate('/products/new')}>+ New Product</button>
