@@ -10,6 +10,12 @@ group = "com.nagi4757.ec"
 version = "0.0.1-SNAPSHOT"
 description = "api"
 
+val dbHost = System.getenv("DB_HOST") ?: "127.0.0.1"
+val dbPort = System.getenv("DB_PORT") ?: "3307"
+val dbName = System.getenv("DB_NAME") ?: "ec"
+val dbUsername = System.getenv("DB_USERNAME") ?: "ec_user"
+val dbPassword = System.getenv("DB_PASSWORD") ?: "ec_pass"
+
 java { toolchain { languageVersion = JavaLanguageVersion.of(21) } }
 repositories { mavenCentral() }
 
@@ -19,6 +25,7 @@ dependencies {
 	implementation("org.springframework.boot:spring-boot-starter-validation")
 	implementation("org.springframework.boot:spring-boot-starter-web")
 	implementation("org.springframework.boot:spring-boot-starter-security")
+	implementation("org.springframework.boot:spring-boot-starter-data-redis")
 	implementation("com.fasterxml.jackson.module:jackson-module-kotlin")
 	implementation("org.jetbrains.kotlin:kotlin-reflect")
 	implementation("io.jsonwebtoken:jjwt-api:0.12.6")
@@ -54,7 +61,15 @@ tasks.register<JavaExec>("mbGenerator") {
 	description = "Run MyBatis Generator"
 	classpath = configurations["mbg"]
 	mainClass.set("org.mybatis.generator.api.ShellRunner")
-	jvmArgs("-Djavax.xml.accessExternalDTD=all", "-Djavax.xml.accessExternalSchema=all")
+	jvmArgs(
+		"-Djavax.xml.accessExternalDTD=all",
+		"-Djavax.xml.accessExternalSchema=all",
+		"-DDB_HOST=$dbHost",
+		"-DDB_PORT=$dbPort",
+		"-DDB_NAME=$dbName",
+		"-DDB_USERNAME=$dbUsername",
+		"-DDB_PASSWORD=$dbPassword"
+	)
 	args = listOf(
 		"-configfile", "src/main/resources/mbg/generatorConfig.xml",
 		"-overwrite",
@@ -75,5 +90,15 @@ tasks.named("mbGenerator") { dependsOn("mbgClean") }
 
 tasks.named("compileKotlin") { dependsOn("mbGenerator") }
 tasks.named("compileJava") { dependsOn("mbGenerator") }
+
+tasks.named<org.springframework.boot.gradle.tasks.run.BootRun>("bootRun") {
+	environment("DB_HOST", System.getenv("DB_HOST") ?: "127.0.0.1")
+	environment("DB_PORT", System.getenv("DB_PORT") ?: "3307")
+	environment("DB_NAME", System.getenv("DB_NAME") ?: "ec")
+	environment("DB_USERNAME", System.getenv("DB_USERNAME") ?: "ec_user")
+	environment("DB_PASSWORD", System.getenv("DB_PASSWORD") ?: "ec_pass")
+	environment("REDIS_HOST", System.getenv("REDIS_HOST") ?: "127.0.0.1")
+	environment("REDIS_PORT", System.getenv("REDIS_PORT") ?: "6380")
+}
 
 tasks.withType<Test> { useJUnitPlatform() }

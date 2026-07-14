@@ -1,156 +1,215 @@
-## 프로젝트 전체 구조
+## EC Portfolio
+
+Kotlin(Spring Boot) + React(TypeScript) 기반 이커머스 포트폴리오 프로젝트입니다.
+
+- 백엔드: `apps/api`
+- 어드민 프론트: `apps/admin-web`
+- 스토어 프론트: `apps/store-web`
+
+---
+
+## 프로젝트 구조
 
 ```
 ec-portfolio/
 ├── apps/
-│   ├── api/                # 백엔드(Spring Boot, Kotlin)
-│   │   ├── build.gradle.kts
-│   │   ├── gradlew
-│   │   ├── src/
-│   │   │   ├── main/
-│   │   │   │   ├── kotlin/
-│   │   │   │   └── resources/
-│   │   │   │       ├── application.properties
-│   │   │   │       ├── db/
-│   │   │   │       ├── mbg/
-│   │   │   │       ├── mapper/
-│   │   │   │       ├── static/
-│   │   │   │       └── templates/
-│   │   │   └── test/
-│   ├── admin-web/          # 어드민 프론트엔드(React, TypeScript, Vite)
-│   │   ├── package.json
-│   │   ├── public/
+│   ├── api/                  # 백엔드 (Kotlin + Spring Boot)
 │   │   └── src/
-│   │       ├── features/
-│   │       ├── lib/
-│   │       └── types/
-│   └── store-web/          # 스토어 프론트엔드(React, TypeScript, Vite)
-│       ├── package.json
-│       ├── public/
-│       └── src/
-│           ├── features/
-│           ├── lib/
-│           └── types/
-├── packages/               # 공통 패키지(타입, UI 등)
-│   ├── config/
-│   ├── contracts/
+│   │       └── main/kotlin/  # 소스 코드
+│   ├── admin-web/            # 어드민 프론트엔드 (React + TypeScript + Vite)
 │   │   └── src/
-│   └── ui/
+│   │       ├── features/     # auth / categories / products
+│   │       ├── components/   # AdminLayout, PrivateRoute
+│   │       └── lib/          # api 클라이언트, authStore
+│   └── store-web/            # 스토어 프론트엔드 (React + TypeScript + Vite)
 │       └── src/
-├── package.json            # 루트 워크스페이스 설정
-├── README.md
-└── ...
+│           ├── features/     # auth / cart / products
+│           └── lib/          # api 클라이언트, authStore
+├── packages/
+│   ├── contracts/            # 공유 타입/인터페이스
+│   ├── ui/                   # 공유 UI 컴포넌트
+│   └── config/               # 공유 설정
+├── docker-compose.yml        # API + MariaDB + Redis
+└── package.json              # 워크스페이스 루트
 ```
 
 ---
 
-## 깃 클론 후 셋팅 방법
+## 현재 구현 범위
 
-1. **레포지토리 클론**
-   ```bash
-   git clone git@github.com:nagi4757/ec-portfolio.git
-   cd ec-portfolio
-   ```
+### 1단계: 인증
+- 회원가입/로그인(JWT)
+- 내 정보 조회(`me`)
 
-2. **백엔드(API) 셋팅**
-   - JDK 17 이상 필요
-   - Gradle Wrapper 사용
-   ```bash
-   cd apps/api
-   ./gradlew build
-   ```
+### 2단계: 상품/카테고리 + 어드민 로그인
+- 어드민 상품 CRUD
+- 어드민 카테고리 CRUD
+- 어드민 로그인/라우트 가드
 
-3. **프론트엔드 셋팅**
-   - Node.js 18 이상 필요
-   - 루트에서 의존성 설치 (모노레포 워크스페이스)
-   ```bash
-   npm install
-   ```
+### 3단계: 상품 조회/검색
+- 키워드 검색
+- 가격 범위 필터
+- 정렬(`newest`, `priceAsc`, `priceDesc`, `nameAsc`)
+- 페이지네이션
+
+### 4단계: 장바구니(Redis)
+- 장바구니 조회/추가/수량변경/삭제/비우기
+- 스토어 상품 상세에서 장바구니 담기
 
 ---
 
-## 실행 방법
+## 요구사항
 
-### 백엔드(API 서버) 실행
+| 항목 | 버전 | 용도 |
+|------|------|------|
+| Java | 21 | 백엔드 로컬 실행 (Docker 사용 시 불필요) |
+| Node.js | 18+ | 프론트 의존성 설치 및 개발 서버 |
+| npm | - | 프론트 패키지 관리 |
+| Docker Desktop | 최신 권장 | 백엔드 전체 스택 실행 (API + MariaDB + Redis) |
 
-```bash
-cd apps/api
+> **참고:** MyBatis Generator는 `./gradlew bootRun` 또는 Docker 빌드 시 자동으로 실행됩니다. 별도 설치나 수동 실행이 필요하지 않습니다.
+
+---
+
+## 시작하기
+
+### 1) 저장소 클론
+
+```zsh
+git clone git@github.com:nagi4757/ec-portfolio.git
+cd ec-portfolio
+```
+
+### 2) 프론트 의존성 설치
+
+```zsh
+npm install
+```
+
+---
+
+## 백엔드 실행 방식
+
+### A. 권장: Docker로 백엔드 스택 실행 (API + MariaDB + Redis)
+
+기본 Compose 파일(`docker-compose.yml`)로 설정되어 있어 아래처럼 바로 실행하면 됩니다.
+
+```zsh
+cd ec-portfolio
+docker compose up -d --build
+```
+
+- API: `http://localhost:8081`
+- MariaDB: `localhost:3307`
+- Redis: `localhost:6380`
+
+로그 확인:
+
+```zsh
+cd ec-portfolio
+docker compose logs -f api
+```
+
+중지:
+
+```zsh
+cd ec-portfolio
+docker compose down
+```
+
+볼륨 포함 초기화:
+
+```zsh
+cd ec-portfolio
+docker compose down -v
+```
+
+
+### B. 로컬 직접 실행
+
+MariaDB/Redis를 실행한 뒤 바로 실행합니다.
+
+- 현재 Gradle 설정상 `./gradlew bootRun` 기본값은 `DB_PORT=3307`, `REDIS_PORT=6380`입니다.
+- 즉, Docker 스택(`docker compose up`)을 켠 상태라면 별도 환경변수 없이 실행 가능합니다.
+
+```zsh
+cd ec-portfolio/apps/api
 ./gradlew bootRun
 ```
-- 기본 포트: `8080`
 
-### 어드민 프론트엔드 실행
+---
 
-```bash
-cd apps/admin-web
+## 프론트 실행
+
+### 어드민
+
+```zsh
+cd ec-portfolio/apps/admin-web
 npm run dev
 ```
-- 기본 포트: `5173`
-- 브라우저에서 `http://localhost:5173` 접속
 
-### 스토어 프론트엔드 실행
+- URL: `http://localhost:5173`
 
-```bash
-cd apps/store-web
+### 스토어
+
+```zsh
+cd ec-portfolio/apps/store-web
 npm run dev
 ```
-- 기본 포트: `5174`
-- 브라우저에서 `http://localhost:5174` 접속
+
+- URL: `http://localhost:5174`
 
 ---
 
-## 마이바티스 제네레이터(MBG) 설정 및 실행
+## 주요 API 요약
 
-1. **설정 파일 위치**
-   - `apps/api/src/main/resources/mbg/generatorConfig.xml` 등에서 관리
+### 인증
+- `POST /api/public/auth/signup`
+- `POST /api/public/auth/login`
+- `GET /api/public/auth/me`
 
-2. **Gradle 플러그인 및 설정**
-   - `apps/api/build.gradle.kts`에 아래와 같이 추가
-   ```kotlin
-   plugins {
-       id("com.thinkimi.gradle.MybatisGenerator") version "2.4"
-   }
+### 상품(공개)
+- `GET /api/public/products`
+  - query: `keyword`, `minPrice`, `maxPrice`, `sort`, `page`, `size`
+- `GET /api/public/products/{id}`
 
-   mybatisGenerator {
-       configFile = "$projectDir/src/main/resources/mbg/generatorConfig.xml"
-   }
-   ```
+### 어드민
+- `GET/POST/PATCH/DELETE /api/admin/products`
+- `GET/POST/PATCH/DELETE /api/admin/categories`
 
-3. **제네레이터 실행**
-   ```bash
-   ./gradlew mybatisGenerator
-   ```
-   - 실행 후, `build/generated/mbg/java` 및 `build/generated/mbg/resources/mapper` 등에 코드가 생성됨
-
-4. **DB 접속 정보 등은 `generatorConfig.xml` 또는 `application.properties`에서 관리**
+### 장바구니(로그인 필요)
+- `GET /api/user/cart`
+- `POST /api/user/cart/items`
+- `PATCH /api/user/cart/items/{productId}`
+- `DELETE /api/user/cart/items/{productId}`
+- `DELETE /api/user/cart`
 
 ---
 
-## 기타 참고
+## 빠른 점검 커맨드
 
-- DB 마이그레이션은 Flyway로 자동 적용됨
-- 환경 변수 예시는 `.env.example` 참고
-- 상세 설정 및 커스텀은 각 모듈의 `README.md` 참고
+### 백엔드 테스트
 
----
-
-## 1단계 구현 상태 (회원가입/로그인)
-
-- 백엔드 API(`apps/api`)에 회원가입/로그인 JWT 발급 기능이 추가됨
-- 주요 엔드포인트
-  - `POST /api/public/auth/signup`
-  - `POST /api/public/auth/login`
-  - `GET /api/public/auth/me` (Bearer 토큰 필요)
-
-### 요청 예시
-
-```bash
-curl -X POST http://localhost:8080/api/public/auth/signup \
-  -H "Content-Type: application/json" \
-  -d '{"email":"user@example.com","password":"password123","name":"홍길동"}'
-
-curl -X POST http://localhost:8080/api/public/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"email":"user@example.com","password":"password123"}'
+```zsh
+cd ec-portfolio/apps/api
+./gradlew test
 ```
+
+### 프론트 빌드
+
+```zsh
+cd ec-portfolio/apps/admin-web
+npm run build
+
+cd ec-portfolio/apps/store-web
+npm run build
+```
+
+---
+
+## 참고
+
+- DB 마이그레이션은 Flyway로 자동 적용됩니다.
+- MyBatis Generator는 `apps/api/build/generated/mbg` 아래에 생성됩니다.
+- 인증 토큰 만료(401) 시 프론트에서 자동 로그아웃 처리합니다.
 

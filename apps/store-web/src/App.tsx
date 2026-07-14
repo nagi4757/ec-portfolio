@@ -3,6 +3,7 @@ import ProductListPage from '@/features/products/pages/ProductListPage';
 import ProductDetailPage from '@/features/products/pages/ProductDetailPage';
 import LoginPage from '@/features/auth/pages/LoginPage';
 import SignUpPage from '@/features/auth/pages/SignUpPage';
+import CartPage from '@/features/cart/pages/CartPage';
 import { authStore } from '@/lib/authStore';
 import { useState } from 'react';
 
@@ -22,6 +23,7 @@ function Header() {
         <header style={hdr}>
             <Link to="/" style={brand}>EC Store</Link>
             <nav style={{ display: 'flex', alignItems: 'center', gap: 12, fontSize: 14 }}>
+                <Link to="/cart" style={navLink}>장바구니</Link>
                 {user ? (
                     <>
                         <span style={{ color: '#555' }}>{user.name}님</span>
@@ -45,6 +47,7 @@ export default function App() {
             <Routes>
                 <Route path="/" element={<ProductListPage />} />
                 <Route path="/products/:id" element={<ProductDetailPage />} />
+                <Route path="/cart" element={<CartPage />} />
                 <Route path="/login" element={<LoginPage />} />
                 <Route path="/signup" element={<SignUpPage />} />
             </Routes>

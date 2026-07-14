@@ -10,8 +10,8 @@
 
         <jdbcConnection
                 driverClass="com.mysql.cj.jdbc.Driver"
-                connectionURL="jdbc:mysql://127.0.0.1:3306/ec?useInformationSchema=true"
-                userId="ec_user" password="ec_pass">
+                connectionURL="jdbc:mysql://${DB_HOST}:${DB_PORT}/${DB_NAME}?useInformationSchema=true"
+                userId="${DB_USERNAME}" password="${DB_PASSWORD}">
             <property name="nullCatalogMeansCurrent" value="true"/>
         </jdbcConnection>
 

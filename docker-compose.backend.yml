@@ -1,0 +1,59 @@
+services:
+  mariadb:
+    image: mariadb:11
+    container_name: ec-mariadb
+    environment:
+      MARIADB_DATABASE: ec
+      MARIADB_USER: ec_user
+      MARIADB_PASSWORD: ec_pass
+      MARIADB_ROOT_PASSWORD: root_pass
+    ports:
+      - "${MARIADB_HOST_PORT:-3306}:3306"
+    volumes:
+      - mariadb-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mariadb-admin", "ping", "-h", "127.0.0.1", "-uroot", "-proot_pass"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7
+    container_name: ec-redis
+    ports:
+      - "${REDIS_HOST_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+    container_name: ec-api
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DB_HOST: mariadb
+      DB_PORT: 3306
+      DB_NAME: ec
+      DB_USERNAME: ec_user
+      DB_PASSWORD: ec_pass
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      APP_AUTH_JWT_SECRET: change-this-secret-at-least-32-bytes-long
+      APP_AUTH_JWT_ACCESS_TOKEN_EXPIRATION_SECONDS: 3600
+    ports:
+      - "${API_HOST_PORT:-8080}:8080"
+
+volumes:
+  mariadb-data:
+  redis-data:
+
