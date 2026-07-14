@@ -4,6 +4,7 @@ import com.nagi4757.ec.api.product.application.command.CreateProductCommand
 import com.nagi4757.ec.api.product.application.command.UpdateProductCommand
 import com.nagi4757.ec.api.product.domain.model.Product
 import com.nagi4757.ec.api.product.domain.repository.ProductRepository
+import com.nagi4757.ec.api.product.domain.repository.ProductSearchCondition
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
 
@@ -26,44 +27,23 @@ class ProductService(
         page: Int,
         size: Int
     ): ProductSearchPage {
-        val safePage = page.coerceAtLeast(1)
-        val safeSize = size.coerceIn(1, 100)
-        val normalizedKeyword = keyword?.trim()?.lowercase().orEmpty()
-
-        val filtered = productRepository.findAll()
-            .asSequence()
-            .filter { product ->
-                if (normalizedKeyword.isBlank()) return@filter true
-                product.name.lowercase().contains(normalizedKeyword) ||
-                    (product.description?.lowercase()?.contains(normalizedKeyword) == true)
-            }
-            .filter { product -> minPrice == null || product.price >= minPrice }
-            .filter { product -> maxPrice == null || product.price <= maxPrice }
-            .toList()
-
-        val sorted = when (sort) {
-            "priceAsc" -> filtered.sortedBy { it.price }
-            "priceDesc" -> filtered.sortedByDescending { it.price }
-            "nameAsc" -> filtered.sortedBy { it.name.lowercase() }
-            else -> filtered.sortedByDescending { it.id ?: 0L } // newest
-        }
-
-        val total = sorted.size.toLong()
-        val totalPages = if (total == 0L) 0 else ((total + safeSize - 1) / safeSize).toInt()
-
-        val fromIndex = (safePage - 1) * safeSize
-        val items = if (fromIndex >= sorted.size) {
-            emptyList()
-        } else {
-            sorted.subList(fromIndex, minOf(fromIndex + safeSize, sorted.size))
-        }
+        val result = productRepository.search(
+            ProductSearchCondition(
+                keyword = keyword,
+                minPrice = minPrice,
+                maxPrice = maxPrice,
+                sort = sort ?: "newest",
+                page = page,
+                size = size
+            )
+        )
 
         return ProductSearchPage(
-            items = items,
-            page = safePage,
-            size = safeSize,
-            total = total,
-            totalPages = totalPages
+            items = result.items,
+            page = result.page,
+            size = result.size,
+            total = result.total,
+            totalPages = result.totalPages
         )
     }
 
@@ -108,3 +88,4 @@ data class ProductSearchPage(
     val total: Long,
     val totalPages: Int
 )
+
