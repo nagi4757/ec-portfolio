@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Link, useNavigate, useParams } from 'react-router-dom'
+import { useNavigate, useParams } from 'react-router-dom'
 import { CategoryApi } from '@/features/categories/api'
 import type { Category, CreateCategory, UpdateCategory } from '@/types/category'
 import CategoryForm from '../components/CategoryForm'
@@ -49,12 +49,7 @@ export default function AdminCategoryEditPage() {
 
     return (
         <div style={{ padding: 24 }}>
-            <h1>{isNew ? 'New Category' : `Edit Category #${id}`}</h1>
-            <div style={{ marginBottom: 16 }}>
-                <Link to="/products">Products</Link>
-                {' | '}
-                <Link to="/categories">Categories</Link>
-            </div>
+            <h1>{isNew ? '카테고리 등록' : `카테고리 수정 #${id}`}</h1>
             <CategoryForm initial={isNew ? null : initial} onSubmit={handleSubmit} submitting={saving} />
         </div>
     )

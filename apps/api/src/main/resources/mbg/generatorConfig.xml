@@ -39,5 +39,11 @@
         <table schema="ec" tableName="categories" domainObjectName="Category">
             <generatedKey column="id" sqlStatement="JDBC" identity="true"/>
         </table>
+
+        <table schema="ec" tableName="users" domainObjectName="User">
+            <generatedKey column="id" sqlStatement="JDBC" identity="true"/>
+            <columnOverride column="password_hash" property="passwordHash"/>
+            <columnOverride column="created_at" property="createdAt"/>
+        </table>
     </context>
 </generatorConfiguration>

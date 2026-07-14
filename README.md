@@ -133,3 +133,24 @@ npm run dev
 - 상세 설정 및 커스텀은 각 모듈의 `README.md` 참고
 
 ---
+
+## 1단계 구현 상태 (회원가입/로그인)
+
+- 백엔드 API(`apps/api`)에 회원가입/로그인 JWT 발급 기능이 추가됨
+- 주요 엔드포인트
+  - `POST /api/public/auth/signup`
+  - `POST /api/public/auth/login`
+  - `GET /api/public/auth/me` (Bearer 토큰 필요)
+
+### 요청 예시
+
+```bash
+curl -X POST http://localhost:8080/api/public/auth/signup \
+  -H "Content-Type: application/json" \
+  -d '{"email":"user@example.com","password":"password123","name":"홍길동"}'
+
+curl -X POST http://localhost:8080/api/public/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"user@example.com","password":"password123"}'
+```
+

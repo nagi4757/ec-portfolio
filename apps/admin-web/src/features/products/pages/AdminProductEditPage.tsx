@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Link, useNavigate, useParams } from 'react-router-dom'
+import { useNavigate, useParams } from 'react-router-dom'
 import { ProductApi } from '@/features/products/api'
 import type { Product, CreateProduct, UpdateProduct } from '@/types/product'
 import ProductForm from '../components/ProductForm'
@@ -49,12 +49,7 @@ export default function AdminProductEditPage() {
 
     return (
         <div style={{ padding: 24 }}>
-            <h1>{isNew ? 'New Product' : `Edit Product #${id}`}</h1>
-            <div style={{ marginBottom: 16 }}>
-                <Link to="/products">Products</Link>
-                {' | '}
-                <Link to="/categories">Categories</Link>
-            </div>
+            <h1>{isNew ? '상품 등록' : `상품 수정 #${id}`}</h1>
             <ProductForm initial={isNew ? null : initial} onSubmit={handleSubmit} submitting={saving} />
         </div>
     )

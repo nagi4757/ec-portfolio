@@ -30,12 +30,7 @@ export default function AdminCategoryListPage() {
 
     return (
         <div style={{ padding: 24 }}>
-            <h1>Admin - Categories</h1>
-            <div style={{ marginBottom: 16 }}>
-                <Link to="/products">Products</Link>
-                {' | '}
-                <strong>Categories</strong>
-            </div>
+            <h1>카테고리 관리</h1>
 
             <div style={{ marginBottom: 16 }}>
                 <button onClick={() => navigate('/categories/new')}>+ New Category</button>
