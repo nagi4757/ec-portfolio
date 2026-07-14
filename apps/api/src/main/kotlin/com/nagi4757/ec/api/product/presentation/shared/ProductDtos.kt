@@ -1,5 +1,6 @@
 package com.nagi4757.ec.api.product.presentation.shared
 
+import com.nagi4757.ec.api.product.application.ProductSearchPage
 import com.nagi4757.ec.api.product.domain.model.Product
 import jakarta.validation.constraints.Min
 import jakarta.validation.constraints.NotBlank
@@ -33,4 +34,20 @@ fun Product.toResponse() = ProductResponse(
     price = price,
     imageUrl = imageUrl,
     description = description
+)
+
+data class ProductListResponse(
+    val items: List<ProductResponse>,
+    val page: Int,
+    val size: Int,
+    val total: Long,
+    val totalPages: Int
+)
+
+fun ProductSearchPage.toResponse() = ProductListResponse(
+    items = items.map { it.toResponse() },
+    page = page,
+    size = size,
+    total = total,
+    totalPages = totalPages
 )

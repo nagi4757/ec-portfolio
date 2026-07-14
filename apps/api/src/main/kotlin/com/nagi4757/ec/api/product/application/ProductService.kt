@@ -17,6 +17,56 @@ class ProductService(
     @Transactional(readOnly = true)
     fun listAll(): List<Product> = productRepository.findAll()
 
+    @Transactional(readOnly = true)
+    fun search(
+        keyword: String?,
+        minPrice: Long?,
+        maxPrice: Long?,
+        sort: String?,
+        page: Int,
+        size: Int
+    ): ProductSearchPage {
+        val safePage = page.coerceAtLeast(1)
+        val safeSize = size.coerceIn(1, 100)
+        val normalizedKeyword = keyword?.trim()?.lowercase().orEmpty()
+
+        val filtered = productRepository.findAll()
+            .asSequence()
+            .filter { product ->
+                if (normalizedKeyword.isBlank()) return@filter true
+                product.name.lowercase().contains(normalizedKeyword) ||
+                    (product.description?.lowercase()?.contains(normalizedKeyword) == true)
+            }
+            .filter { product -> minPrice == null || product.price >= minPrice }
+            .filter { product -> maxPrice == null || product.price <= maxPrice }
+            .toList()
+
+        val sorted = when (sort) {
+            "priceAsc" -> filtered.sortedBy { it.price }
+            "priceDesc" -> filtered.sortedByDescending { it.price }
+            "nameAsc" -> filtered.sortedBy { it.name.lowercase() }
+            else -> filtered.sortedByDescending { it.id ?: 0L } // newest
+        }
+
+        val total = sorted.size.toLong()
+        val totalPages = if (total == 0L) 0 else ((total + safeSize - 1) / safeSize).toInt()
+
+        val fromIndex = (safePage - 1) * safeSize
+        val items = if (fromIndex >= sorted.size) {
+            emptyList()
+        } else {
+            sorted.subList(fromIndex, minOf(fromIndex + safeSize, sorted.size))
+        }
+
+        return ProductSearchPage(
+            items = items,
+            page = safePage,
+            size = safeSize,
+            total = total,
+            totalPages = totalPages
+        )
+    }
+
     @Transactional
     fun create(cmd: CreateProductCommand): Product {
         val product = Product(
@@ -50,3 +100,11 @@ class ProductService(
         productRepository.delete(id)
     }
 }
+
+data class ProductSearchPage(
+    val items: List<Product>,
+    val page: Int,
+    val size: Int,
+    val total: Long,
+    val totalPages: Int
+)
