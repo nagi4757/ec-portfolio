@@ -1,21 +1,41 @@
-import { BrowserRouter, Routes, Route, Link, useNavigate } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Link, useLocation, useNavigate } from 'react-router-dom';
 import ProductListPage from '@/features/products/pages/ProductListPage';
 import ProductDetailPage from '@/features/products/pages/ProductDetailPage';
 import LoginPage from '@/features/auth/pages/LoginPage';
 import SignUpPage from '@/features/auth/pages/SignUpPage';
 import CartPage from '@/features/cart/pages/CartPage';
+import { CartAPI } from '@/features/cart/api';
 import { authStore } from '@/lib/authStore';
-import { useState } from 'react';
+import { cartStore } from '@/lib/cartStore';
+import { useEffect, useState } from 'react';
 
 function Header() {
     const navigate = useNavigate();
-    const [, forceUpdate] = useState(0);
+    const location = useLocation();
+    const [totalQuantity, setTotalQuantity] = useState(cartStore.getTotalQuantity());
 
     const user = authStore.getUser();
 
+    useEffect(() => {
+        return cartStore.subscribe(setTotalQuantity);
+    }, []);
+
+    useEffect(() => {
+        if (!authStore.isLoggedIn()) {
+            cartStore.setTotalQuantity(0);
+            return;
+        }
+
+        CartAPI.get()
+            .then((data) => cartStore.setTotalQuantity(data.totalQuantity))
+            .catch(() => {
+                // 장바구니 조회 실패 시 기존 배지 값을 유지한다.
+            });
+    }, [location.pathname]);
+
     function handleLogout() {
         authStore.clear();
-        forceUpdate(n => n + 1);
+        cartStore.setTotalQuantity(0);
         navigate('/', { replace: true });
     }
 
@@ -23,7 +43,9 @@ function Header() {
         <header style={hdr}>
             <Link to="/" style={brand}>EC Store</Link>
             <nav style={{ display: 'flex', alignItems: 'center', gap: 12, fontSize: 14 }}>
-                <Link to="/cart" style={navLink}>장바구니</Link>
+                <Link to="/cart" style={navLink}>
+                    장바구니{totalQuantity > 0 ? ` (${totalQuantity})` : ''}
+                </Link>
                 {user ? (
                     <>
                         <span style={{ color: '#555' }}>{user.name}님</span>

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { CartAPI } from '@/features/cart/api'
 import { authStore } from '@/lib/authStore'
+import { cartStore } from '@/lib/cartStore'
 import type { CartResponse } from '@/types/cart'
 
 export default function CartPage() {
@@ -12,6 +13,7 @@ export default function CartPage() {
 
     useEffect(() => {
         if (!authStore.isLoggedIn()) {
+            cartStore.setTotalQuantity(0)
             setLoading(false)
             return
         }
@@ -24,6 +26,7 @@ export default function CartPage() {
         try {
             const data = await CartAPI.get()
             setCart(data)
+            cartStore.setTotalQuantity(data.totalQuantity)
         } catch (e) {
             setError(e instanceof Error ? e.message : '장바구니를 불러오지 못했습니다.')
         } finally {
@@ -35,6 +38,7 @@ export default function CartPage() {
         try {
             const data = await CartAPI.updateItem(productId, quantity)
             setCart(data)
+            cartStore.setTotalQuantity(data.totalQuantity)
         } catch (e) {
             setError(e instanceof Error ? e.message : '수량 변경에 실패했습니다.')
         }
@@ -44,6 +48,7 @@ export default function CartPage() {
         try {
             const data = await CartAPI.removeItem(productId)
             setCart(data)
+            cartStore.setTotalQuantity(data.totalQuantity)
         } catch (e) {
             setError(e instanceof Error ? e.message : '상품 삭제에 실패했습니다.')
         }
@@ -53,6 +58,7 @@ export default function CartPage() {
         try {
             const data = await CartAPI.clear()
             setCart(data)
+            cartStore.setTotalQuantity(data.totalQuantity)
         } catch (e) {
             setError(e instanceof Error ? e.message : '장바구니 비우기에 실패했습니다.')
         }

@@ -3,6 +3,7 @@ import { useParams, Link } from 'react-router-dom';
 import { ProductAPI } from '@/features/products/api';
 import { CartAPI } from '@/features/cart/api';
 import { authStore } from '@/lib/authStore';
+import { cartStore } from '@/lib/cartStore';
 import type { ProductResponse } from '@/types/product';
 
 export default function ProductDetailPage() {
@@ -34,7 +35,8 @@ export default function ProductDetailPage() {
         setAdding(true);
         setAddMsg(null);
         try {
-            await CartAPI.addItem(data.id, 1);
+            const updated = await CartAPI.addItem(data.id, 1);
+            cartStore.setTotalQuantity(updated.totalQuantity);
             setAddMsg('장바구니에 담았습니다.');
         } catch (e) {
             setAddMsg(e instanceof Error ? e.message : '장바구니 담기에 실패했습니다.');

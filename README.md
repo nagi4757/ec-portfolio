@@ -99,6 +99,12 @@ cd ec-portfolio
 docker compose up -d --build
 ```
 
+| 서비스 | 호스트(localhost) | 컨테이너 내부 | 비고 |
+|------|---|---|---|
+| API | `8081` | `8080` | 브라우저/클라이언트는 `http://localhost:8081`로 접근 |
+| MariaDB | `3307` | `3306` | 컨테이너 간 통신은 `mariadb:3306` 사용 |
+| Redis | `6380` | `6379` | 컨테이너 간 통신은 `redis:6379` 사용 |
+
 - API: `http://localhost:8081`
 - MariaDB: `localhost:3307`
 - Redis: `localhost:6380`
@@ -212,4 +218,3 @@ npm run build
 - DB 마이그레이션은 Flyway로 자동 적용됩니다.
 - MyBatis Generator는 `apps/api/build/generated/mbg` 아래에 생성됩니다.
 - 인증 토큰 만료(401) 시 프론트에서 자동 로그아웃 처리합니다.
-
