@@ -1,7 +1,7 @@
 // apps/store-web/src/lib/api.ts
 import { authStore } from '@/lib/authStore';
 
-const BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8080';
+const BASE_URL = import.meta.env.VITE_API_BASE_URL ?? '';
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
     const token = authStore.getToken();

@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.nagi4757.ec.api.order.infra.mapper.OrderMapper">
+
+    <resultMap id="orderResultMap" type="com.nagi4757.ec.api.order.infra.mapper.OrderRecord">
+        <id     property="id"          column="id"/>
+        <result property="userId"      column="user_id"/>
+        <result property="status"      column="status"/>
+        <result property="totalAmount" column="total_amount"/>
+        <result property="createdAt"   column="created_at"/>
+        <result property="updatedAt"   column="updated_at"/>
+    </resultMap>
+
+    <resultMap id="orderItemResultMap" type="com.nagi4757.ec.api.order.infra.mapper.OrderItemRecord">
+        <id     property="id"         column="id"/>
+        <result property="orderId"    column="order_id"/>
+        <result property="productId"  column="product_id"/>
+        <result property="name"       column="name"/>
+        <result property="price"      column="price"/>
+        <result property="quantity"   column="quantity"/>
+        <result property="lineAmount" column="line_amount"/>
+    </resultMap>
+
+    <insert id="insertOrder" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO orders (user_id, status, total_amount)
+        VALUES (#{userId}, #{status}, #{totalAmount})
+    </insert>
+
+    <insert id="insertOrderItem" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO order_items (order_id, product_id, name, price, quantity, line_amount)
+        VALUES (#{orderId}, #{productId}, #{name}, #{price}, #{quantity}, #{lineAmount})
+    </insert>
+
+    <select id="selectOrderById" resultMap="orderResultMap">
+        SELECT * FROM orders WHERE id = #{id}
+    </select>
+
+    <select id="selectOrderByIdAndUserId" resultMap="orderResultMap">
+        SELECT * FROM orders WHERE id = #{id} AND user_id = #{userId}
+    </select>
+
+    <select id="selectOrdersByUserId" resultMap="orderResultMap">
+        SELECT * FROM orders WHERE user_id = #{userId} ORDER BY id DESC
+    </select>
+
+    <select id="selectAllOrders" resultMap="orderResultMap">
+        SELECT * FROM orders ORDER BY id DESC LIMIT #{limit} OFFSET #{offset}
+    </select>
+
+    <select id="countAllOrders" resultType="long">
+        SELECT COUNT(*) FROM orders
+    </select>
+
+    <select id="selectItemsByOrderId" resultMap="orderItemResultMap">
+        SELECT * FROM order_items WHERE order_id = #{orderId}
+    </select>
+
+    <update id="updateOrderStatus">
+        UPDATE orders SET status = #{status} WHERE id = #{id}
+    </update>
+
+</mapper>
+

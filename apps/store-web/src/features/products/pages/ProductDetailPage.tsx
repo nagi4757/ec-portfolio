@@ -46,9 +46,9 @@ export default function ProductDetailPage() {
     }
 
     return (
-        <div style={{ padding: 24, maxWidth: 960, margin: '0 auto' }}>
+        <div style={{ padding: 'clamp(12px, 4vw, 24px)', maxWidth: 960, margin: '0 auto' }}>
             <Link to="/" style={{ display: 'inline-block', marginBottom: 16 }}>← 목록으로</Link>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 24 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 20 }}>
                 <div style={{ border: '1px solid #eee', borderRadius: 12, overflow: 'hidden', background: '#fff' }}>
                     {data.imageUrl ? (
                         <img src={data.imageUrl} alt={data.name} style={{ width: '100%', objectFit: 'cover' }} />
@@ -62,7 +62,7 @@ export default function ProductDetailPage() {
                         {data.price.toLocaleString()} 円
                     </div>
                     <p style={{ lineHeight: 1.6, color: '#333' }}>{data.description ?? '상품 설명 없음'}</p>
-                    <div style={{ marginTop: 16, display: 'flex', gap: 8 }}>
+                    <div style={{ marginTop: 16, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                         <button onClick={addToCart} disabled={adding}>
                             {adding ? '담는 중...' : '장바구니 담기'}
                         </button>

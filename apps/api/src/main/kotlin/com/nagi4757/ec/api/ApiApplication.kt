@@ -1,16 +1,19 @@
 package com.nagi4757.ec.api
 
+import org.apache.ibatis.annotations.Mapper
 import org.mybatis.spring.annotation.MapperScan
+import org.mybatis.spring.annotation.MapperScans
 import org.springframework.boot.autoconfigure.SpringBootApplication
 import org.springframework.boot.runApplication
 
 @SpringBootApplication
-// 하위 패키지까지 스캔되므로 상위 패키지 하나만 지정해도 됩니다.
-@MapperScan(
-	basePackages = [
-		"com.nagi4757.ec.api.infra.mbg.mapper",   // MBG 생성 Mapper
-		//"com.nagi4757.ec.api.product.infra.mapper",   // (있다면) 수동 확장 Mapper
-		//"com.nagi4757.ec.api.category.infra.mapper"   // (있다면) 수동 확장 Mapper
+@MapperScans(
+	value = [
+		MapperScan(basePackages = ["com.nagi4757.ec.api.infra.mbg.mapper"]), // MBG 생성 Mapper
+		MapperScan(
+			basePackages = ["com.nagi4757.ec.api"],
+			annotationClass = Mapper::class // 수동 Mapper(@Mapper) 자동 스캔
+		)
 	]
 )
 class ApiApplication

@@ -39,30 +39,32 @@ export default function AdminCategoryListPage() {
             {loading ? (
                 <div>Loading...</div>
             ) : (
-                <table border={1} cellPadding={8}>
-                    <thead>
-                        <tr>
-                            <th>ID</th><th>Name</th><th>Description</th><th>Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {items.map((c) => (
-                            <tr key={c.id}>
-                                <td>{c.id}</td>
-                                <td>{c.name}</td>
-                                <td>{c.description}</td>
-                                <td>
-                                    <Link to={`/categories/${c.id}/edit`}>Edit</Link>
-                                    {' | '}
-                                    <button onClick={() => onDelete(c.id)}>Delete</button>
-                                </td>
+                <div style={{ overflowX: 'auto' }}>
+                    <table border={1} cellPadding={8} style={{ minWidth: 640, width: '100%', background: '#fff' }}>
+                        <thead>
+                            <tr>
+                                <th>ID</th><th>Name</th><th>Description</th><th>Actions</th>
                             </tr>
-                        ))}
-                        {items.length === 0 && (
-                            <tr><td colSpan={4}>No data</td></tr>
-                        )}
-                    </tbody>
-                </table>
+                        </thead>
+                        <tbody>
+                            {items.map((c) => (
+                                <tr key={c.id}>
+                                    <td>{c.id}</td>
+                                    <td>{c.name}</td>
+                                    <td>{c.description}</td>
+                                    <td>
+                                        <Link to={`/categories/${c.id}/edit`}>Edit</Link>
+                                        {' | '}
+                                        <button onClick={() => onDelete(c.id)}>Delete</button>
+                                    </td>
+                                </tr>
+                            ))}
+                            {items.length === 0 && (
+                                <tr><td colSpan={4}>No data</td></tr>
+                            )}
+                        </tbody>
+                    </table>
+                </div>
             )}
         </div>
     )
