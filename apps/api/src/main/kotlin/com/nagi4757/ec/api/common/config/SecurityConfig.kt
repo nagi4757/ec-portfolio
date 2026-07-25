@@ -1,7 +1,8 @@
 package com.nagi4757.ec.api.common.config
 
 import com.nagi4757.ec.api.common.security.JwtAuthenticationFilter
-import jakarta.servlet.http.HttpServletResponse
+import com.nagi4757.ec.api.common.security.RestAccessDeniedHandler
+import com.nagi4757.ec.api.common.security.RestAuthenticationEntryPoint
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 import org.springframework.http.HttpMethod
@@ -17,7 +18,9 @@ import org.springframework.web.cors.UrlBasedCorsConfigurationSource
 
 @Configuration
 class SecurityConfig(
-    private val jwtAuthenticationFilter: JwtAuthenticationFilter
+    private val jwtAuthenticationFilter: JwtAuthenticationFilter,
+    private val restAuthenticationEntryPoint: RestAuthenticationEntryPoint,
+    private val restAccessDeniedHandler: RestAccessDeniedHandler
 ) {
     @Bean
     fun passwordEncoder(): PasswordEncoder = BCryptPasswordEncoder()
@@ -52,9 +55,8 @@ class SecurityConfig(
             .cors { }
             .sessionManagement { it.sessionCreationPolicy(SessionCreationPolicy.STATELESS) }
             .exceptionHandling {
-                it.authenticationEntryPoint { _, response, _ ->
-                    response.sendError(HttpServletResponse.SC_UNAUTHORIZED)
-                }
+                it.authenticationEntryPoint(restAuthenticationEntryPoint)
+                it.accessDeniedHandler(restAccessDeniedHandler)
             }
             .authorizeHttpRequests {
                 it
@@ -69,4 +71,3 @@ class SecurityConfig(
         return http.build()
     }
 }
-

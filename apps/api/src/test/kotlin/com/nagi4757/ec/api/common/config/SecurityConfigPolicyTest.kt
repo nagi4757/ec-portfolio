@@ -1,5 +1,6 @@
 package com.nagi4757.ec.api.common.config
 
+import com.nagi4757.ec.api.common.security.JwtTokenProvider
 import org.apache.ibatis.mapping.Environment
 import org.apache.ibatis.session.Configuration
 import org.apache.ibatis.session.SqlSessionFactory
@@ -13,6 +14,7 @@ import org.springframework.boot.test.context.SpringBootTest
 import org.springframework.boot.test.context.TestConfiguration
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Import
+import org.springframework.http.MediaType
 import org.springframework.test.web.servlet.MockMvc
 import org.springframework.test.web.servlet.get
 import org.springframework.web.bind.annotation.GetMapping
@@ -31,7 +33,8 @@ import javax.sql.DataSource
 @AutoConfigureMockMvc
 @Import(SecurityConfigPolicyTest.TestApiConfig::class)
 class SecurityConfigPolicyTest(
-    @Autowired private val mockMvc: MockMvc
+    @Autowired private val mockMvc: MockMvc,
+    @Autowired private val jwtTokenProvider: JwtTokenProvider
 ) {
     @Test
     fun `public endpoint is allowed without authentication`() {
@@ -47,6 +50,12 @@ class SecurityConfigPolicyTest(
         mockMvc.get("/api/user/ping")
             .andExpect {
                 status { isUnauthorized() }
+                content { contentTypeCompatibleWith(MediaType.APPLICATION_JSON) }
+                jsonPath("$.status") { value(401) }
+                jsonPath("$.code") { value("UNAUTHORIZED") }
+                jsonPath("$.message") { value("Authentication is required") }
+                jsonPath("$.path") { value("/api/user/ping") }
+                jsonPath("$.fieldErrors") { isArray() }
             }
     }
 
@@ -55,7 +64,45 @@ class SecurityConfigPolicyTest(
         mockMvc.get("/api/admin/ping")
             .andExpect {
                 status { isUnauthorized() }
+                jsonPath("$.code") { value("UNAUTHORIZED") }
             }
+    }
+
+    @Test
+    fun `user role is forbidden from admin endpoint`() {
+        val token = jwtTokenProvider.createAccessToken(
+            userId = 1L,
+            email = "user@example.com",
+            role = "USER"
+        )
+
+        mockMvc.get("/api/admin/ping") {
+            header("Authorization", "Bearer $token")
+        }.andExpect {
+            status { isForbidden() }
+            content { contentTypeCompatibleWith(MediaType.APPLICATION_JSON) }
+            jsonPath("$.status") { value(403) }
+            jsonPath("$.code") { value("ACCESS_DENIED") }
+            jsonPath("$.message") { value("Access is denied") }
+            jsonPath("$.path") { value("/api/admin/ping") }
+            jsonPath("$.fieldErrors") { isArray() }
+        }
+    }
+
+    @Test
+    fun `admin role can access admin endpoint`() {
+        val token = jwtTokenProvider.createAccessToken(
+            userId = 1L,
+            email = "admin@example.com",
+            role = "ADMIN"
+        )
+
+        mockMvc.get("/api/admin/ping") {
+            header("Authorization", "Bearer $token")
+        }.andExpect {
+            status { isOk() }
+            content { string("admin-ok") }
+        }
     }
 
     @RestController
@@ -85,7 +132,4 @@ class SecurityConfigPolicyTest(
             }
     }
 }
-
-
-
 

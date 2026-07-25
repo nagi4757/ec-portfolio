@@ -1,5 +1,7 @@
 package com.nagi4757.ec.api.product.presentation.public
 
+import com.nagi4757.ec.api.common.error.ApiErrorCode
+import com.nagi4757.ec.api.common.error.ResourceNotFoundException
 import com.nagi4757.ec.api.product.application.ProductService
 import com.nagi4757.ec.api.product.presentation.shared.ProductListResponse
 import com.nagi4757.ec.api.product.presentation.shared.ProductResponse
@@ -35,5 +37,6 @@ class ProductPublicController(
 
     @GetMapping("/{id}")
     fun get(@PathVariable id: Long): ProductResponse =
-        productService.get(id)?.toResponse() ?: error("Product($id) not found")
+        productService.get(id)?.toResponse()
+            ?: throw ResourceNotFoundException(ApiErrorCode.PRODUCT_NOT_FOUND)
 }

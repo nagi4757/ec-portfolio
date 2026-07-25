@@ -6,6 +6,8 @@ import com.nagi4757.ec.api.category.application.command.UpdateCategoryCommand
 import com.nagi4757.ec.api.category.presentation.shared.CategoryRequest
 import com.nagi4757.ec.api.category.presentation.shared.CategoryResponse
 import com.nagi4757.ec.api.category.presentation.shared.toResponse
+import com.nagi4757.ec.api.common.error.ApiErrorCode
+import com.nagi4757.ec.api.common.error.ResourceNotFoundException
 import jakarta.validation.Valid
 import org.springframework.web.bind.annotation.DeleteMapping
 import org.springframework.web.bind.annotation.GetMapping
@@ -27,7 +29,8 @@ class CategoryAdminController(
 
     @GetMapping("/{id}")
     fun get(@PathVariable id: Long): CategoryResponse =
-        categoryService.get(id)?.toResponse() ?: error("Category($id) not found")
+        categoryService.get(id)?.toResponse()
+            ?: throw ResourceNotFoundException(ApiErrorCode.CATEGORY_NOT_FOUND)
 
     @PostMapping
     fun create(
@@ -62,4 +65,3 @@ class CategoryAdminController(
         categoryService.delete(id)
     }
 }
-
