@@ -1,15 +1,16 @@
 package com.nagi4757.ec.api.order.application
 
 import com.nagi4757.ec.api.cart.application.CartService
+import com.nagi4757.ec.api.common.error.ApiErrorCode
+import com.nagi4757.ec.api.common.error.EmptyCartException
+import com.nagi4757.ec.api.common.error.ResourceNotFoundException
 import com.nagi4757.ec.api.order.domain.model.Order
 import com.nagi4757.ec.api.order.domain.model.OrderItem
 import com.nagi4757.ec.api.order.domain.model.OrderStatus
 import com.nagi4757.ec.api.order.domain.repository.OrderPage
 import com.nagi4757.ec.api.order.domain.repository.OrderRepository
-import org.springframework.http.HttpStatus
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
-import org.springframework.web.server.ResponseStatusException
 
 @Service
 class OrderService(
@@ -20,8 +21,7 @@ class OrderService(
     @Transactional
     fun placeOrder(userId: Long): Order {
         val cart = cartService.getCart(userId)
-        if (cart.items.isEmpty())
-            throw ResponseStatusException(HttpStatus.BAD_REQUEST, "Cart is empty")
+        if (cart.items.isEmpty()) throw EmptyCartException()
 
         val order = Order(
             id = null,
@@ -53,7 +53,7 @@ class OrderService(
     /* 내 주문 상세 */
     fun getOrder(userId: Long, orderId: Long): Order =
         orderRepository.findByIdAndUserId(orderId, userId)
-            ?: throw ResponseStatusException(HttpStatus.NOT_FOUND, "Order($orderId) not found")
+            ?: throw ResourceNotFoundException(ApiErrorCode.ORDER_NOT_FOUND)
 
     /* 어드민: 전체 주문 목록 */
     fun listAllOrders(page: Int, size: Int): OrderPage = orderRepository.findAll(page, size)
@@ -61,15 +61,14 @@ class OrderService(
     /* 어드민: 주문 상세 */
     fun getOrderAdmin(orderId: Long): Order =
         orderRepository.findById(orderId)
-            ?: throw ResponseStatusException(HttpStatus.NOT_FOUND, "Order($orderId) not found")
+            ?: throw ResourceNotFoundException(ApiErrorCode.ORDER_NOT_FOUND)
 
     /* 어드민: 주문 상태 변경 */
     @Transactional
     fun updateStatus(orderId: Long, status: OrderStatus): Order {
         orderRepository.findById(orderId)
-            ?: throw ResponseStatusException(HttpStatus.NOT_FOUND, "Order($orderId) not found")
+            ?: throw ResourceNotFoundException(ApiErrorCode.ORDER_NOT_FOUND)
         orderRepository.updateStatus(orderId, status)
         return getOrderAdmin(orderId)
     }
 }
-

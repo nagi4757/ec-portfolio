@@ -1,11 +1,12 @@
 package com.nagi4757.ec.api.cart.application
 
 import com.nagi4757.ec.api.cart.domain.repository.CartRepository
+import com.nagi4757.ec.api.common.error.ApiErrorCode
+import com.nagi4757.ec.api.common.error.InvalidCartQuantityException
+import com.nagi4757.ec.api.common.error.ResourceNotFoundException
 import com.nagi4757.ec.api.product.application.ProductService
-import org.springframework.http.HttpStatus
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
-import org.springframework.web.server.ResponseStatusException
 
 @Service
 class CartService(
@@ -35,7 +36,7 @@ class CartService(
 
     @Transactional
     fun addItem(userId: Long, productId: Long, quantity: Int): CartView {
-        if (quantity <= 0) throw ResponseStatusException(HttpStatus.BAD_REQUEST, "quantity must be positive")
+        if (quantity <= 0) throw InvalidCartQuantityException()
         ensureProductExists(productId)
         cartRepository.increment(userId, productId, quantity)
         return getCart(userId)
@@ -66,7 +67,7 @@ class CartService(
 
     private fun ensureProductExists(productId: Long) {
         if (productService.get(productId) == null) {
-            throw ResponseStatusException(HttpStatus.NOT_FOUND, "Product($productId) not found")
+            throw ResourceNotFoundException(ApiErrorCode.PRODUCT_NOT_FOUND)
         }
     }
 }
@@ -85,4 +86,3 @@ data class CartView(
     val totalQuantity: Int,
     val totalAmount: Long
 )
-

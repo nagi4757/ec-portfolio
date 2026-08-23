@@ -15,22 +15,20 @@ const statusColor: Record<string, string> = {
 
 export default function OrderListPage() {
     const navigate = useNavigate()
+    const isLoggedIn = authStore.isLoggedIn()
     const [orders, setOrders] = useState<OrderSummary[]>([])
-    const [loading, setLoading] = useState(true)
+    const [loading, setLoading] = useState(isLoggedIn)
     const [error, setError] = useState<string | null>(null)
 
     useEffect(() => {
-        if (!authStore.isLoggedIn()) {
-            setLoading(false)
-            return
-        }
+        if (!isLoggedIn) return
         OrderAPI.list()
             .then(setOrders)
             .catch((e) => setError(e.message))
             .finally(() => setLoading(false))
-    }, [])
+    }, [isLoggedIn])
 
-    if (!authStore.isLoggedIn()) {
+    if (!isLoggedIn) {
         return (
             <div style={{ padding: 24 }}>
                 <h1>주문 내역</h1>
@@ -100,4 +98,3 @@ const badgeStyle: React.CSSProperties = {
     fontSize: 12,
     fontWeight: 600,
 }
-

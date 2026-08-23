@@ -3,6 +3,8 @@ package com.nagi4757.ec.api.order.application
 import com.nagi4757.ec.api.cart.application.CartLine
 import com.nagi4757.ec.api.cart.application.CartService
 import com.nagi4757.ec.api.cart.application.CartView
+import com.nagi4757.ec.api.common.error.ApiErrorCode
+import com.nagi4757.ec.api.common.error.ApplicationException
 import com.nagi4757.ec.api.order.domain.model.Order
 import com.nagi4757.ec.api.order.domain.model.OrderStatus
 import com.nagi4757.ec.api.order.domain.repository.OrderPage
@@ -13,8 +15,6 @@ import org.junit.jupiter.api.Test
 import org.mockito.Mockito.verify
 import org.mockito.Mockito.`when`
 import org.mockito.Mockito.mock
-import org.springframework.http.HttpStatus
-import org.springframework.web.server.ResponseStatusException
 import java.time.LocalDateTime
 
 class OrderServiceTest {
@@ -64,11 +64,11 @@ class OrderServiceTest {
         val userId = 7L
         `when`(cartService.getCart(userId)).thenReturn(CartView(emptyList(), 0, 0))
 
-        val ex = assertThrows(ResponseStatusException::class.java) {
+        val ex = assertThrows(ApplicationException::class.java) {
             orderService.placeOrder(userId)
         }
 
-        assertEquals(HttpStatus.BAD_REQUEST, ex.statusCode)
+        assertEquals(ApiErrorCode.EMPTY_CART, ex.errorCode)
         assertEquals(0, orderRepository.savedOrders.size)
     }
 
@@ -78,11 +78,24 @@ class OrderServiceTest {
         val cartService = mock(CartService::class.java)
         val orderService = OrderService(orderRepository, cartService)
 
-        val ex = assertThrows(ResponseStatusException::class.java) {
+        val ex = assertThrows(ApplicationException::class.java) {
             orderService.getOrder(7L, 1L)
         }
 
-        assertEquals(HttpStatus.NOT_FOUND, ex.statusCode)
+        assertEquals(ApiErrorCode.ORDER_NOT_FOUND, ex.errorCode)
+    }
+
+    @Test
+    fun `getOrderAdmin throws order not found when order does not exist`() {
+        val orderRepository = FakeOrderRepository()
+        val cartService = mock(CartService::class.java)
+        val orderService = OrderService(orderRepository, cartService)
+
+        val ex = assertThrows(ApplicationException::class.java) {
+            orderService.getOrderAdmin(999L)
+        }
+
+        assertEquals(ApiErrorCode.ORDER_NOT_FOUND, ex.errorCode)
     }
 
     @Test
@@ -151,5 +164,3 @@ class OrderServiceTest {
         }
     }
 }
-
-

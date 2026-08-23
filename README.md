@@ -70,11 +70,12 @@ ec-portfolio/
 | 항목 | 버전 | 용도 |
 |------|------|------|
 | Java | 21 | 백엔드 로컬 실행 (Docker 사용 시 불필요) |
+| MariaDB | 10.11 | Flyway 호환성이 검증된 장기 지원 DB 버전 |
 | Node.js | 18+ | 프론트 의존성 설치 및 개발 서버 |
 | npm | - | 프론트 패키지 관리 |
 | Docker Desktop | 최신 권장 | 백엔드 전체 스택 실행 (API + MariaDB + Redis) |
 
-> **참고:** MyBatis Generator는 `./gradlew bootRun` 또는 Docker 빌드 시 자동으로 실행됩니다. 별도 설치나 수동 실행이 필요하지 않습니다.
+> **참고:** MyBatis Mapper는 소스에 명시적으로 관리되므로 빌드 시 실행 중인 DB가 필요하지 않습니다.
 
 ---
 
@@ -105,6 +106,10 @@ npm install
 cd ec-portfolio
 docker compose up -d --build
 ```
+
+Compose 환경은 Flyway 호환성을 위해 MariaDB `10.11` 버전으로 고정되어 있습니다.
+
+> **MariaDB 볼륨 주의:** MariaDB 11.x에서 생성한 데이터 볼륨을 10.11 컨테이너에 직접 연결하는 인플레이스 다운그레이드는 지원되지 않습니다. 이를 방지하기 위해 Compose는 `mariadb-10-11-data`와 `redis-10-11-data` 볼륨을 새로 사용하며, 기존 `mariadb-data`와 `redis-data` 볼륨은 자동으로 삭제하지 않습니다. Redis도 함께 분리하여 이전 DB 사용자와 캐시 데이터가 섞이지 않게 합니다. 기존 데이터가 필요하면 논리 백업 후 새 10.11 볼륨에 복원하세요. 로컬 테스트 데이터가 불필요한 경우에만 `docker compose down -v`로 현재 볼륨을 초기화하세요. 이 명령은 MariaDB와 Redis 데이터를 모두 삭제합니다.
 
 #### 스키마 변경(Flyway) 반영 방법
 
@@ -182,11 +187,9 @@ cd ec-portfolio/apps/api
 (`ApiApplication.kt`는 `@Mapper` 기반 자동 스캔으로 설정되어 있습니다.)
 
 ```kotlin
-@MapperScans(
-    value = [
-        MapperScan(basePackages = ["com.nagi4757.ec.api.infra.mbg.mapper"]),
-        MapperScan(basePackages = ["com.nagi4757.ec.api"], annotationClass = Mapper::class)
-    ]
+@MapperScan(
+    basePackages = ["com.nagi4757.ec.api"],
+    annotationClass = Mapper::class
 )
 ```
 
@@ -298,7 +301,7 @@ npm run build
 ## 참고
 
 - DB 마이그레이션은 Flyway로 자동 적용됩니다.
-- MyBatis Generator는 `apps/api/build/generated/mbg` 아래에 생성됩니다.
+- API Docker 이미지는 multi-stage build로 실행 JAR만 포함하며 non-root 사용자로 실행됩니다.
 - 인증 토큰 만료(401) 시 프론트에서 자동 로그아웃 처리합니다.
 
 ### 백엔드 레이어 일관성 체크리스트
@@ -320,4 +323,3 @@ cd ec-portfolio/apps/api
 ./gradlew compileKotlin --no-daemon
 ./gradlew bootRun --no-daemon
 ```
-

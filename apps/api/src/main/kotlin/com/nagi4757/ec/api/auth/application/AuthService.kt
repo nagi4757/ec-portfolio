@@ -7,11 +7,12 @@ import com.nagi4757.ec.api.auth.domain.model.User
 import com.nagi4757.ec.api.auth.domain.model.UserRole
 import com.nagi4757.ec.api.auth.domain.repository.UserRepository
 import com.nagi4757.ec.api.common.security.JwtTokenProvider
-import org.springframework.http.HttpStatus
+import com.nagi4757.ec.api.common.error.EmailAlreadyExistsException
+import com.nagi4757.ec.api.common.error.InvalidCredentialsException
+import com.nagi4757.ec.api.common.error.UserCreationFailedException
 import org.springframework.security.crypto.password.PasswordEncoder
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
-import org.springframework.web.server.ResponseStatusException
 
 @Service
 class AuthService(
@@ -23,7 +24,7 @@ class AuthService(
     fun signUp(cmd: SignUpCommand): AuthResult {
         val exists = userRepository.findByEmail(cmd.email)
         if (exists != null) {
-            throw ResponseStatusException(HttpStatus.CONFLICT, "Email already exists")
+            throw EmailAlreadyExistsException()
         }
 
         val id = userRepository.create(
@@ -36,7 +37,7 @@ class AuthService(
         )
 
         val created = userRepository.findById(id)
-            ?: throw ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "User creation failed")
+            ?: throw UserCreationFailedException()
 
         val token = jwtTokenProvider.createAccessToken(
             userId = requireNotNull(created.id),
@@ -50,10 +51,10 @@ class AuthService(
     @Transactional(readOnly = true)
     fun login(cmd: LoginCommand): AuthResult {
         val user = userRepository.findByEmail(cmd.email)
-            ?: throw ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid credentials")
+            ?: throw InvalidCredentialsException()
 
         if (!passwordEncoder.matches(cmd.password, user.passwordHash)) {
-            throw ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid credentials")
+            throw InvalidCredentialsException()
         }
 
         val token = jwtTokenProvider.createAccessToken(
@@ -68,4 +69,3 @@ class AuthService(
     @Transactional(readOnly = true)
     fun getById(id: Long): User? = userRepository.findById(id)
 }
-

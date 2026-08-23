@@ -8,3 +8,15 @@ open class ApplicationException(
 class ResourceNotFoundException(
     errorCode: ApiErrorCode
 ) : ApplicationException(errorCode)
+
+class EmptyCartException : ApplicationException(ApiErrorCode.EMPTY_CART)
+
+class InvalidCartQuantityException : ApplicationException(ApiErrorCode.INVALID_CART_QUANTITY)
+
+class InvalidOrderStatusException : ApplicationException(ApiErrorCode.INVALID_ORDER_STATUS)
+
+class EmailAlreadyExistsException : ApplicationException(ApiErrorCode.EMAIL_ALREADY_EXISTS)
+
+class InvalidCredentialsException : ApplicationException(ApiErrorCode.INVALID_CREDENTIALS)
+
+class UserCreationFailedException : ApplicationException(ApiErrorCode.USER_CREATION_FAILED)

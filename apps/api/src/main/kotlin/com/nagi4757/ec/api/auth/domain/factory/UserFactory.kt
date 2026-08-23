@@ -2,13 +2,13 @@ package com.nagi4757.ec.api.auth.domain.factory
 
 import com.nagi4757.ec.api.auth.domain.model.User
 import com.nagi4757.ec.api.auth.domain.model.UserRole
-import com.nagi4757.ec.api.infra.mbg.model.User as MbUser
+import com.nagi4757.ec.api.auth.infra.mapper.UserRecord
 import org.springframework.stereotype.Component
 import java.time.Instant
 
 @Component
 class UserFactory {
-    fun fromMb(src: MbUser): User =
+    fun fromRecord(src: UserRecord): User =
         User(
             id = src.id,
             email = src.email ?: "",
@@ -18,8 +18,8 @@ class UserFactory {
             createdAt = src.createdAt?.toInstant()
         )
 
-    fun toMb(src: User): MbUser =
-        MbUser().apply {
+    fun toRecord(src: User): UserRecord =
+        UserRecord().apply {
             id = src.id
             email = src.email
             passwordHash = src.passwordHash
@@ -28,4 +28,3 @@ class UserFactory {
             createdAt = src.createdAt?.let { java.util.Date.from(it) } ?: java.util.Date.from(Instant.now())
         }
 }
-

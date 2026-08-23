@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { OrderAdminApi } from '@/features/orders/api'
 import { ORDER_STATUS_LABEL, ORDER_STATUS_OPTIONS } from '@/types/order'
@@ -19,18 +19,18 @@ export default function AdminOrderListPage() {
     const [error, setError] = useState<string | null>(null)
     const [updatingId, setUpdatingId] = useState<number | null>(null)
 
-    useEffect(() => {
-        load()
-    }, [page])
-
-    function load() {
+    const load = useCallback(() => {
         setLoading(true)
         setError(null)
         OrderAdminApi.list(page, 20)
             .then(setData)
             .catch((e) => setError(e.message))
             .finally(() => setLoading(false))
-    }
+    }, [page])
+
+    useEffect(() => {
+        load()
+    }, [load])
 
     async function changeStatus(id: number, status: string) {
         setUpdatingId(id)
@@ -176,4 +176,3 @@ const badgeStyle: React.CSSProperties = {
     fontSize: 12,
     fontWeight: 600,
 }
-

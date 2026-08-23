@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import type { Category, CreateCategory, UpdateCategory } from '@/types/category'
 
 type Props = {
@@ -10,11 +10,6 @@ type Props = {
 export default function CategoryForm({ initial, onSubmit, submitting }: Props) {
     const [name, setName] = useState(initial?.name ?? '')
     const [description, setDescription] = useState(initial?.description ?? '')
-
-    useEffect(() => {
-        setName(initial?.name ?? '')
-        setDescription(initial?.description ?? '')
-    }, [initial])
 
     return (
         <form
@@ -43,4 +38,3 @@ export default function CategoryForm({ initial, onSubmit, submitting }: Props) {
         </form>
     )
 }
-

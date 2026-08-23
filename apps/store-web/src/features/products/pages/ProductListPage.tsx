@@ -6,9 +6,11 @@ import { ProductCard } from '../components/ProductCard';
 const PAGE_SIZE = 8;
 
 export default function ProductListPage() {
-    const [data, setData] = useState<ProductListResponse | null>(null);
-    const [err, setErr] = useState<string | null>(null);
-    const [loading, setLoading] = useState(true);
+    const [queryResult, setQueryResult] = useState<{
+        requestKey: string | null;
+        data: ProductListResponse | null;
+        error: string | null;
+    }>({ requestKey: null, data: null, error: null });
 
     const [keywordInput, setKeywordInput] = useState('');
     const [keyword, setKeyword] = useState('');
@@ -26,14 +28,25 @@ export default function ProductListPage() {
         size: PAGE_SIZE,
     }), [keyword, minPrice, maxPrice, sort, page]);
 
+    const requestKey = JSON.stringify(searchParams);
+
     useEffect(() => {
-        setLoading(true);
-        setErr(null);
+        let active = true;
+
         ProductAPI.list(searchParams)
-            .then(setData)
-            .catch((e) => setErr(e.message))
-            .finally(() => setLoading(false));
-    }, [searchParams]);
+            .then((data) => {
+                if (active) setQueryResult({ requestKey, data, error: null });
+            })
+            .catch((error: unknown) => {
+                if (!active) return;
+                const message = error instanceof Error ? error.message : '상품 조회에 실패했습니다.';
+                setQueryResult({ requestKey, data: null, error: message });
+            });
+
+        return () => {
+            active = false;
+        };
+    }, [requestKey, searchParams]);
 
     function applyFilters() {
         setPage(1);
@@ -49,9 +62,10 @@ export default function ProductListPage() {
         setPage(1);
     }
 
-    if (loading) return <div style={{ padding: 24 }}>Loading...</div>;
-    if (err) return <div style={{ padding: 24, color: 'crimson' }}>Error: {err}</div>;
+    if (queryResult.requestKey !== requestKey) return <div style={{ padding: 24 }}>Loading...</div>;
+    if (queryResult.error) return <div style={{ padding: 24, color: 'crimson' }}>Error: {queryResult.error}</div>;
 
+    const data = queryResult.data;
     const products = data?.items ?? [];
 
     return (

@@ -8,7 +8,6 @@ import org.apache.ibatis.session.SqlSessionFactory
 import org.apache.ibatis.mapping.Environment
 import org.apache.ibatis.transaction.jdbc.JdbcTransactionFactory
 import javax.sql.DataSource
-import org.mybatis.spring.annotation.MapperScan
 import org.springframework.boot.test.context.TestConfiguration
 import org.springframework.context.annotation.Bean
 import org.springframework.boot.test.context.SpringBootTest
@@ -21,7 +20,6 @@ import org.springframework.boot.test.context.SpringBootTest
 		"spring.main.lazy-initialization=true"
 	]
 )
-@MapperScan("com.nagi4757.ec.api.infra.mbg.mapper")
 class ApiApplicationTests {
 	@Test fun contextLoads() {}
 

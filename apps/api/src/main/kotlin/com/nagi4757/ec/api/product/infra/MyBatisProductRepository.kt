@@ -1,7 +1,6 @@
 package com.nagi4757.ec.api.product.infra
 
-import com.nagi4757.ec.api.infra.mbg.mapper.ProductMapper
-import com.nagi4757.ec.api.infra.mbg.model.ProductExample
+import com.nagi4757.ec.api.product.infra.mapper.ProductMapper
 import com.nagi4757.ec.api.product.domain.factory.ProductFactory
 import com.nagi4757.ec.api.product.domain.model.Product
 import com.nagi4757.ec.api.product.domain.repository.ProductRepository
@@ -16,14 +15,12 @@ class MyBatisProductRepository(
     private val factory: ProductFactory
 ) : ProductRepository {
     override fun findById(id: Long): Product? {
-        val row = mapper.selectByPrimaryKey(id)
-        return row?.let(factory::fromMb)
+        val row = mapper.selectById(id)
+        return row?.let(factory::fromRecord)
     }
 
     override fun findAll(): List<Product> {
-        val example = ProductExample() // 전체 조회
-        val rows = mapper.selectByExample(example)
-        return rows.map(factory::fromMb)
+        return mapper.selectAll().map(factory::fromRecord)
     }
 
     override fun search(condition: ProductSearchCondition): ProductSearchResult {
@@ -31,22 +28,24 @@ class MyBatisProductRepository(
         val safeSize = condition.size.coerceIn(1, 100)
         val offset = (safePage - 1) * safeSize
 
-        val countExample = buildSearchExample(condition)
-        val total = mapper.countByExample(countExample)
-
-        val dataExample = buildSearchExample(condition)
-        dataExample.orderByClause = when (condition.sort) {
-            "priceAsc" -> "price asc limit $safeSize offset $offset"
-            "priceDesc" -> "price desc limit $safeSize offset $offset"
-            "nameAsc" -> "name asc limit $safeSize offset $offset"
-            else -> "id desc limit $safeSize offset $offset"
+        val keyword = condition.keyword?.trim()?.takeIf(String::isNotEmpty)
+        val total = mapper.countSearch(keyword, condition.minPrice, condition.maxPrice)
+        val rows = if (total == 0L) {
+            emptyList()
+        } else {
+            mapper.search(
+                keyword = keyword,
+                minPrice = condition.minPrice,
+                maxPrice = condition.maxPrice,
+                sort = condition.sort,
+                offset = offset,
+                limit = safeSize
+            )
         }
-
-        val rows = if (total == 0L) emptyList() else mapper.selectByExample(dataExample)
         val totalPages = if (total == 0L) 0 else ((total + safeSize - 1) / safeSize).toInt()
 
         return ProductSearchResult(
-            items = rows.map(factory::fromMb),
+            items = rows.map(factory::fromRecord),
             page = safePage,
             size = safeSize,
             total = total,
@@ -56,50 +55,20 @@ class MyBatisProductRepository(
 
     @Transactional
     override fun create(product: Product): Long {
-        val row = factory.toMb(product)
-        // MBG가 useGeneratedKeys 설정 시 id 채워짐
-        mapper.insertSelective(row)
+        val row = factory.toRecord(product)
+        mapper.insert(row)
         return row.id ?: error("Failed to get generated id")
     }
 
     @Transactional
     override fun update(product: Product): Boolean {
         requireNotNull(product.id) { "id is required for update" }
-        val row = factory.toMb(product)
-        return mapper.updateByPrimaryKeySelective(row) > 0
+        val row = factory.toRecord(product)
+        return mapper.update(row) > 0
     }
 
     @Transactional
     override fun delete(id: Long): Boolean {
-        return mapper.deleteByPrimaryKey(id) > 0
-    }
-
-    private fun buildSearchExample(condition: ProductSearchCondition): ProductExample {
-        val example = ProductExample()
-        val keyword = condition.keyword?.trim()?.takeIf { it.isNotEmpty() }
-
-        if (keyword == null) {
-            val criteria = example.createCriteria()
-            applyPriceFilter(criteria, condition)
-            return example
-        }
-
-        val like = "%$keyword%"
-
-        val nameCriteria = example.createCriteria().andNameLike(like)
-        applyPriceFilter(nameCriteria, condition)
-
-        val descCriteria = example.or().andDescriptionLike(like)
-        applyPriceFilter(descCriteria, condition)
-
-        return example
-    }
-
-    private fun applyPriceFilter(
-        criteria: ProductExample.Criteria,
-        condition: ProductSearchCondition
-    ) {
-        condition.minPrice?.let { criteria.andPriceGreaterThanOrEqualTo(it) }
-        condition.maxPrice?.let { criteria.andPriceLessThanOrEqualTo(it) }
+        return mapper.delete(id) > 0
     }
 }

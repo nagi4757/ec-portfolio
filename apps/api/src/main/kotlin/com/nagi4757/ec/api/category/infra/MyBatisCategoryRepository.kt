@@ -3,8 +3,7 @@ package com.nagi4757.ec.api.category.infra
 import com.nagi4757.ec.api.category.domain.factory.CategoryFactory
 import com.nagi4757.ec.api.category.domain.model.Category
 import com.nagi4757.ec.api.category.domain.repository.CategoryRepository
-import com.nagi4757.ec.api.infra.mbg.mapper.CategoryMapper
-import com.nagi4757.ec.api.infra.mbg.model.CategoryExample
+import com.nagi4757.ec.api.category.infra.mapper.CategoryMapper
 import org.springframework.stereotype.Repository
 import org.springframework.transaction.annotation.Transactional
 
@@ -14,33 +13,30 @@ class MyBatisCategoryRepository(
     private val factory: CategoryFactory
 ) : CategoryRepository {
     override fun findById(id: Long): Category? {
-        val row = mapper.selectByPrimaryKey(id)
-        return row?.let(factory::fromMb)
+        val row = mapper.selectById(id)
+        return row?.let(factory::fromRecord)
     }
 
     override fun findAll(): List<Category> {
-        val example = CategoryExample().apply { orderByClause = "id desc" }
-        val rows = mapper.selectByExample(example)
-        return rows.map(factory::fromMb)
+        return mapper.selectAll().map(factory::fromRecord)
     }
 
     @Transactional
     override fun create(category: Category): Long {
-        val row = factory.toMb(category)
-        mapper.insertSelective(row)
+        val row = factory.toRecord(category)
+        mapper.insert(row)
         return row.id ?: error("Failed to get generated id")
     }
 
     @Transactional
     override fun update(category: Category): Boolean {
         requireNotNull(category.id) { "id is required for update" }
-        val row = factory.toMb(category)
-        return mapper.updateByPrimaryKeySelective(row) > 0
+        val row = factory.toRecord(category)
+        return mapper.update(row) > 0
     }
 
     @Transactional
     override fun delete(id: Long): Boolean {
-        return mapper.deleteByPrimaryKey(id) > 0
+        return mapper.delete(id) > 0
     }
 }
-

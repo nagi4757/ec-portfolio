@@ -5,6 +5,8 @@ import com.nagi4757.ec.api.product.application.command.UpdateProductCommand
 import com.nagi4757.ec.api.product.domain.model.Product
 import com.nagi4757.ec.api.product.domain.repository.ProductRepository
 import com.nagi4757.ec.api.product.domain.repository.ProductSearchCondition
+import com.nagi4757.ec.api.common.error.ApiErrorCode
+import com.nagi4757.ec.api.common.error.ResourceNotFoundException
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
 
@@ -57,12 +59,13 @@ class ProductService(
             description = cmd.description
         )
         val newId = productRepository.create(product)
-        return productRepository.findById(newId)!!
+        return getRequired(newId)
     }
 
     @Transactional
     fun update(id: Long, cmd: UpdateProductCommand): Product {
-        val current = productRepository.findById(id) ?: error("Product($id) not found")
+        val current = productRepository.findById(id)
+            ?: throw ResourceNotFoundException(ApiErrorCode.PRODUCT_NOT_FOUND)
         val updated = current.copy(
             name = cmd.name ?: current.name,
             price = cmd.price ?: current.price,
@@ -70,15 +73,20 @@ class ProductService(
             description = cmd.description ?: current.description
         )
         productRepository.update(updated)
-        return productRepository.findById(id)!!
+        return getRequired(id)
     }
 
     @Transactional
     fun delete(id: Long) {
-        // 존재 확인용
-        get(id)
+        if (productRepository.findById(id) == null) {
+            throw ResourceNotFoundException(ApiErrorCode.PRODUCT_NOT_FOUND)
+        }
         productRepository.delete(id)
     }
+
+    private fun getRequired(id: Long): Product =
+        productRepository.findById(id)
+            ?: throw ResourceNotFoundException(ApiErrorCode.PRODUCT_NOT_FOUND)
 }
 
 data class ProductSearchPage(
@@ -88,4 +96,3 @@ data class ProductSearchPage(
     val total: Long,
     val totalPages: Int
 )
-

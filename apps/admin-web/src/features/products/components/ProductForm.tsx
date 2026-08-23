@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import type { CreateProduct, UpdateProduct, Product } from '@/types/product'
 
 type Props = {
@@ -12,13 +12,6 @@ export default function ProductForm({ initial, onSubmit, submitting }: Props) {
     const [price, setPrice] = useState<number>(initial?.price ?? 0)
     const [imageUrl, setImageUrl] = useState<string>(initial?.imageUrl ?? '')
     const [description, setDescription] = useState<string>(initial?.description ?? '')
-
-    useEffect(() => {
-        setName(initial?.name ?? '')
-        setPrice(initial?.price ?? 0)
-        setImageUrl(initial?.imageUrl ?? '')
-        setDescription(initial?.description ?? '')
-    }, [initial])
 
     return (
         <form
