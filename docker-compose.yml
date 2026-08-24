@@ -3,16 +3,16 @@ services:
     image: mariadb:10.11
     container_name: ec-mariadb
     environment:
-      MARIADB_DATABASE: ec
-      MARIADB_USER: ec_user
-      MARIADB_PASSWORD: ec_pass
-      MARIADB_ROOT_PASSWORD: root_pass
+      MARIADB_DATABASE: ${DB_NAME:?DB_NAME is required}
+      MARIADB_USER: ${DB_USERNAME:?DB_USERNAME is required}
+      MARIADB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required}
+      MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD:?MARIADB_ROOT_PASSWORD is required}
     ports:
       - "3307:3306"
     volumes:
       - mariadb-10-11-data:/var/lib/mysql
     healthcheck:
-      test: ["CMD", "mariadb-admin", "ping", "-h", "127.0.0.1", "-uroot", "-proot_pass"]
+      test: ["CMD-SHELL", 'mariadb-admin ping -h 127.0.0.1 -uroot --password="$${MARIADB_ROOT_PASSWORD}"']
       interval: 5s
       timeout: 3s
       retries: 20
@@ -44,13 +44,13 @@ services:
       SPRING_PROFILES_ACTIVE: local
       DB_HOST: mariadb
       DB_PORT: 3306
-      DB_NAME: ec
-      DB_USERNAME: ec_user
-      DB_PASSWORD: ec_pass
+      DB_NAME: ${DB_NAME:?DB_NAME is required}
+      DB_USERNAME: ${DB_USERNAME:?DB_USERNAME is required}
+      DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required}
       REDIS_HOST: redis
       REDIS_PORT: 6379
-      APP_AUTH_JWT_SECRET: change-this-secret-at-least-32-bytes-long
-      APP_AUTH_JWT_ACCESS_TOKEN_EXPIRATION_SECONDS: 3600
+      APP_AUTH_JWT_SECRET: ${APP_AUTH_JWT_SECRET:?APP_AUTH_JWT_SECRET is required}
+      APP_AUTH_JWT_ACCESS_TOKEN_EXPIRATION_SECONDS: ${APP_AUTH_JWT_ACCESS_TOKEN_EXPIRATION_SECONDS:?APP_AUTH_JWT_ACCESS_TOKEN_EXPIRATION_SECONDS is required}
     ports:
       - "8081:8080"
 

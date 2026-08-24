@@ -98,16 +98,31 @@ npm install
 
 ## 백엔드 실행 방식
 
-### A. 권장: Docker로 백엔드 스택 실행 (API + MariaDB + Redis)
+### 로컬 환경변수 준비
 
-기본 Compose 파일(`docker-compose.yml`)로 설정되어 있어 아래처럼 바로 실행하면 됩니다.
+최초 실행 전에 저장소 루트에서 local 개발용 환경 파일을 만듭니다.
 
 ```zsh
-cd ec-portfolio
-docker compose up -d --build
+cp .env.example .env
+```
+
+`.env`는 Git에서 제외되며, Docker Compose는 저장소 루트의 `.env`를 자동으로 읽습니다. `.env.example`의 값은 기존 local 개발 환경과 호환되는 placeholder이며 실제 운영 Secret이 아닙니다. 운영 환경에서는 이 값을 절대 사용하지 마세요.
+
+### A. 권장: Docker로 백엔드 스택 실행 (API + MariaDB + Redis)
+
+환경 파일을 준비한 뒤 기본 Compose 파일(`docker-compose.yml`)을 실행합니다.
+
+```zsh
+docker compose up -d
 ```
 
 Compose 환경은 Flyway 호환성을 위해 MariaDB `10.11` 버전으로 고정되어 있습니다.
+
+백엔드 소스 변경 후 API 이미지를 다시 빌드해야 할 때는 다음 명령을 사용합니다.
+
+```zsh
+docker compose up -d --build
+```
 
 > **MariaDB 볼륨 주의:** MariaDB 11.x에서 생성한 데이터 볼륨을 10.11 컨테이너에 직접 연결하는 인플레이스 다운그레이드는 지원되지 않습니다. 이를 방지하기 위해 Compose는 `mariadb-10-11-data`와 `redis-10-11-data` 볼륨을 새로 사용하며, 기존 `mariadb-data`와 `redis-data` 볼륨은 자동으로 삭제하지 않습니다. Redis도 함께 분리하여 이전 DB 사용자와 캐시 데이터가 섞이지 않게 합니다. 기존 데이터가 필요하면 논리 백업 후 새 10.11 볼륨에 복원하세요. 로컬 테스트 데이터가 불필요한 경우에만 `docker compose down -v`로 현재 볼륨을 초기화하세요. 이 명령은 MariaDB와 Redis 데이터를 모두 삭제합니다.
 
@@ -115,7 +130,7 @@ Compose 환경은 Flyway 호환성을 위해 MariaDB `10.11` 버전으로 고정
 
 `V4__add_orders.sql`처럼 새 마이그레이션 파일을 추가한 경우, **API 컨테이너 재시작 시점**에 Flyway가 자동 적용됩니다.
 
-- 최초 실행: `docker compose up -d --build`
+- 최초 실행: `docker compose up -d`
 - 이미 실행 중일 때(권장): API만 재시작
 
 ```zsh
@@ -138,6 +153,8 @@ docker compose up -d --build
 | API | `8081` | `8080` | 브라우저/클라이언트는 `http://localhost:8081`로 접근 |
 | MariaDB | `3307` | `3306` | 컨테이너 간 통신은 `mariadb:3306` 사용 |
 | Redis | `6380` | `6379` | 컨테이너 간 통신은 `redis:6379` 사용 |
+
+`docker-compose.backend.yml`을 직접 지정하면 기존 기본 Host Port인 API `8080`, MariaDB `3306`, Redis `6379`를 사용합니다. 두 Compose 파일은 같은 `.env`의 DB/JWT 값을 사용하지만 Host Port 의미는 서로 다르게 유지됩니다.
 
 - API: `http://localhost:8081`
 - MariaDB: `localhost:3307`
@@ -167,13 +184,21 @@ docker compose down -v
 
 ### B. 로컬 직접 실행
 
-MariaDB/Redis를 실행한 뒤 바로 실행합니다.
+MariaDB/Redis를 실행하고 저장소 루트의 `.env`를 현재 셸에 로드한 뒤 실행합니다.
 
-- 현재 Gradle 설정상 `./gradlew bootRun` 기본값은 `DB_PORT=3307`, `REDIS_PORT=6380`입니다.
-- 즉, Docker 스택(`docker compose up`)을 켠 상태라면 별도 환경변수 없이 실행 가능합니다.
+- `bootRun`은 기본적으로 `local` Profile을 사용합니다.
+- local Profile의 기본 연결 포트는 `DB_PORT=3307`, `REDIS_PORT=6380`입니다.
+- Spring Boot와 Gradle은 저장소 루트의 `.env`를 자동으로 읽지 않으므로 셸에 명시적으로 로드해야 합니다.
 
 ```zsh
-cd ec-portfolio/apps/api
+cd ec-portfolio
+docker compose up -d mariadb redis
+
+set -a
+source .env
+set +a
+
+cd apps/api
 ./gradlew bootRun
 ```
 
@@ -197,6 +222,9 @@ cd ec-portfolio/apps/api
 
 ```zsh
 cd ec-portfolio/apps/api
+set -a
+source ../../.env
+set +a
 ./gradlew bootRun
 ```
 
@@ -320,6 +348,9 @@ npm run build
 
 ```zsh
 cd ec-portfolio/apps/api
+set -a
+source ../../.env
+set +a
 ./gradlew compileKotlin --no-daemon
 ./gradlew bootRun --no-daemon
 ```
