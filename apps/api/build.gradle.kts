@@ -40,13 +40,9 @@ dependencies {
 }
 
 tasks.named<org.springframework.boot.gradle.tasks.run.BootRun>("bootRun") {
-	environment("DB_HOST", System.getenv("DB_HOST") ?: "127.0.0.1")
-	environment("DB_PORT", System.getenv("DB_PORT") ?: "3307")
-	environment("DB_NAME", System.getenv("DB_NAME") ?: "ec")
-	environment("DB_USERNAME", System.getenv("DB_USERNAME") ?: "ec_user")
-	environment("DB_PASSWORD", System.getenv("DB_PASSWORD") ?: "ec_pass")
-	environment("REDIS_HOST", System.getenv("REDIS_HOST") ?: "127.0.0.1")
-	environment("REDIS_PORT", System.getenv("REDIS_PORT") ?: "6380")
+	if (!System.getenv().containsKey("SPRING_PROFILES_ACTIVE")) {
+		environment("SPRING_PROFILES_ACTIVE", "local")
+	}
 }
 
 tasks.withType<Test> { useJUnitPlatform() }

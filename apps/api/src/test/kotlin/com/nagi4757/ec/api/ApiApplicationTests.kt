@@ -11,15 +11,10 @@ import javax.sql.DataSource
 import org.springframework.boot.test.context.TestConfiguration
 import org.springframework.context.annotation.Bean
 import org.springframework.boot.test.context.SpringBootTest
+import org.springframework.test.context.ActiveProfiles
 
-@SpringBootTest(
-	properties = [
-		"spring.autoconfigure.exclude=" +
-				"org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration",
-		"spring.flyway.enabled=false", // flyway 의존성 있을 때 안전장치
-		"spring.main.lazy-initialization=true"
-	]
-)
+@ActiveProfiles("test")
+@SpringBootTest
 class ApiApplicationTests {
 	@Test fun contextLoads() {}
 

@@ -12,39 +12,17 @@ import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder
 import org.springframework.security.crypto.password.PasswordEncoder
 import org.springframework.security.web.SecurityFilterChain
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter
-import org.springframework.web.cors.CorsConfiguration
 import org.springframework.web.cors.CorsConfigurationSource
-import org.springframework.web.cors.UrlBasedCorsConfigurationSource
 
 @Configuration
 class SecurityConfig(
     private val jwtAuthenticationFilter: JwtAuthenticationFilter,
     private val restAuthenticationEntryPoint: RestAuthenticationEntryPoint,
-    private val restAccessDeniedHandler: RestAccessDeniedHandler
+    private val restAccessDeniedHandler: RestAccessDeniedHandler,
+    private val corsConfigurationSource: CorsConfigurationSource
 ) {
     @Bean
     fun passwordEncoder(): PasswordEncoder = BCryptPasswordEncoder()
-
-    @Bean
-    fun corsConfigurationSource(): CorsConfigurationSource {
-        val config = CorsConfiguration().apply {
-            allowedOrigins = listOf(
-                "http://localhost:5173",
-                "http://localhost:5174",
-                "http://127.0.0.1:5173",
-                "http://127.0.0.1:5174"
-            )
-            allowedMethods = listOf("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
-            allowedHeaders = listOf("*")
-            exposedHeaders = listOf("*")
-            allowCredentials = false
-            maxAge = 3600
-        }
-
-        return UrlBasedCorsConfigurationSource().apply {
-            registerCorsConfiguration("/api/**", config)
-        }
-    }
 
     @Bean
     fun securityFilterChain(http: HttpSecurity): SecurityFilterChain {
@@ -52,7 +30,7 @@ class SecurityConfig(
             .csrf { it.disable() }
             .httpBasic { it.disable() }
             .formLogin { it.disable() }
-            .cors { }
+            .cors { it.configurationSource(corsConfigurationSource) }
             .sessionManagement { it.sessionCreationPolicy(SessionCreationPolicy.STATELESS) }
             .exceptionHandling {
                 it.authenticationEntryPoint(restAuthenticationEntryPoint)

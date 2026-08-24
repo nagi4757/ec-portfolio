@@ -17,19 +17,14 @@ import org.springframework.context.annotation.Import
 import org.springframework.http.MediaType
 import org.springframework.test.web.servlet.MockMvc
 import org.springframework.test.web.servlet.get
+import org.springframework.test.web.servlet.options
+import org.springframework.test.context.ActiveProfiles
 import org.springframework.web.bind.annotation.GetMapping
 import org.springframework.web.bind.annotation.RestController
 import javax.sql.DataSource
 
-@SpringBootTest(
-    webEnvironment = SpringBootTest.WebEnvironment.MOCK,
-    properties = [
-        "spring.autoconfigure.exclude=" +
-            "org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration",
-        "spring.flyway.enabled=false",
-        "spring.main.lazy-initialization=true"
-    ]
-)
+@ActiveProfiles("test")
+@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.MOCK)
 @AutoConfigureMockMvc
 @Import(SecurityConfigPolicyTest.TestApiConfig::class)
 class SecurityConfigPolicyTest(
@@ -43,6 +38,18 @@ class SecurityConfigPolicyTest(
                 status { isOk() }
                 content { string("public-ok") }
             }
+    }
+
+    @Test
+    fun `configured origin is allowed for CORS preflight request`() {
+        mockMvc.options("/api/public/ping") {
+            header("Origin", "https://test.example")
+            header("Access-Control-Request-Method", "GET")
+        }.andExpect {
+            status { isOk() }
+            header { string("Access-Control-Allow-Origin", "https://test.example") }
+            header { string("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS") }
+        }
     }
 
     @Test
@@ -132,4 +139,3 @@ class SecurityConfigPolicyTest(
             }
     }
 }
-

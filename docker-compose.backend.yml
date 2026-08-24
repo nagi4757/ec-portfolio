@@ -41,6 +41,7 @@ services:
       redis:
         condition: service_healthy
     environment:
+      SPRING_PROFILES_ACTIVE: local
       DB_HOST: mariadb
       DB_PORT: 3306
       DB_NAME: ec
