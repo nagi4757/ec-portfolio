@@ -186,6 +186,7 @@ class CartServiceTest {
 
         assertEquals(listOf(30L, 10L, 20L, 40L), result.items.map { it.productId })
         assertEquals(listOf(4, 1, 2, 3), result.items.map { it.quantity })
+        assertEquals(listOf(5, 2, 3, 4), result.items.map { it.stockQuantity })
         assertEquals(listOf(true, false, true, false), result.items.map { it.available })
         assertEquals(listOf(12_000L, 1_000L, 4_000L, 12_000L), result.items.map { it.lineAmount })
         assertEquals(10, result.totalQuantity)

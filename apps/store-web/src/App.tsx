@@ -30,6 +30,7 @@ function Header() {
             cartStore.setTotalQuantity(0);
             return;
         }
+        if (location.pathname === '/cart') return;
 
         CartAPI.get()
             .then((data) => cartStore.setTotalQuantity(data.totalQuantity))
