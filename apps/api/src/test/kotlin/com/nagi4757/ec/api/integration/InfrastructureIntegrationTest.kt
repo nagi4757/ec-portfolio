@@ -16,6 +16,8 @@ import org.junit.jupiter.api.Test
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.context.SpringBootTest
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection
+import org.springframework.dao.DataIntegrityViolationException
+import org.springframework.jdbc.core.JdbcTemplate
 import org.springframework.test.context.ActiveProfiles
 import org.springframework.transaction.annotation.Transactional
 import org.testcontainers.containers.GenericContainer
@@ -31,17 +33,23 @@ import java.util.concurrent.ThreadLocalRandom
 @ActiveProfiles("integration-test")
 class InfrastructureIntegrationTest @Autowired constructor(
     private val flyway: Flyway,
+    private val jdbcTemplate: JdbcTemplate,
     private val productRepository: ProductRepository,
     private val orderRepository: OrderRepository,
     private val cartRepository: CartRepository
 ) {
 
     @Test
-    fun `applies Flyway migrations V1 through V4`() {
+    fun `applies Flyway migrations V1 through V5 and initializes existing stock to zero`() {
         val appliedVersions = flyway.info().applied()
             .mapNotNull { it.version?.version }
 
-        assertThat(appliedVersions).containsExactly("1", "2", "3", "4")
+        assertThat(appliedVersions).containsExactly("1", "2", "3", "4", "5")
+        val existingStock = jdbcTemplate.queryForList(
+            "SELECT stock_quantity FROM products WHERE id IN (1, 2, 3) ORDER BY id",
+            Int::class.java
+        )
+        assertThat(existingStock).containsExactly(0, 0, 0)
     }
 
     @Test
@@ -49,9 +57,9 @@ class InfrastructureIntegrationTest @Autowired constructor(
     fun `searches products by keyword price sort and pagination`() {
         val keyword = "integration-${UUID.randomUUID()}"
         val products = listOf(
-            Product(name = "$keyword-low", price = 10_100L, imageUrl = null, description = keyword),
-            Product(name = "$keyword-middle", price = 20_200L, imageUrl = null, description = keyword),
-            Product(name = "$keyword-high", price = 30_300L, imageUrl = null, description = keyword)
+            Product(name = "$keyword-low", price = 10_100L, stockQuantity = 3, imageUrl = null, description = keyword),
+            Product(name = "$keyword-middle", price = 20_200L, stockQuantity = 5, imageUrl = null, description = keyword),
+            Product(name = "$keyword-high", price = 30_300L, stockQuantity = 7, imageUrl = null, description = keyword)
         )
         products.forEach(productRepository::create)
 
@@ -72,6 +80,45 @@ class InfrastructureIntegrationTest @Autowired constructor(
         assertThat(result.totalPages).isEqualTo(2)
         assertThat(result.items.map(Product::price)).containsExactly(30_300L, 20_200L)
         assertThat(result.items.map(Product::name)).containsExactly("$keyword-high", "$keyword-middle")
+        assertThat(result.items.map(Product::stockQuantity)).containsExactly(7, 5)
+    }
+
+    @Test
+    @Transactional
+    fun `persists selects and updates product stock quantity`() {
+        val productId = productRepository.create(
+            Product(
+                name = "stock-mapping-${UUID.randomUUID()}",
+                price = 15_000L,
+                stockQuantity = 12,
+                imageUrl = null,
+                description = "stock mapping test"
+            )
+        )
+
+        val created = requireNotNull(productRepository.findById(productId))
+        assertThat(created.stockQuantity).isEqualTo(12)
+
+        assertThat(productRepository.update(created.copy(stockQuantity = 4))).isTrue()
+        assertThat(productRepository.findById(productId)?.stockQuantity).isEqualTo(4)
+    }
+
+    @Test
+    @Transactional
+    fun `database rejects negative product stock quantity`() {
+        org.junit.jupiter.api.assertThrows<DataIntegrityViolationException> {
+            jdbcTemplate.update(
+                """
+                INSERT INTO products (name, price, stock_quantity, image_url, description)
+                VALUES (?, ?, ?, ?, ?)
+                """.trimIndent(),
+                "negative-stock-${UUID.randomUUID()}",
+                1_000L,
+                -1,
+                null,
+                "negative stock test"
+            )
+        }
     }
 
     @Test

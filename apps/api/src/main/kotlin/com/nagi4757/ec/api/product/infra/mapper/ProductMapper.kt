@@ -31,6 +31,7 @@ data class ProductRecord(
     var id: Long? = null,
     var name: String? = null,
     var price: Long? = null,
+    var stockQuantity: Int? = null,
     var imageUrl: String? = null,
     var description: String? = null
 )

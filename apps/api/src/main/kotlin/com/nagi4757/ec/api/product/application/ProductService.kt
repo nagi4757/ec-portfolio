@@ -55,6 +55,7 @@ class ProductService(
             id = null,
             name = cmd.name,
             price = cmd.price,
+            stockQuantity = cmd.stockQuantity,
             imageUrl = cmd.imageUrl,
             description = cmd.description
         )
@@ -69,6 +70,7 @@ class ProductService(
         val updated = current.copy(
             name = cmd.name ?: current.name,
             price = cmd.price ?: current.price,
+            stockQuantity = cmd.stockQuantity ?: current.stockQuantity,
             imageUrl = cmd.imageUrl ?: current.imageUrl,
             description = cmd.description ?: current.description
         )

@@ -7,6 +7,7 @@
         <id property="id" column="id"/>
         <result property="name" column="name"/>
         <result property="price" column="price"/>
+        <result property="stockQuantity" column="stock_quantity"/>
         <result property="imageUrl" column="image_url"/>
         <result property="description" column="description"/>
     </resultMap>
@@ -27,13 +28,13 @@
     </sql>
 
     <select id="selectById" resultMap="productResultMap">
-        SELECT id, name, price, image_url, description
+        SELECT id, name, price, stock_quantity, image_url, description
         FROM products
         WHERE id = #{id}
     </select>
 
     <select id="selectAll" resultMap="productResultMap">
-        SELECT id, name, price, image_url, description
+        SELECT id, name, price, stock_quantity, image_url, description
         FROM products
         ORDER BY id DESC
     </select>
@@ -45,7 +46,7 @@
     </select>
 
     <select id="search" resultMap="productResultMap">
-        SELECT id, name, price, image_url, description
+        SELECT id, name, price, stock_quantity, image_url, description
         FROM products
         <include refid="searchCondition"/>
         <choose>
@@ -58,14 +59,15 @@
     </select>
 
     <insert id="insert" useGeneratedKeys="true" keyProperty="id">
-        INSERT INTO products (name, price, image_url, description)
-        VALUES (#{name}, #{price}, #{imageUrl}, #{description})
+        INSERT INTO products (name, price, stock_quantity, image_url, description)
+        VALUES (#{name}, #{price}, #{stockQuantity}, #{imageUrl}, #{description})
     </insert>
 
     <update id="update">
         UPDATE products
         SET name = #{name},
             price = #{price},
+            stock_quantity = #{stockQuantity},
             image_url = #{imageUrl},
             description = #{description}
         WHERE id = #{id}
