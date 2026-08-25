@@ -18,6 +18,9 @@ class ProductService(
     fun get(id: Long): Product? = productRepository.findById(id)
 
     @Transactional(readOnly = true)
+    fun getActive(id: Long): Product? = productRepository.findActiveById(id)
+
+    @Transactional(readOnly = true)
     fun listAll(): List<Product> = productRepository.findAll()
 
     @Transactional(readOnly = true)
@@ -72,18 +75,22 @@ class ProductService(
             price = cmd.price ?: current.price,
             stockQuantity = cmd.stockQuantity ?: current.stockQuantity,
             imageUrl = cmd.imageUrl ?: current.imageUrl,
-            description = cmd.description ?: current.description
+            description = cmd.description ?: current.description,
+            active = cmd.active ?: current.active
         )
         productRepository.update(updated)
         return getRequired(id)
     }
 
     @Transactional
-    fun delete(id: Long) {
-        if (productRepository.findById(id) == null) {
+    fun deactivate(id: Long) {
+        val product = productRepository.findById(id)
+        if (product == null) {
             throw ResourceNotFoundException(ApiErrorCode.PRODUCT_NOT_FOUND)
         }
-        productRepository.delete(id)
+        if (product.active) {
+            productRepository.deactivate(id)
+        }
     }
 
     private fun getRequired(id: Long): Product =

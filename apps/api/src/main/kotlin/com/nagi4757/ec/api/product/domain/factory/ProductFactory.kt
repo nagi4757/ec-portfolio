@@ -14,7 +14,8 @@ class ProductFactory {
             price = src.price ?: 0L,
             stockQuantity = src.stockQuantity ?: 0,
             imageUrl = src.imageUrl,
-            description = src.description
+            description = src.description,
+            active = src.active ?: true
         )
 
     fun toRecord(src: Product): ProductRecord =
@@ -25,6 +26,7 @@ class ProductFactory {
             stockQuantity = src.stockQuantity
             imageUrl = src.imageUrl
             description = src.description
+            active = src.active
         }
 
 }

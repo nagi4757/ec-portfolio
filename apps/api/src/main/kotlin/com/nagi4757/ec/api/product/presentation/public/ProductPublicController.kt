@@ -37,6 +37,6 @@ class ProductPublicController(
 
     @GetMapping("/{id}")
     fun get(@PathVariable id: Long): ProductResponse =
-        productService.get(id)?.toResponse()
+        productService.getActive(id)?.toResponse()
             ?: throw ResourceNotFoundException(ApiErrorCode.PRODUCT_NOT_FOUND)
 }

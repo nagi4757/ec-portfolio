@@ -4,13 +4,14 @@ import com.nagi4757.ec.api.product.domain.model.Product
 
 interface ProductRepository {
     fun findById(id: Long): Product?
+    fun findActiveById(id: Long): Product?
     fun findAll(): List<Product>
     fun search(condition: ProductSearchCondition): ProductSearchResult
     fun create(product: Product): Long
     fun update(product: Product): Boolean
     fun decreaseStockIfAvailable(productId: Long, quantity: Int): Boolean
     fun increaseStock(productId: Long, quantity: Int): Boolean
-    fun delete(id: Long): Boolean
+    fun deactivate(id: Long): Boolean
 }
 
 data class ProductSearchCondition(
