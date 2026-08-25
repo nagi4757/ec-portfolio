@@ -15,6 +15,9 @@ type ActionError = {
 }
 
 function toActionError(error: unknown, fallback: string): ActionError {
+    if (isApiErrorCode(error, 'PRODUCT_NOT_AVAILABLE')) {
+        return { messageKey: 'store.errors.api.productNotAvailable' }
+    }
     if (isApiErrorCode(error, 'INSUFFICIENT_STOCK')) {
         return { messageKey: 'store.stock.insufficient' }
     }
@@ -111,7 +114,13 @@ export default function CartPage() {
             navigate('/orders')
         } catch (e) {
             setActionError(toActionError(e, '주문에 실패했습니다.'))
-            if (cart) {
+            if (isApiErrorCode(e, 'PRODUCT_NOT_AVAILABLE')) {
+                try {
+                    await applyCart(await CartAPI.get())
+                } catch {
+                    // Keep the translated order error when the refresh also fails.
+                }
+            } else if (cart) {
                 setStockQuantities(await fetchStockQuantities(cart.items))
             }
         } finally {
@@ -143,6 +152,7 @@ export default function CartPage() {
     if (error) return <div style={{ padding: 24, color: 'crimson' }}>Error: {error}</div>
 
     const items = cart?.items ?? []
+    const hasUnavailableItems = items.some((item) => !item.available)
 
     return (
         <div style={{ padding: 'clamp(12px, 4vw, 24px)', maxWidth: 980, margin: '0 auto' }}>
@@ -165,21 +175,36 @@ export default function CartPage() {
                                 <div style={{ flex: 1 }}>
                                     <div style={{ fontWeight: 600 }}>{item.name}</div>
                                     <div style={{ color: '#555', fontSize: 14 }}>{item.price.toLocaleString()}원</div>
-                                    <div style={{ color: stockQuantities[item.productId] === 0 ? 'crimson' : '#2f855a', fontSize: 13 }}>
-                                        {stockQuantities[item.productId] === 0
-                                            ? t('store.stock.outOfStock')
-                                            : stockQuantities[item.productId] !== undefined
-                                                ? t('store.stock.remaining', { count: stockQuantities[item.productId] })
-                                                : null}
-                                    </div>
+                                    {!item.available ? (
+                                        <>
+                                            <div style={{ color: 'crimson', fontSize: 13, fontWeight: 600 }}>
+                                                {t('store.cart.notAvailable')}
+                                            </div>
+                                            <div style={{ color: 'crimson', fontSize: 13 }}>
+                                                {t('store.cart.removeUnavailableItem')}
+                                            </div>
+                                        </>
+                                    ) : (
+                                        <div style={{ color: stockQuantities[item.productId] === 0 ? 'crimson' : '#2f855a', fontSize: 13 }}>
+                                            {stockQuantities[item.productId] === 0
+                                                ? t('store.stock.outOfStock')
+                                                : stockQuantities[item.productId] !== undefined
+                                                    ? t('store.stock.remaining', { count: stockQuantities[item.productId] })
+                                                    : null}
+                                        </div>
+                                    )}
                                 </div>
 
                                 <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                                    <button onClick={() => changeQty(item.productId, item.quantity - 1)}>-</button>
+                                    <button
+                                        onClick={() => changeQty(item.productId, item.quantity - 1)}
+                                        disabled={!item.available}
+                                    >-</button>
                                     <span>{item.quantity}</span>
                                     <button
                                         onClick={() => changeQty(item.productId, item.quantity + 1)}
-                                        disabled={stockQuantities[item.productId] === undefined
+                                        disabled={!item.available
+                                            || stockQuantities[item.productId] === undefined
                                             || item.quantity >= stockQuantities[item.productId]}
                                     >+</button>
                                 </div>
@@ -202,8 +227,8 @@ export default function CartPage() {
                             <button onClick={clearCart}>장바구니 비우기</button>
                             <button
                                 onClick={placeOrder}
-                                disabled={ordering}
-                                style={{ background: '#2b6cb0', color: '#fff', border: 'none', borderRadius: 6, padding: '6px 16px', cursor: ordering ? 'not-allowed' : 'pointer', fontWeight: 600 }}
+                                disabled={ordering || hasUnavailableItems}
+                                style={{ background: '#2b6cb0', color: '#fff', border: 'none', borderRadius: 6, padding: '6px 16px', cursor: ordering || hasUnavailableItems ? 'not-allowed' : 'pointer', fontWeight: 600 }}
                             >
                                 {ordering ? '주문 중...' : '주문하기'}
                             </button>

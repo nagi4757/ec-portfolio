@@ -17,6 +17,14 @@ export const adminJa = {
             stockQuantity: '在庫',
             inStock: '在庫あり',
             outOfStock: '在庫切れ',
+            status: '販売状態',
+            active: '販売中',
+            inactive: '販売停止',
+            deactivate: '販売停止',
+            reactivate: '販売再開',
+            deactivateConfirm: 'この商品の販売を停止しますか？',
+            deactivating: '停止中...',
+            reactivating: '再開中...',
         },
         order: {
             status: {

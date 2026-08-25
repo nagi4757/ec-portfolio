@@ -17,6 +17,14 @@ export const adminKo = {
             stockQuantity: '재고',
             inStock: '재고 있음',
             outOfStock: '품절',
+            status: '판매 상태',
+            active: '판매 중',
+            inactive: '판매 중지',
+            deactivate: '판매 중지',
+            reactivate: '판매 재개',
+            deactivateConfirm: '이 상품의 판매를 중지하시겠습니까?',
+            deactivating: '중지 중...',
+            reactivating: '재개 중...',
         },
         order: {
             status: {
