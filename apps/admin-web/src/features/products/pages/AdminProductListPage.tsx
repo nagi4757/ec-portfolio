@@ -1,9 +1,11 @@
 import { useEffect, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { Link, useNavigate } from 'react-router-dom'
 import { ProductApi } from '@/features/products/api'
 import type { Product } from '@/types/product'
 
 export default function AdminProductListPage() {
+    const { t } = useTranslation()
     const [items, setItems] = useState<Product[]>([])
     const [loading, setLoading] = useState(true)
     const navigate = useNavigate()
@@ -43,7 +45,7 @@ export default function AdminProductListPage() {
                     <table border={1} cellPadding={8} style={{ minWidth: 760, width: '100%', background: '#fff' }}>
                         <thead>
                         <tr>
-                            <th>ID</th><th>Name</th><th>Price</th><th>Image</th><th>Description</th><th>Actions</th>
+                            <th>ID</th><th>Name</th><th>Price</th><th>{t('admin.product.stockQuantity')}</th><th>Image</th><th>Description</th><th>Actions</th>
                         </tr>
                         </thead>
                         <tbody>
@@ -52,6 +54,11 @@ export default function AdminProductListPage() {
                                 <td>{p.id}</td>
                                 <td>{p.name}</td>
                                 <td>{p.price.toLocaleString()}</td>
+                                <td>
+                                    {p.stockQuantity === 0
+                                        ? t('admin.product.outOfStock')
+                                        : `${p.stockQuantity} (${t('admin.product.inStock')})`}
+                                </td>
                                 <td>{p.imageUrl}</td>
                                 <td>{p.description}</td>
                                 <td>
@@ -62,7 +69,7 @@ export default function AdminProductListPage() {
                             </tr>
                         ))}
                         {items.length === 0 && (
-                            <tr><td colSpan={6}>No data</td></tr>
+                            <tr><td colSpan={7}>No data</td></tr>
                         )}
                         </tbody>
                     </table>
