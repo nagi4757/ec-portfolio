@@ -5,6 +5,7 @@ export type CartItem = {
     imageUrl?: string | null
     quantity: number
     lineAmount: number
+    available: boolean
 }
 
 export type CartResponse = {
@@ -12,4 +13,3 @@ export type CartResponse = {
     totalQuantity: number
     totalAmount: number
 }
-

@@ -15,12 +15,17 @@ export const storeJa = {
             remaining: '残り{{count}}点',
             insufficient: '在庫が不足しています。',
         },
+        product: {
+            notAvailable: 'この商品は現在販売されていません。',
+        },
         cart: {
             add: 'カートに追加',
             adding: '追加中...',
             added: 'カートに追加しました。',
             loginRequired: 'ログイン後にカートをご利用ください。',
             addFailed: 'カートへの追加に失敗しました。',
+            notAvailable: '販売停止',
+            removeUnavailableItem: 'この商品は現在購入できません。カートから削除してください。',
         },
         order: {
             loadFailed: '注文の取得に失敗しました。',
@@ -45,6 +50,7 @@ export const storeJa = {
             api: {
                 invalidOrderTransition: '注文状態が変更されたため、処理できません。',
                 orderNotFound: '注文が見つかりません。',
+                productNotAvailable: 'この商品は現在販売されていません。',
             },
         },
     },

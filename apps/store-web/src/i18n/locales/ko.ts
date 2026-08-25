@@ -15,12 +15,17 @@ export const storeKo = {
             remaining: '재고 {{count}}개',
             insufficient: '재고가 부족합니다.',
         },
+        product: {
+            notAvailable: '현재 판매 중지된 상품입니다.',
+        },
         cart: {
             add: '장바구니 담기',
             adding: '담는 중...',
             added: '장바구니에 담았습니다.',
             loginRequired: '로그인 후 장바구니를 이용할 수 있습니다.',
             addFailed: '장바구니 담기에 실패했습니다.',
+            notAvailable: '판매 중지',
+            removeUnavailableItem: '현재 구매할 수 없는 상품입니다. 장바구니에서 삭제해 주세요.',
         },
         order: {
             loadFailed: '주문 조회에 실패했습니다.',
@@ -45,6 +50,7 @@ export const storeKo = {
             api: {
                 invalidOrderTransition: '주문 상태가 변경되어 처리할 수 없습니다.',
                 orderNotFound: '주문을 찾을 수 없습니다.',
+                productNotAvailable: '현재 판매 중지된 상품입니다.',
             },
         },
     },

@@ -34,7 +34,9 @@ export function ProductCard({ product }: { product: ProductResponse }) {
             cartStore.setTotalQuantity(updated.totalQuantity);
             setFeedback({ kind: 'success', messageKey: 'store.cart.added' });
         } catch (e) {
-            setFeedback(isApiErrorCode(e, 'INSUFFICIENT_STOCK')
+            setFeedback(isApiErrorCode(e, 'PRODUCT_NOT_AVAILABLE')
+                ? { kind: 'error', messageKey: 'store.product.notAvailable' }
+                : isApiErrorCode(e, 'INSUFFICIENT_STOCK')
                 ? { kind: 'error', messageKey: 'store.stock.insufficient' }
                 : {
                     kind: 'error',
