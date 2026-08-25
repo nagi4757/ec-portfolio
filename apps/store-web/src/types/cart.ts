@@ -2,6 +2,7 @@ export type CartItem = {
     productId: number
     name: string
     price: number
+    stockQuantity: number
     imageUrl?: string | null
     quantity: number
     lineAmount: number

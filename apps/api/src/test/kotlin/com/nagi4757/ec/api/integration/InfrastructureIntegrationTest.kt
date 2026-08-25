@@ -383,6 +383,7 @@ class InfrastructureIntegrationTest @Autowired constructor(
             assertThat(cart.items.map { it.productId })
                 .containsExactly(activeProductId, inactiveProductId)
             assertThat(cart.items.map { it.quantity }).containsExactly(2, 3)
+            assertThat(cart.items.map { it.stockQuantity }).containsExactly(7, 9)
             assertThat(cart.items.map { it.available }).containsExactly(true, false)
             assertThat(cart.totalQuantity).isEqualTo(5)
             assertThat(cart.totalAmount).isEqualTo(8_800L)

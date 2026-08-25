@@ -3,7 +3,6 @@ import { useTranslation } from 'react-i18next'
 import { Link, useNavigate } from 'react-router-dom'
 import { CartAPI } from '@/features/cart/api'
 import { OrderAPI } from '@/features/orders/api'
-import { ProductAPI } from '@/features/products/api'
 import { authStore } from '@/lib/authStore'
 import { cartStore } from '@/lib/cartStore'
 import { isApiErrorCode } from '@/lib/api'
@@ -24,35 +23,17 @@ function toActionError(error: unknown, fallback: string): ActionError {
     return { fallback: error instanceof Error ? error.message : fallback }
 }
 
-async function fetchStockQuantities(items: CartResponse['items']): Promise<Record<number, number>> {
-    const products = await Promise.all(items.map(async (item) => {
-        try {
-            return await ProductAPI.get(item.productId)
-        } catch {
-            return null
-        }
-    }))
-
-    return products.reduce<Record<number, number>>((stocks, product) => {
-        if (product) stocks[product.id] = product.stockQuantity
-        return stocks
-    }, {})
-}
-
 export default function CartPage() {
     const { t } = useTranslation()
     const navigate = useNavigate()
     const [cart, setCart] = useState<CartResponse | null>(null)
-    const [stockQuantities, setStockQuantities] = useState<Record<number, number>>({})
     const [loading, setLoading] = useState(true)
     const [error, setError] = useState<string | null>(null)
     const [actionError, setActionError] = useState<ActionError | null>(null)
     const [ordering, setOrdering] = useState(false)
 
-    const applyCart = useCallback(async (data: CartResponse) => {
-        const stocks = await fetchStockQuantities(data.items)
+    const applyCart = useCallback((data: CartResponse) => {
         setCart(data)
-        setStockQuantities(stocks)
         cartStore.setTotalQuantity(data.totalQuantity)
     }, [])
 
@@ -62,7 +43,7 @@ export default function CartPage() {
         setActionError(null)
         try {
             const data = await CartAPI.get()
-            await applyCart(data)
+            applyCart(data)
         } catch (e) {
             setError(e instanceof Error ? e.message : '장바구니를 불러오지 못했습니다.')
         } finally {
@@ -80,7 +61,7 @@ export default function CartPage() {
     }, [loadCart])
 
     async function changeQty(productId: number, quantity: number) {
-        const stockQuantity = stockQuantities[productId]
+        const stockQuantity = cart?.items.find((item) => item.productId === productId)?.stockQuantity
         if (stockQuantity !== undefined && quantity > stockQuantity) {
             setActionError({ messageKey: 'store.stock.insufficient' })
             return
@@ -89,7 +70,7 @@ export default function CartPage() {
         setActionError(null)
         try {
             const data = await CartAPI.updateItem(productId, quantity)
-            await applyCart(data)
+            applyCart(data)
         } catch (e) {
             setActionError(toActionError(e, '수량 변경에 실패했습니다.'))
         }
@@ -99,7 +80,7 @@ export default function CartPage() {
         setActionError(null)
         try {
             const data = await CartAPI.removeItem(productId)
-            await applyCart(data)
+            applyCart(data)
         } catch (e) {
             setActionError(toActionError(e, '상품 삭제에 실패했습니다.'))
         }
@@ -114,14 +95,12 @@ export default function CartPage() {
             navigate('/orders')
         } catch (e) {
             setActionError(toActionError(e, '주문에 실패했습니다.'))
-            if (isApiErrorCode(e, 'PRODUCT_NOT_AVAILABLE')) {
+            if (isApiErrorCode(e, 'PRODUCT_NOT_AVAILABLE') || isApiErrorCode(e, 'INSUFFICIENT_STOCK')) {
                 try {
-                    await applyCart(await CartAPI.get())
+                    applyCart(await CartAPI.get())
                 } catch {
                     // Keep the translated order error when the refresh also fails.
                 }
-            } else if (cart) {
-                setStockQuantities(await fetchStockQuantities(cart.items))
             }
         } finally {
             setOrdering(false)
@@ -132,7 +111,7 @@ export default function CartPage() {
         setActionError(null)
         try {
             const data = await CartAPI.clear()
-            await applyCart(data)
+            applyCart(data)
         } catch (e) {
             setActionError(toActionError(e, '장바구니 비우기에 실패했습니다.'))
         }
@@ -185,12 +164,10 @@ export default function CartPage() {
                                             </div>
                                         </>
                                     ) : (
-                                        <div style={{ color: stockQuantities[item.productId] === 0 ? 'crimson' : '#2f855a', fontSize: 13 }}>
-                                            {stockQuantities[item.productId] === 0
+                                        <div style={{ color: item.stockQuantity === 0 ? 'crimson' : '#2f855a', fontSize: 13 }}>
+                                            {item.stockQuantity === 0
                                                 ? t('store.stock.outOfStock')
-                                                : stockQuantities[item.productId] !== undefined
-                                                    ? t('store.stock.remaining', { count: stockQuantities[item.productId] })
-                                                    : null}
+                                                : t('store.stock.remaining', { count: item.stockQuantity })}
                                         </div>
                                     )}
                                 </div>
@@ -204,8 +181,7 @@ export default function CartPage() {
                                     <button
                                         onClick={() => changeQty(item.productId, item.quantity + 1)}
                                         disabled={!item.available
-                                            || stockQuantities[item.productId] === undefined
-                                            || item.quantity >= stockQuantities[item.productId]}
+                                            || item.quantity >= item.stockQuantity}
                                     >+</button>
                                 </div>
 
