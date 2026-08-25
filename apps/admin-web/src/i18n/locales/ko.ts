@@ -18,5 +18,26 @@ export const adminKo = {
             inStock: '재고 있음',
             outOfStock: '품절',
         },
+        order: {
+            status: {
+                pending: '주문 접수',
+                preparing: '배송 준비 중',
+                shipped: '배송 중',
+                delivered: '배송 완료',
+                cancelled: '취소됨',
+            },
+            transition: {
+                select: '다음 상태 선택',
+                none: '변경 불가',
+                failed: '주문 상태 변경에 실패했습니다.',
+            },
+            loadFailed: '주문 조회에 실패했습니다.',
+        },
+        errors: {
+            api: {
+                invalidOrderTransition: '주문 상태가 변경되어 처리할 수 없습니다.',
+                orderNotFound: '주문을 찾을 수 없습니다.',
+            },
+        },
     },
 } as const

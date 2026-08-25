@@ -22,5 +22,30 @@ export const storeKo = {
             loginRequired: '로그인 후 장바구니를 이용할 수 있습니다.',
             addFailed: '장바구니 담기에 실패했습니다.',
         },
+        order: {
+            loadFailed: '주문 조회에 실패했습니다.',
+            status: {
+                pending: '주문 접수',
+                preparing: '배송 준비 중',
+                shipped: '배송 중',
+                delivered: '배송 완료',
+                cancelled: '취소됨',
+            },
+            actions: {
+                cancel: '주문 취소',
+                cancelling: '취소 중...',
+            },
+            cancel: {
+                confirm: '이 주문을 취소하시겠습니까?',
+                success: '주문을 취소했습니다.',
+                failed: '주문 취소에 실패했습니다.',
+            },
+        },
+        errors: {
+            api: {
+                invalidOrderTransition: '주문 상태가 변경되어 처리할 수 없습니다.',
+                orderNotFound: '주문을 찾을 수 없습니다.',
+            },
+        },
     },
 } as const

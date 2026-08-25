@@ -7,5 +7,5 @@ export const OrderAPI = {
     place: () => api.post<Order>(BASE, {}),
     list: () => api.get<OrderSummary[]>(BASE),
     get: (id: number) => api.get<Order>(`${BASE}/${id}`),
+    cancel: (id: number) => api.post<Order>(`${BASE}/${id}/cancel`, {}),
 }
-

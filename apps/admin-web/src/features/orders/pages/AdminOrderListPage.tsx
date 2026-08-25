@@ -1,18 +1,21 @@
 import { useCallback, useEffect, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { Link } from 'react-router-dom'
 import { OrderAdminApi } from '@/features/orders/api'
-import { ORDER_STATUS_LABEL, ORDER_STATUS_OPTIONS } from '@/types/order'
+import { isApiErrorCode } from '@/lib/api'
+import { ORDER_STATUS_TRANSITIONS, ORDER_STATUS_TRANSLATION_KEY } from '@/types/order'
 import type { OrderListResponse, OrderStatus } from '@/types/order'
 
-const statusColor: Record<string, string> = {
-    PENDING:   '#b7791f',
-    CONFIRMED: '#2b6cb0',
-    SHIPPED:   '#6b46c1',
+const statusColor: Record<OrderStatus, string> = {
+    PENDING: '#b7791f',
+    PREPARING: '#2b6cb0',
+    SHIPPED: '#6b46c1',
     DELIVERED: '#276749',
     CANCELLED: '#c53030',
 }
 
 export default function AdminOrderListPage() {
+    const { t } = useTranslation()
     const [data, setData] = useState<OrderListResponse | null>(null)
     const [page, setPage] = useState(1)
     const [loading, setLoading] = useState(true)
@@ -24,15 +27,15 @@ export default function AdminOrderListPage() {
         setError(null)
         OrderAdminApi.list(page, 20)
             .then(setData)
-            .catch((e) => setError(e.message))
+            .catch(() => setError(t('admin.order.loadFailed')))
             .finally(() => setLoading(false))
-    }, [page])
+    }, [page, t])
 
     useEffect(() => {
         load()
     }, [load])
 
-    async function changeStatus(id: number, status: string) {
+    async function changeStatus(id: number, status: OrderStatus) {
         setUpdatingId(id)
         try {
             const updated = await OrderAdminApi.updateStatus(id, status)
@@ -45,8 +48,16 @@ export default function AdminOrderListPage() {
                     ),
                 }
             })
-        } catch (e) {
-            alert(e instanceof Error ? e.message : '상태 변경 실패')
+        } catch (cause) {
+            if (isApiErrorCode(cause, 'INVALID_ORDER_TRANSITION')) {
+                alert(t('admin.errors.api.invalidOrderTransition'))
+                load()
+            } else if (isApiErrorCode(cause, 'ORDER_NOT_FOUND')) {
+                alert(t('admin.errors.api.orderNotFound'))
+                load()
+            } else {
+                alert(t('admin.order.transition.failed'))
+            }
         } finally {
             setUpdatingId(null)
         }
@@ -80,42 +91,54 @@ export default function AdminOrderListPage() {
                             </tr>
                         </thead>
                         <tbody>
-                            {orders.map((order) => (
-                                <tr key={order.id} style={{ borderBottom: '1px solid #eee' }}>
-                                    <td style={td}>
-                                        <Link to={`/orders/${order.id}`} style={orderLink}>
-                                            #{order.id}
-                                        </Link>
-                                    </td>
-                                    <td style={td}>{order.userId}</td>
-                                    <td style={td}>
-                                        <span style={{
-                                            ...badgeStyle,
-                                            background: statusColor[order.status] ?? '#555',
-                                        }}>
-                                            {ORDER_STATUS_LABEL[order.status] ?? order.status}
-                                        </span>
-                                    </td>
-                                    <td style={{ ...td, fontWeight: 600 }}>
-                                        {order.totalAmount.toLocaleString()}원
-                                    </td>
-                                    <td style={td}>{order.createdAt ?? '-'}</td>
-                                    <td style={td}>
-                                        <select
-                                            value={order.status}
-                                            disabled={updatingId === order.id}
-                                            onChange={(e) => changeStatus(order.id, e.target.value)}
-                                            style={{ padding: '4px 8px', borderRadius: 4, border: '1px solid #ddd', fontSize: 13 }}
-                                        >
-                                            {ORDER_STATUS_OPTIONS.map((s) => (
-                                                <option key={s} value={s}>
-                                                    {ORDER_STATUS_LABEL[s as OrderStatus]}
-                                                </option>
-                                            ))}
-                                        </select>
-                                    </td>
-                                </tr>
-                            ))}
+                            {orders.map((order) => {
+                                const nextStatuses = ORDER_STATUS_TRANSITIONS[order.status]
+                                return (
+                                    <tr key={order.id} style={{ borderBottom: '1px solid #eee' }}>
+                                        <td style={td}>
+                                            <Link to={`/orders/${order.id}`} style={orderLink}>
+                                                #{order.id}
+                                            </Link>
+                                        </td>
+                                        <td style={td}>{order.userId}</td>
+                                        <td style={td}>
+                                            <span style={{
+                                                ...badgeStyle,
+                                                background: statusColor[order.status] ?? '#555',
+                                            }}>
+                                                {t(ORDER_STATUS_TRANSLATION_KEY[order.status])}
+                                            </span>
+                                        </td>
+                                        <td style={{ ...td, fontWeight: 600 }}>
+                                            {order.totalAmount.toLocaleString()}원
+                                        </td>
+                                        <td style={td}>{order.createdAt ?? '-'}</td>
+                                        <td style={td}>
+                                            {nextStatuses.length > 0 ? (
+                                                <select
+                                                    value=""
+                                                    disabled={updatingId === order.id}
+                                                    onChange={(e) => changeStatus(order.id, e.target.value as OrderStatus)}
+                                                    style={{ padding: '4px 8px', borderRadius: 4, border: '1px solid #ddd', fontSize: 13 }}
+                                                >
+                                                    <option value="" disabled>
+                                                        {t('admin.order.transition.select')}
+                                                    </option>
+                                                    {nextStatuses.map((status) => (
+                                                        <option key={status} value={status}>
+                                                            {t(ORDER_STATUS_TRANSLATION_KEY[status])}
+                                                        </option>
+                                                    ))}
+                                                </select>
+                                            ) : (
+                                                <span style={{ color: '#777', fontSize: 13 }}>
+                                                    {t('admin.order.transition.none')}
+                                                </span>
+                                            )}
+                                        </td>
+                                    </tr>
+                                )
+                            })}
                         </tbody>
                     </table>
                 </div>

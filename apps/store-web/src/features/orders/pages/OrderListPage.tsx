@@ -1,19 +1,21 @@
 import { useEffect, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { Link, useNavigate } from 'react-router-dom'
 import { OrderAPI } from '@/features/orders/api'
 import { authStore } from '@/lib/authStore'
-import { ORDER_STATUS_LABEL } from '@/types/order'
-import type { OrderSummary } from '@/types/order'
+import { ORDER_STATUS_TRANSLATION_KEY } from '@/types/order'
+import type { OrderStatus, OrderSummary } from '@/types/order'
 
-const statusColor: Record<string, string> = {
-    PENDING:   '#b7791f',
-    CONFIRMED: '#2b6cb0',
-    SHIPPED:   '#6b46c1',
+const statusColor: Record<OrderStatus, string> = {
+    PENDING: '#b7791f',
+    PREPARING: '#2b6cb0',
+    SHIPPED: '#6b46c1',
     DELIVERED: '#276749',
     CANCELLED: '#c53030',
 }
 
 export default function OrderListPage() {
+    const { t } = useTranslation()
     const navigate = useNavigate()
     const isLoggedIn = authStore.isLoggedIn()
     const [orders, setOrders] = useState<OrderSummary[]>([])
@@ -63,7 +65,7 @@ export default function OrderListPage() {
                                         ...badgeStyle,
                                         background: statusColor[order.status] ?? '#555',
                                     }}>
-                                        {ORDER_STATUS_LABEL[order.status] ?? order.status}
+                                        {t(ORDER_STATUS_TRANSLATION_KEY[order.status])}
                                     </span>
                                 </div>
                                 <div style={{ marginTop: 8, display: 'flex', justifyContent: 'space-between', fontSize: 14, color: '#555', gap: 8, flexWrap: 'wrap' }}>
