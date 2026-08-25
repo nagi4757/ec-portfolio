@@ -15,6 +15,8 @@ class InvalidCartQuantityException : ApplicationException(ApiErrorCode.INVALID_C
 
 class InsufficientStockException : ApplicationException(ApiErrorCode.INSUFFICIENT_STOCK)
 
+class ProductNotAvailableException : ApplicationException(ApiErrorCode.PRODUCT_NOT_AVAILABLE)
+
 class InvalidOrderStatusException : ApplicationException(ApiErrorCode.INVALID_ORDER_STATUS)
 
 class InvalidOrderTransitionException : ApplicationException(ApiErrorCode.INVALID_ORDER_TRANSITION)

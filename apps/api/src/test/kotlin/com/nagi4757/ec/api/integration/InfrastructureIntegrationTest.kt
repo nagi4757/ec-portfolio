@@ -1,5 +1,6 @@
 package com.nagi4757.ec.api.integration
 
+import com.nagi4757.ec.api.cart.application.CartService
 import com.nagi4757.ec.api.cart.domain.model.CartItem
 import com.nagi4757.ec.api.cart.domain.repository.CartRepository
 import com.nagi4757.ec.api.common.error.ApiErrorCode
@@ -45,6 +46,7 @@ class InfrastructureIntegrationTest @Autowired constructor(
     private val productRepository: ProductRepository,
     private val orderRepository: OrderRepository,
     private val cartRepository: CartRepository,
+    private val cartService: CartService,
     private val orderService: OrderService
 ) {
 
@@ -286,6 +288,50 @@ class InfrastructureIntegrationTest @Autowired constructor(
     }
 
     @Test
+    fun `inactive product remains visible in cart and blocks cart mutation and order`() {
+        val userId = uniqueUserId()
+        val productId = productRepository.create(
+            product(stockQuantity = 3, namePrefix = "inactive-cart")
+        )
+        cartRepository.clear(userId)
+        cartRepository.increment(userId, productId, 2)
+        productRepository.deactivate(productId)
+
+        try {
+            val cart = cartService.getCart(userId)
+            val line = cart.items.single()
+            assertThat(line.productId).isEqualTo(productId)
+            assertThat(line.quantity).isEqualTo(2)
+            assertThat(line.available).isFalse()
+
+            val addFailure = org.junit.jupiter.api.assertThrows<ApplicationException> {
+                cartService.addItem(userId, productId, 1)
+            }
+            assertThat(addFailure.errorCode).isEqualTo(ApiErrorCode.PRODUCT_NOT_AVAILABLE)
+
+            val updateFailure = org.junit.jupiter.api.assertThrows<ApplicationException> {
+                cartService.updateItem(userId, productId, 1)
+            }
+            assertThat(updateFailure.errorCode).isEqualTo(ApiErrorCode.PRODUCT_NOT_AVAILABLE)
+
+            val orderFailure = org.junit.jupiter.api.assertThrows<ApplicationException> {
+                orderService.placeOrder(userId)
+            }
+            assertThat(orderFailure.errorCode).isEqualTo(ApiErrorCode.PRODUCT_NOT_AVAILABLE)
+
+            assertThat(cartRepository.findAll(userId)).containsExactly(CartItem(productId, 2))
+            assertThat(orderRepository.findByUserId(userId)).isEmpty()
+            val stored = requireNotNull(productRepository.findById(productId))
+            assertThat(stored.stockQuantity).isEqualTo(3)
+            assertThat(stored.active).isFalse()
+        } finally {
+            cartRepository.clear(userId)
+            deleteOrdersForUser(userId)
+            deleteProduct(productId)
+        }
+    }
+
+    @Test
     @Transactional
     fun `conditionally decreases stock without allowing a negative value`() {
         val productId = productRepository.create(
@@ -412,6 +458,89 @@ class InfrastructureIntegrationTest @Autowired constructor(
             assertThat(productRepository.findById(productId)?.stockQuantity).isEqualTo(5)
             assertThat(cartRepository.findAll(userId)).isEmpty()
         } finally {
+            cartRepository.clear(userId)
+            deleteOrdersForUser(userId)
+            deleteProduct(productId)
+        }
+    }
+
+    @Test
+    fun `cancels existing order after deactivation and restores stock while remaining inactive`() {
+        val userId = uniqueUserId()
+        val productId = productRepository.create(
+            product(stockQuantity = 5, namePrefix = "inactive-cancel-restore")
+        )
+        cartRepository.clear(userId)
+        cartRepository.increment(userId, productId, 3)
+
+        try {
+            val order = orderService.placeOrder(userId)
+            assertThat(productRepository.findById(productId)?.stockQuantity).isEqualTo(2)
+            assertThat(productRepository.deactivate(productId)).isTrue()
+
+            val cancelled = orderService.cancelOrder(userId, requireNotNull(order.id))
+
+            assertThat(cancelled.status).isEqualTo(OrderStatus.CANCELLED)
+            val stored = requireNotNull(productRepository.findById(productId))
+            assertThat(stored.stockQuantity).isEqualTo(5)
+            assertThat(stored.active).isFalse()
+        } finally {
+            cartRepository.clear(userId)
+            deleteOrdersForUser(userId)
+            deleteProduct(productId)
+        }
+    }
+
+    @Test
+    fun `keeps product order and cart consistent when deactivation races with order`() {
+        val userId = uniqueUserId()
+        val productId = productRepository.create(
+            product(stockQuantity = 1, namePrefix = "deactivate-order-race")
+        )
+        cartRepository.clear(userId)
+        cartRepository.increment(userId, productId, 1)
+        val start = CountDownLatch(1)
+        val executor = Executors.newFixedThreadPool(2)
+
+        try {
+            val deactivateFuture = executor.submit<Boolean> {
+                start.await()
+                productRepository.deactivate(productId)
+            }
+            val orderFuture = executor.submit<ApiErrorCode?> {
+                start.await()
+                try {
+                    orderService.placeOrder(userId)
+                    null
+                } catch (exception: ApplicationException) {
+                    exception.errorCode
+                }
+            }
+
+            start.countDown()
+            assertThat(deactivateFuture.get(10, TimeUnit.SECONDS)).isTrue()
+            val orderError = orderFuture.get(10, TimeUnit.SECONDS)
+            val stored = requireNotNull(productRepository.findById(productId))
+            val orders = orderRepository.findByUserId(userId)
+
+            assertThat(stored.active).isFalse()
+            assertThat(stored.stockQuantity).isGreaterThanOrEqualTo(0)
+            when (orderError) {
+                null -> {
+                    assertThat(stored.stockQuantity).isZero()
+                    assertThat(orders).hasSize(1)
+                    assertThat(orders.single().items).hasSize(1)
+                    assertThat(cartRepository.findAll(userId)).isEmpty()
+                }
+                ApiErrorCode.PRODUCT_NOT_AVAILABLE -> {
+                    assertThat(stored.stockQuantity).isEqualTo(1)
+                    assertThat(orders).isEmpty()
+                    assertThat(cartRepository.findAll(userId)).containsExactly(CartItem(productId, 1))
+                }
+                else -> throw AssertionError("Unexpected order result: $orderError")
+            }
+        } finally {
+            executor.shutdownNow()
             cartRepository.clear(userId)
             deleteOrdersForUser(userId)
             deleteProduct(productId)

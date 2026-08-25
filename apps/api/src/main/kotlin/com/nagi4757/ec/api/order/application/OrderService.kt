@@ -5,6 +5,7 @@ import com.nagi4757.ec.api.common.error.ApiErrorCode
 import com.nagi4757.ec.api.common.error.EmptyCartException
 import com.nagi4757.ec.api.common.error.InsufficientStockException
 import com.nagi4757.ec.api.common.error.InvalidOrderTransitionException
+import com.nagi4757.ec.api.common.error.ProductNotAvailableException
 import com.nagi4757.ec.api.common.error.ResourceNotFoundException
 import com.nagi4757.ec.api.order.domain.model.Order
 import com.nagi4757.ec.api.order.domain.model.OrderItem
@@ -13,6 +14,7 @@ import com.nagi4757.ec.api.order.domain.repository.OrderPage
 import com.nagi4757.ec.api.order.domain.repository.OrderRepository
 import com.nagi4757.ec.api.product.domain.repository.ProductRepository
 import org.springframework.stereotype.Service
+import org.springframework.transaction.annotation.Isolation
 import org.springframework.transaction.annotation.Transactional
 
 @Service
@@ -22,14 +24,15 @@ class OrderService(
     private val productRepository: ProductRepository
 ) {
     /* 장바구니 → 주문 생성 + 장바구니 비우기 */
-    @Transactional
+    @Transactional(isolation = Isolation.READ_COMMITTED)
     fun placeOrder(userId: Long): Order {
         val cart = cartService.getCart(userId)
         if (cart.items.isEmpty()) throw EmptyCartException()
+        if (cart.items.any { !it.available }) throw ProductNotAvailableException()
 
         cart.items.forEach { line ->
             if (!productRepository.decreaseStockIfAvailable(line.productId, line.quantity)) {
-                throw InsufficientStockException()
+                throwStockUpdateFailure(line.productId)
             }
         }
 
@@ -115,5 +118,14 @@ class OrderService(
                 "Failed to restore stock for product ${item.productId}"
             }
         }
+    }
+
+    private fun throwStockUpdateFailure(productId: Long): Nothing {
+        val product = productRepository.findById(productId)
+            ?: throw ResourceNotFoundException(ApiErrorCode.PRODUCT_NOT_FOUND)
+        if (!product.active) {
+            throw ProductNotAvailableException()
+        }
+        throw InsufficientStockException()
     }
 }

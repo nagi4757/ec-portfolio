@@ -12,6 +12,7 @@ enum class ApiErrorCode(
     UNAUTHORIZED(HttpStatus.UNAUTHORIZED, "Authentication is required"),
     ACCESS_DENIED(HttpStatus.FORBIDDEN, "Access is denied"),
     PRODUCT_NOT_FOUND(HttpStatus.NOT_FOUND, "Product was not found"),
+    PRODUCT_NOT_AVAILABLE(HttpStatus.CONFLICT, "Product is not available"),
     CATEGORY_NOT_FOUND(HttpStatus.NOT_FOUND, "Category was not found"),
     USER_NOT_FOUND(HttpStatus.NOT_FOUND, "User was not found"),
     ORDER_NOT_FOUND(HttpStatus.NOT_FOUND, "Order was not found"),
