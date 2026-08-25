@@ -13,5 +13,10 @@ export const adminJa = {
             loginInProgress: 'ログイン中...',
             loginFailed: 'ログインに失敗しました。',
         },
+        product: {
+            stockQuantity: '在庫',
+            inStock: '在庫あり',
+            outOfStock: '在庫切れ',
+        },
     },
 } as const

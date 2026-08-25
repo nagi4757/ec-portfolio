@@ -1,18 +1,27 @@
 import { useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useParams, Link } from 'react-router-dom';
 import { ProductAPI } from '@/features/products/api';
 import { CartAPI } from '@/features/cart/api';
 import { authStore } from '@/lib/authStore';
 import { cartStore } from '@/lib/cartStore';
+import { isApiErrorCode } from '@/lib/api';
 import type { ProductResponse } from '@/types/product';
 
+type AddFeedback = {
+    kind: 'success' | 'error';
+    messageKey?: string;
+    fallback?: string;
+};
+
 export default function ProductDetailPage() {
+    const { t } = useTranslation();
     const { id } = useParams();
     const [data, setData] = useState<ProductResponse | null>(null);
     const [err, setErr] = useState<string | null>(null);
     const [loading, setLoading] = useState(true);
     const [adding, setAdding] = useState(false);
-    const [addMsg, setAddMsg] = useState<string | null>(null);
+    const [feedback, setFeedback] = useState<AddFeedback | null>(null);
 
     useEffect(() => {
         if (!id) return;
@@ -29,17 +38,22 @@ export default function ProductDetailPage() {
     async function addToCart() {
         if (!data) return;
         if (!authStore.isLoggedIn()) {
-            setAddMsg('장바구니는 로그인 후 이용 가능합니다.');
+            setFeedback({ kind: 'error', messageKey: 'store.cart.loginRequired' });
             return;
         }
         setAdding(true);
-        setAddMsg(null);
+        setFeedback(null);
         try {
             const updated = await CartAPI.addItem(data.id, 1);
             cartStore.setTotalQuantity(updated.totalQuantity);
-            setAddMsg('장바구니에 담았습니다.');
+            setFeedback({ kind: 'success', messageKey: 'store.cart.added' });
         } catch (e) {
-            setAddMsg(e instanceof Error ? e.message : '장바구니 담기에 실패했습니다.');
+            setFeedback(isApiErrorCode(e, 'INSUFFICIENT_STOCK')
+                ? { kind: 'error', messageKey: 'store.stock.insufficient' }
+                : {
+                    kind: 'error',
+                    fallback: e instanceof Error ? e.message : t('store.cart.addFailed'),
+                });
         } finally {
             setAdding(false);
         }
@@ -61,16 +75,21 @@ export default function ProductDetailPage() {
                     <div style={{ fontSize: 20, fontWeight: 700, margin: '8px 0 16px' }}>
                         {data.price.toLocaleString()} 円
                     </div>
+                    <div style={{ marginBottom: 12, color: data.stockQuantity === 0 ? 'crimson' : '#2f855a' }}>
+                        {data.stockQuantity === 0
+                            ? t('store.stock.outOfStock')
+                            : t('store.stock.remaining', { count: data.stockQuantity })}
+                    </div>
                     <p style={{ lineHeight: 1.6, color: '#333' }}>{data.description ?? '상품 설명 없음'}</p>
                     <div style={{ marginTop: 16, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                        <button onClick={addToCart} disabled={adding}>
-                            {adding ? '담는 중...' : '장바구니 담기'}
+                        <button onClick={addToCart} disabled={adding || data.stockQuantity === 0}>
+                            {adding ? t('store.cart.adding') : t('store.cart.add')}
                         </button>
                         <Link to="/cart">장바구니로 이동</Link>
                     </div>
-                    {addMsg && (
-                        <div style={{ marginTop: 10, fontSize: 14, color: addMsg.includes('실패') ? 'crimson' : '#2b6cb0' }}>
-                            {addMsg}
+                    {feedback && (
+                        <div style={{ marginTop: 10, fontSize: 14, color: feedback.kind === 'success' ? '#2b6cb0' : 'crimson' }}>
+                            {feedback.messageKey ? t(feedback.messageKey) : feedback.fallback}
                         </div>
                     )}
                 </div>

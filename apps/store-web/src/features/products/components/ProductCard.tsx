@@ -1,31 +1,45 @@
 import { useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
 import { CartAPI } from '@/features/cart/api';
 import { authStore } from '@/lib/authStore';
 import { cartStore } from '@/lib/cartStore';
+import { isApiErrorCode } from '@/lib/api';
 import type { ProductResponse } from '@/types/product';
 
+type AddFeedback = {
+    kind: 'success' | 'error';
+    messageKey?: string;
+    fallback?: string;
+};
+
 export function ProductCard({ product }: { product: ProductResponse }) {
+    const { t } = useTranslation();
     const [adding, setAdding] = useState(false);
-    const [addMsg, setAddMsg] = useState<string | null>(null);
+    const [feedback, setFeedback] = useState<AddFeedback | null>(null);
 
     async function handleAddToCart(e: React.MouseEvent<HTMLButtonElement>) {
         e.preventDefault();
         e.stopPropagation();
 
         if (!authStore.isLoggedIn()) {
-            setAddMsg('로그인 후 장바구니를 이용할 수 있습니다.');
+            setFeedback({ kind: 'error', messageKey: 'store.cart.loginRequired' });
             return;
         }
 
         setAdding(true);
-        setAddMsg(null);
+        setFeedback(null);
         try {
             const updated = await CartAPI.addItem(product.id, 1);
             cartStore.setTotalQuantity(updated.totalQuantity);
-            setAddMsg('장바구니에 담았습니다.');
+            setFeedback({ kind: 'success', messageKey: 'store.cart.added' });
         } catch (e) {
-            setAddMsg(e instanceof Error ? e.message : '장바구니 담기에 실패했습니다.');
+            setFeedback(isApiErrorCode(e, 'INSUFFICIENT_STOCK')
+                ? { kind: 'error', messageKey: 'store.stock.insufficient' }
+                : {
+                    kind: 'error',
+                    fallback: e instanceof Error ? e.message : t('store.cart.addFailed'),
+                });
         } finally {
             setAdding(false);
         }
@@ -45,16 +59,25 @@ export function ProductCard({ product }: { product: ProductResponse }) {
                 <div style={{ padding: 12 }}>
                     <div style={{ fontWeight: 600, marginBottom: 4 }}>{product.name}</div>
                     <div style={{ color: '#444' }}>{product.price.toLocaleString()} 円</div>
+                    <div style={{ marginTop: 6, color: product.stockQuantity === 0 ? 'crimson' : '#2f855a' }}>
+                        {product.stockQuantity === 0
+                            ? t('store.stock.outOfStock')
+                            : t('store.stock.inStock')}
+                    </div>
                 </div>
             </Link>
             <div style={styles.actions}>
-                <button onClick={handleAddToCart} disabled={adding} style={styles.cartButton}>
-                    {adding ? '담는 중...' : '장바구니 담기'}
+                <button
+                    onClick={handleAddToCart}
+                    disabled={adding || product.stockQuantity === 0}
+                    style={styles.cartButton}
+                >
+                    {adding ? t('store.cart.adding') : t('store.cart.add')}
                 </button>
             </div>
-            {addMsg && (
-                <div style={{ ...styles.msg, color: addMsg.includes('담았습니다') ? '#2b6cb0' : 'crimson' }}>
-                    {addMsg}
+            {feedback && (
+                <div style={{ ...styles.msg, color: feedback.kind === 'success' ? '#2b6cb0' : 'crimson' }}>
+                    {feedback.messageKey ? t(feedback.messageKey) : feedback.fallback}
                 </div>
             )}
         </div>
