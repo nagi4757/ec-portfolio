@@ -17,6 +17,8 @@ class InsufficientStockException : ApplicationException(ApiErrorCode.INSUFFICIEN
 
 class InvalidOrderStatusException : ApplicationException(ApiErrorCode.INVALID_ORDER_STATUS)
 
+class InvalidOrderTransitionException : ApplicationException(ApiErrorCode.INVALID_ORDER_TRANSITION)
+
 class EmailAlreadyExistsException : ApplicationException(ApiErrorCode.EMAIL_ALREADY_EXISTS)
 
 class InvalidCredentialsException : ApplicationException(ApiErrorCode.INVALID_CREDENTIALS)

@@ -60,6 +60,17 @@ class GlobalExceptionHandlerTest {
     }
 
     @Test
+    fun `invalid order transition returns conflict response`() {
+        mockMvc.get("/test/invalid-order-transition")
+            .andExpect {
+                status { isConflict() }
+                jsonPath("$.status") { value(409) }
+                jsonPath("$.code") { value("INVALID_ORDER_TRANSITION") }
+                jsonPath("$.message") { value("Order status transition is not allowed") }
+            }
+    }
+
+    @Test
     fun `validation failure includes field errors`() {
         mockMvc.post("/test/validation") {
             contentType = MediaType.APPLICATION_JSON
@@ -171,6 +182,9 @@ class GlobalExceptionHandlerTest {
 
         @GetMapping("/insufficient-stock")
         fun insufficientStock(): Nothing = throw InsufficientStockException()
+
+        @GetMapping("/invalid-order-transition")
+        fun invalidOrderTransition(): Nothing = throw InvalidOrderTransitionException()
 
         @PostMapping("/validation")
         fun validate(@Valid @RequestBody request: TestRequest): TestRequest = request

@@ -74,6 +74,12 @@ class MyBatisProductRepository(
     }
 
     @Transactional
+    override fun increaseStock(productId: Long, quantity: Int): Boolean {
+        require(quantity > 0) { "quantity must be greater than 0" }
+        return mapper.increaseStock(productId, quantity) > 0
+    }
+
+    @Transactional
     override fun delete(id: Long): Boolean {
         return mapper.delete(id) > 0
     }

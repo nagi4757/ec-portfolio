@@ -28,6 +28,10 @@ interface ProductMapper {
         @Param("productId") productId: Long,
         @Param("quantity") quantity: Int
     ): Int
+    fun increaseStock(
+        @Param("productId") productId: Long,
+        @Param("quantity") quantity: Int
+    ): Int
     fun delete(id: Long): Int
 }
 

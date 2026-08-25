@@ -14,6 +14,7 @@ import com.nagi4757.ec.api.product.domain.repository.ProductRepository
 import com.nagi4757.ec.api.product.domain.repository.ProductSearchCondition
 import org.assertj.core.api.Assertions.assertThat
 import org.flywaydb.core.Flyway
+import org.flywaydb.core.api.MigrationVersion
 import org.junit.jupiter.api.Tag
 import org.junit.jupiter.api.Test
 import org.springframework.beans.factory.annotation.Autowired
@@ -21,6 +22,7 @@ import org.springframework.boot.test.context.SpringBootTest
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection
 import org.springframework.dao.DataIntegrityViolationException
 import org.springframework.jdbc.core.JdbcTemplate
+import org.springframework.jdbc.datasource.DriverManagerDataSource
 import org.springframework.test.context.ActiveProfiles
 import org.springframework.transaction.annotation.Transactional
 import org.testcontainers.containers.GenericContainer
@@ -47,16 +49,100 @@ class InfrastructureIntegrationTest @Autowired constructor(
 ) {
 
     @Test
-    fun `applies Flyway migrations V1 through V5 and initializes existing stock to zero`() {
+    fun `applies Flyway migrations V1 through V6 and initializes existing stock to zero`() {
         val appliedVersions = flyway.info().applied()
             .mapNotNull { it.version?.version }
 
-        assertThat(appliedVersions).containsExactly("1", "2", "3", "4", "5")
+        assertThat(appliedVersions).containsExactly("1", "2", "3", "4", "5", "6")
         val existingStock = jdbcTemplate.queryForList(
             "SELECT stock_quantity FROM products WHERE id IN (1, 2, 3) ORDER BY id",
             Int::class.java
         )
         assertThat(existingStock).containsExactly(0, 0, 0)
+    }
+
+    @Test
+    fun `migrates existing confirmed orders to preparing before adding status constraint`() {
+        val legacyDatabase = MariaDBContainer<Nothing>("mariadb:10.11")
+        legacyDatabase.start()
+        try {
+            val dataSource = DriverManagerDataSource(
+                legacyDatabase.jdbcUrl,
+                legacyDatabase.username,
+                legacyDatabase.password
+            )
+            Flyway.configure()
+                .dataSource(dataSource)
+                .target(MigrationVersion.fromVersion("5"))
+                .load()
+                .migrate()
+            val legacyJdbcTemplate = JdbcTemplate(dataSource)
+            legacyJdbcTemplate.update(
+                "INSERT INTO orders (user_id, status, total_amount) VALUES (?, 'CONFIRMED', ?)",
+                uniqueUserId(),
+                10_000L
+            )
+
+            val migrationResult = Flyway.configure()
+                .dataSource(dataSource)
+                .load()
+                .migrate()
+
+            assertThat(migrationResult.migrationsExecuted).isEqualTo(1)
+            assertThat(legacyJdbcTemplate.queryForObject(
+                "SELECT status FROM orders LIMIT 1",
+                String::class.java
+            )).isEqualTo("PREPARING")
+            org.junit.jupiter.api.assertThrows<DataIntegrityViolationException> {
+                legacyJdbcTemplate.update(
+                    "INSERT INTO orders (user_id, status, total_amount) VALUES (?, 'CONFIRMED', ?)",
+                    uniqueUserId(),
+                    10_000L
+                )
+            }
+        } finally {
+            legacyDatabase.stop()
+        }
+    }
+
+    @Test
+    @Transactional
+    fun `database rejects unsupported order status`() {
+        org.junit.jupiter.api.assertThrows<DataIntegrityViolationException> {
+            jdbcTemplate.update(
+                "INSERT INTO orders (user_id, status, total_amount) VALUES (?, 'UNKNOWN', ?)",
+                uniqueUserId(),
+                10_000L
+            )
+        }
+    }
+
+    @Test
+    @Transactional
+    fun `conditional order transition rejects a stale expected status`() {
+        val saved = orderRepository.save(
+            Order(
+                id = null,
+                userId = uniqueUserId(),
+                status = OrderStatus.PENDING,
+                items = emptyList(),
+                totalAmount = 0L,
+                createdAt = null
+            )
+        )
+        val orderId = requireNotNull(saved.id)
+
+        assertThat(orderRepository.transitionStatus(
+            orderId,
+            OrderStatus.PENDING,
+            OrderStatus.PREPARING
+        )).isTrue()
+        assertThat(orderRepository.transitionStatus(
+            orderId,
+            OrderStatus.PENDING,
+            OrderStatus.CANCELLED
+        )).isFalse()
+        assertThat(orderRepository.findById(orderId)?.status).isEqualTo(OrderStatus.PREPARING)
     }
 
     @Test
@@ -233,6 +319,152 @@ class InfrastructureIntegrationTest @Autowired constructor(
                 deleteOrdersForUser(userId)
             }
             productRepository.delete(productId)
+        }
+    }
+
+    @Test
+    fun `places and cancels an order while restoring exact stock`() {
+        val userId = uniqueUserId()
+        val productId = productRepository.create(
+            product(stockQuantity = 5, namePrefix = "cancel-restore")
+        )
+        cartRepository.clear(userId)
+        cartRepository.increment(userId, productId, 3)
+
+        try {
+            val order = orderService.placeOrder(userId)
+            assertThat(productRepository.findById(productId)?.stockQuantity).isEqualTo(2)
+
+            val cancelled = orderService.cancelOrder(userId, requireNotNull(order.id))
+
+            assertThat(cancelled.status).isEqualTo(OrderStatus.CANCELLED)
+            assertThat(productRepository.findById(productId)?.stockQuantity).isEqualTo(5)
+            assertThat(cartRepository.findAll(userId)).isEmpty()
+        } finally {
+            cartRepository.clear(userId)
+            deleteOrdersForUser(userId)
+            productRepository.delete(productId)
+        }
+    }
+
+    @Test
+    fun `allows only one concurrent cancellation and restores stock once`() {
+        val userId = uniqueUserId()
+        val productId = productRepository.create(
+            product(stockQuantity = 2, namePrefix = "concurrent-cancel")
+        )
+        cartRepository.clear(userId)
+        cartRepository.increment(userId, productId, 2)
+        val orderId = requireNotNull(orderService.placeOrder(userId).id)
+        val start = CountDownLatch(1)
+        val executor = Executors.newFixedThreadPool(2)
+
+        try {
+            val futures = List(2) {
+                executor.submit<ApiErrorCode?> {
+                    start.await()
+                    try {
+                        orderService.cancelOrder(userId, orderId)
+                        null
+                    } catch (exception: ApplicationException) {
+                        exception.errorCode
+                    }
+                }
+            }
+            start.countDown()
+            val attempts = futures.map { it.get(10, TimeUnit.SECONDS) }
+
+            assertThat(attempts.count { it == null }).isEqualTo(1)
+            assertThat(attempts.count { it == ApiErrorCode.INVALID_ORDER_TRANSITION }).isEqualTo(1)
+            assertThat(orderRepository.findById(orderId)?.status).isEqualTo(OrderStatus.CANCELLED)
+            assertThat(productRepository.findById(productId)?.stockQuantity).isEqualTo(2)
+        } finally {
+            executor.shutdownNow()
+            cartRepository.clear(userId)
+            deleteOrdersForUser(userId)
+            productRepository.delete(productId)
+        }
+    }
+
+    @Test
+    fun `keeps order and stock consistent when admin transition races with user cancellation`() {
+        val userId = uniqueUserId()
+        val productId = productRepository.create(
+            product(stockQuantity = 1, namePrefix = "admin-user-race")
+        )
+        cartRepository.clear(userId)
+        cartRepository.increment(userId, productId, 1)
+        val orderId = requireNotNull(orderService.placeOrder(userId).id)
+        val start = CountDownLatch(1)
+        val executor = Executors.newFixedThreadPool(2)
+
+        try {
+            val futures = listOf(
+                executor.submit<ApiErrorCode?> {
+                    start.await()
+                    try {
+                        orderService.updateStatus(orderId, OrderStatus.PREPARING)
+                        null
+                    } catch (exception: ApplicationException) {
+                        exception.errorCode
+                    }
+                },
+                executor.submit<ApiErrorCode?> {
+                    start.await()
+                    try {
+                        orderService.cancelOrder(userId, orderId)
+                        null
+                    } catch (exception: ApplicationException) {
+                        exception.errorCode
+                    }
+                }
+            )
+            start.countDown()
+            val attempts = futures.map { it.get(10, TimeUnit.SECONDS) }
+            val finalOrder = requireNotNull(orderRepository.findById(orderId))
+            val finalStock = productRepository.findById(productId)?.stockQuantity
+
+            assertThat(attempts.count { it == null }).isEqualTo(1)
+            assertThat(attempts.count { it == ApiErrorCode.INVALID_ORDER_TRANSITION }).isEqualTo(1)
+            when (finalOrder.status) {
+                OrderStatus.PREPARING -> assertThat(finalStock).isZero()
+                OrderStatus.CANCELLED -> assertThat(finalStock).isEqualTo(1)
+                else -> throw AssertionError("Unexpected final order status: ${finalOrder.status}")
+            }
+        } finally {
+            executor.shutdownNow()
+            cartRepository.clear(userId)
+            deleteOrdersForUser(userId)
+            productRepository.delete(productId)
+        }
+    }
+
+    @Test
+    fun `rolls back cancellation and earlier stock restoration when a product is missing`() {
+        val userId = uniqueUserId()
+        val firstProductId = productRepository.create(
+            product(stockQuantity = 1, namePrefix = "restore-first")
+        )
+        val missingProductId = productRepository.create(
+            product(stockQuantity = 1, namePrefix = "restore-missing")
+        )
+        cartRepository.clear(userId)
+        cartRepository.increment(userId, firstProductId, 1)
+        cartRepository.increment(userId, missingProductId, 1)
+        val orderId = requireNotNull(orderService.placeOrder(userId).id)
+        productRepository.delete(missingProductId)
+
+        try {
+            org.junit.jupiter.api.assertThrows<IllegalStateException> {
+                orderService.cancelOrder(userId, orderId)
+            }
+
+            assertThat(orderRepository.findById(orderId)?.status).isEqualTo(OrderStatus.PENDING)
+            assertThat(productRepository.findById(firstProductId)?.stockQuantity).isZero()
+        } finally {
+            cartRepository.clear(userId)
+            deleteOrdersForUser(userId)
+            productRepository.delete(firstProductId)
         }
     }
 

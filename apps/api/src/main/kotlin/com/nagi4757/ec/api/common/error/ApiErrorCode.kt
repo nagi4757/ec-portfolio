@@ -19,6 +19,7 @@ enum class ApiErrorCode(
     INVALID_CART_QUANTITY(HttpStatus.BAD_REQUEST, "Cart quantity is invalid"),
     INSUFFICIENT_STOCK(HttpStatus.CONFLICT, "Product stock is insufficient"),
     INVALID_ORDER_STATUS(HttpStatus.BAD_REQUEST, "Order status is invalid"),
+    INVALID_ORDER_TRANSITION(HttpStatus.CONFLICT, "Order status transition is not allowed"),
     EMAIL_ALREADY_EXISTS(HttpStatus.CONFLICT, "Email already exists"),
     INVALID_CREDENTIALS(HttpStatus.UNAUTHORIZED, "Invalid credentials"),
     USER_CREATION_FAILED(HttpStatus.INTERNAL_SERVER_ERROR, "User creation failed"),

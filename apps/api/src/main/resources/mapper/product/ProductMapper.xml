@@ -80,6 +80,12 @@
           AND stock_quantity &gt;= #{quantity}
     </update>
 
+    <update id="increaseStock">
+        UPDATE products
+        SET stock_quantity = stock_quantity + #{quantity}
+        WHERE id = #{productId}
+    </update>
+
     <delete id="delete">
         DELETE FROM products WHERE id = #{id}
     </delete>

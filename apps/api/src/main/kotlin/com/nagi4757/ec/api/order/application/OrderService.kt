@@ -4,6 +4,7 @@ import com.nagi4757.ec.api.cart.application.CartService
 import com.nagi4757.ec.api.common.error.ApiErrorCode
 import com.nagi4757.ec.api.common.error.EmptyCartException
 import com.nagi4757.ec.api.common.error.InsufficientStockException
+import com.nagi4757.ec.api.common.error.InvalidOrderTransitionException
 import com.nagi4757.ec.api.common.error.ResourceNotFoundException
 import com.nagi4757.ec.api.order.domain.model.Order
 import com.nagi4757.ec.api.order.domain.model.OrderItem
@@ -64,6 +65,25 @@ class OrderService(
         orderRepository.findByIdAndUserId(orderId, userId)
             ?: throw ResourceNotFoundException(ApiErrorCode.ORDER_NOT_FOUND)
 
+    @Transactional
+    fun cancelOrder(userId: Long, orderId: Long): Order {
+        val order = orderRepository.findByIdAndUserId(orderId, userId)
+            ?: throw ResourceNotFoundException(ApiErrorCode.ORDER_NOT_FOUND)
+        if (!order.status.isUserCancellable()) {
+            throw InvalidOrderTransitionException()
+        }
+        if (!orderRepository.transitionStatusForUser(
+                id = orderId,
+                userId = userId,
+                expectedStatus = order.status,
+                targetStatus = OrderStatus.CANCELLED
+            )) {
+            throw InvalidOrderTransitionException()
+        }
+        restoreStock(order)
+        return getOrder(userId, orderId)
+    }
+
     /* 어드민: 전체 주문 목록 */
     fun listAllOrders(page: Int, size: Int): OrderPage = orderRepository.findAll(page, size)
 
@@ -74,10 +94,26 @@ class OrderService(
 
     /* 어드민: 주문 상태 변경 */
     @Transactional
-    fun updateStatus(orderId: Long, status: OrderStatus): Order {
-        orderRepository.findById(orderId)
+    fun updateStatus(orderId: Long, targetStatus: OrderStatus): Order {
+        val order = orderRepository.findById(orderId)
             ?: throw ResourceNotFoundException(ApiErrorCode.ORDER_NOT_FOUND)
-        orderRepository.updateStatus(orderId, status)
+        if (!order.status.canTransitionTo(targetStatus)) {
+            throw InvalidOrderTransitionException()
+        }
+        if (!orderRepository.transitionStatus(orderId, order.status, targetStatus)) {
+            throw InvalidOrderTransitionException()
+        }
+        if (targetStatus == OrderStatus.CANCELLED) {
+            restoreStock(order)
+        }
         return getOrderAdmin(orderId)
+    }
+
+    private fun restoreStock(order: Order) {
+        order.items.forEach { item ->
+            check(productRepository.increaseStock(item.productId, item.quantity)) {
+                "Failed to restore stock for product ${item.productId}"
+            }
+        }
     }
 }

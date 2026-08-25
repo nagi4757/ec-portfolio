@@ -9,6 +9,7 @@ interface ProductRepository {
     fun create(product: Product): Long
     fun update(product: Product): Boolean
     fun decreaseStockIfAvailable(productId: Long, quantity: Int): Boolean
+    fun increaseStock(productId: Long, quantity: Int): Boolean
     fun delete(id: Long): Boolean
 }
 

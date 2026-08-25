@@ -35,10 +35,13 @@ class OrderUserController(
     fun getOrder(@PathVariable id: Long): OrderResponse =
         orderService.getOrder(currentUserId(), id).toResponse()
 
+    @PostMapping("/{id}/cancel")
+    fun cancelOrder(@PathVariable id: Long): OrderResponse =
+        orderService.cancelOrder(currentUserId(), id).toResponse()
+
     private fun currentUserId(): Long {
         val principal = SecurityContextHolder.getContext().authentication?.principal as? JwtUserClaims
             ?: throw ResponseStatusException(HttpStatus.UNAUTHORIZED, "Unauthorized")
         return principal.userId
     }
 }
-
