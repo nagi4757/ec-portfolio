@@ -12,6 +12,7 @@ class ProductFactory {
             id = src.id,
             name = src.name ?: "",
             price = src.price ?: 0L,
+            stockQuantity = src.stockQuantity ?: 0,
             imageUrl = src.imageUrl,
             description = src.description
         )
@@ -21,6 +22,7 @@ class ProductFactory {
             id = src.id
             name = src.name
             price = src.price
+            stockQuantity = src.stockQuantity
             imageUrl = src.imageUrl
             description = src.description
         }

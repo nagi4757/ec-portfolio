@@ -40,6 +40,7 @@ class ProductAdminController(
             CreateProductCommand(
                 name = req.name,
                 price = req.price,
+                stockQuantity = requireNotNull(req.stockQuantity),
                 imageUrl = req.imageUrl,
                 description = req.description
             )
@@ -57,6 +58,7 @@ class ProductAdminController(
             UpdateProductCommand(
                 name = req.name,
                 price = req.price,
+                stockQuantity = req.stockQuantity,
                 imageUrl = req.imageUrl,
                 description = req.description
             )
