@@ -1,6 +1,7 @@
 package com.nagi4757.ec.api.common.error
 
 import com.nagi4757.ec.api.category.application.CategoryService
+import com.nagi4757.ec.api.common.logging.CorrelationIdFilter
 import com.nagi4757.ec.api.category.presentation.admin.CategoryAdminController
 import com.nagi4757.ec.api.category.presentation.public.CategoryPublicController
 import com.nagi4757.ec.api.product.application.ProductService
@@ -12,6 +13,7 @@ import org.mockito.Mockito.mock
 import org.springframework.test.web.servlet.MockMvc
 import org.springframework.test.web.servlet.get
 import org.springframework.test.web.servlet.setup.MockMvcBuilders
+import org.springframework.test.web.servlet.setup.StandaloneMockMvcBuilder
 
 class ResourceNotFoundResponseTest {
     private lateinit var mockMvc: MockMvc
@@ -29,6 +31,7 @@ class ResourceNotFoundResponseTest {
                 CategoryAdminController(categoryService)
             )
             .setControllerAdvice(GlobalExceptionHandler())
+            .addFilters<StandaloneMockMvcBuilder>(CorrelationIdFilter())
             .build()
     }
 
