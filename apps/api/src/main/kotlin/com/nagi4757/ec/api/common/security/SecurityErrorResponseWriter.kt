@@ -3,6 +3,7 @@ package com.nagi4757.ec.api.common.security
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.nagi4757.ec.api.common.error.ApiErrorCode
 import com.nagi4757.ec.api.common.error.ApiErrorResponse
+import com.nagi4757.ec.api.common.logging.CorrelationIdContext
 import jakarta.servlet.http.HttpServletRequest
 import jakarta.servlet.http.HttpServletResponse
 import org.springframework.http.MediaType
@@ -22,7 +23,11 @@ class SecurityErrorResponseWriter(
         response.characterEncoding = Charsets.UTF_8.name()
         objectMapper.writeValue(
             response.outputStream,
-            ApiErrorResponse.of(errorCode, request.requestURI)
+            ApiErrorResponse.of(
+                errorCode = errorCode,
+                path = request.requestURI,
+                correlationId = CorrelationIdContext.get(request)
+            )
         )
     }
 }
