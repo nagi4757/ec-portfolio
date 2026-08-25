@@ -1,5 +1,6 @@
 package com.nagi4757.ec.api.common.error
 
+import com.nagi4757.ec.api.common.logging.CorrelationIdContext
 import jakarta.servlet.http.HttpServletRequest
 import org.slf4j.LoggerFactory
 import org.springframework.http.HttpStatusCode
@@ -22,8 +23,8 @@ class GlobalExceptionHandler {
         request: HttpServletRequest
     ): ResponseEntity<ApiErrorResponse> =
         response(
+            request = request,
             errorCode = exception.errorCode,
-            path = request.requestURI,
             message = exception.message ?: exception.errorCode.defaultMessage
         )
 
@@ -48,8 +49,8 @@ class GlobalExceptionHandler {
         }
 
         return response(
+            request = request,
             errorCode = errorCode,
-            path = request.requestURI,
             status = exception.statusCode
         )
     }
@@ -68,8 +69,8 @@ class GlobalExceptionHandler {
         }
 
         return response(
+            request = request,
             errorCode = ApiErrorCode.VALIDATION_FAILED,
-            path = request.requestURI,
             fieldErrors = fieldErrors
         )
     }
@@ -79,7 +80,7 @@ class GlobalExceptionHandler {
         exception: HttpMessageNotReadableException,
         request: HttpServletRequest
     ): ResponseEntity<ApiErrorResponse> =
-        response(ApiErrorCode.MALFORMED_REQUEST, request.requestURI)
+        response(request, ApiErrorCode.MALFORMED_REQUEST)
 
     @ExceptionHandler(
         MissingServletRequestParameterException::class,
@@ -89,25 +90,34 @@ class GlobalExceptionHandler {
         exception: Exception,
         request: HttpServletRequest
     ): ResponseEntity<ApiErrorResponse> =
-        response(ApiErrorCode.BAD_REQUEST, request.requestURI)
+        response(request, ApiErrorCode.BAD_REQUEST)
 
     @ExceptionHandler(Exception::class)
     fun handleUnexpectedException(
         exception: Exception,
         request: HttpServletRequest
     ): ResponseEntity<ApiErrorResponse> {
-        logger.error("Unexpected exception while handling request path={}", request.requestURI, exception)
-        return response(ApiErrorCode.INTERNAL_SERVER_ERROR, request.requestURI)
+        logger.error("Unexpected exception", exception)
+        return response(request, ApiErrorCode.INTERNAL_SERVER_ERROR)
     }
 
     private fun response(
+        request: HttpServletRequest,
         errorCode: ApiErrorCode,
-        path: String,
         message: String = errorCode.defaultMessage,
         fieldErrors: List<ApiFieldError> = emptyList(),
         status: HttpStatusCode = errorCode.status
     ): ResponseEntity<ApiErrorResponse> =
         ResponseEntity
             .status(status)
-            .body(ApiErrorResponse.of(errorCode, path, message, fieldErrors, status.value()))
+            .body(
+                ApiErrorResponse.of(
+                    errorCode = errorCode,
+                    path = request.requestURI,
+                    correlationId = CorrelationIdContext.get(request),
+                    message = message,
+                    fieldErrors = fieldErrors,
+                    status = status.value()
+                )
+            )
 }

@@ -8,12 +8,14 @@ data class ApiErrorResponse(
     val code: String,
     val message: String,
     val path: String,
+    val correlationId: String,
     val fieldErrors: List<ApiFieldError> = emptyList()
 ) {
     companion object {
         fun of(
             errorCode: ApiErrorCode,
             path: String,
+            correlationId: String,
             message: String = errorCode.defaultMessage,
             fieldErrors: List<ApiFieldError> = emptyList(),
             status: Int = errorCode.status.value()
@@ -24,6 +26,7 @@ data class ApiErrorResponse(
                 code = errorCode.name,
                 message = message,
                 path = path,
+                correlationId = correlationId,
                 fieldErrors = fieldErrors
             )
     }
