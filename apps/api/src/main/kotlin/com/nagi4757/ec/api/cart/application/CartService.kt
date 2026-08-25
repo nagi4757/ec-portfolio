@@ -18,8 +18,13 @@ class CartService(
 ) {
     @Transactional(readOnly = true)
     fun getCart(userId: Long): CartView {
-        val items = cartRepository.findAll(userId).mapNotNull { item ->
-            val product = productService.get(item.productId) ?: return@mapNotNull null
+        val cartItems = cartRepository.findAll(userId)
+        if (cartItems.isEmpty()) return CartView(emptyList(), 0, 0L)
+
+        val productsById = productService.getByIds(cartItems.map { it.productId }.distinct())
+            .associateBy { requireNotNull(it.id) { "Persisted product id is required" } }
+        val items = cartItems.mapNotNull { item ->
+            val product = productsById[item.productId] ?: return@mapNotNull null
             CartLine(
                 productId = item.productId,
                 name = product.name,

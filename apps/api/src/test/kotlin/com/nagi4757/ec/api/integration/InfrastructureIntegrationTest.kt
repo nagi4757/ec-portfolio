@@ -332,6 +332,73 @@ class InfrastructureIntegrationTest @Autowired constructor(
     }
 
     @Test
+    fun `batch loads active and inactive cart products while preserving Redis order`() {
+        val userId = uniqueUserId()
+        val activeName = "batch-active-${UUID.randomUUID()}"
+        val inactiveName = "batch-inactive-${UUID.randomUUID()}"
+        val activeProductId = productRepository.create(
+            Product(
+                name = activeName,
+                price = 1_100L,
+                stockQuantity = 7,
+                imageUrl = null,
+                description = "batch query active product"
+            )
+        )
+        val inactiveProductId = productRepository.create(
+            Product(
+                name = inactiveName,
+                price = 2_200L,
+                stockQuantity = 9,
+                imageUrl = null,
+                description = "batch query inactive product"
+            )
+        )
+        val ghostProductId = Long.MAX_VALUE
+        productRepository.deactivate(inactiveProductId)
+        cartRepository.clear(userId)
+        cartRepository.increment(userId, ghostProductId, 4)
+        cartRepository.increment(userId, inactiveProductId, 3)
+        cartRepository.increment(userId, activeProductId, 2)
+
+        try {
+            val productsById = productRepository.findByIds(
+                listOf(inactiveProductId, ghostProductId, activeProductId)
+            ).associateBy { requireNotNull(it.id) }
+
+            assertThat(productsById.keys).containsExactlyInAnyOrder(activeProductId, inactiveProductId)
+            val activeProduct = requireNotNull(productsById[activeProductId])
+            assertThat(activeProduct.name).isEqualTo(activeName)
+            assertThat(activeProduct.price).isEqualTo(1_100L)
+            assertThat(activeProduct.stockQuantity).isEqualTo(7)
+            assertThat(activeProduct.active).isTrue()
+            val inactiveProduct = requireNotNull(productsById[inactiveProductId])
+            assertThat(inactiveProduct.name).isEqualTo(inactiveName)
+            assertThat(inactiveProduct.price).isEqualTo(2_200L)
+            assertThat(inactiveProduct.stockQuantity).isEqualTo(9)
+            assertThat(inactiveProduct.active).isFalse()
+
+            val cart = cartService.getCart(userId)
+
+            assertThat(cart.items.map { it.productId })
+                .containsExactly(activeProductId, inactiveProductId)
+            assertThat(cart.items.map { it.quantity }).containsExactly(2, 3)
+            assertThat(cart.items.map { it.available }).containsExactly(true, false)
+            assertThat(cart.totalQuantity).isEqualTo(5)
+            assertThat(cart.totalAmount).isEqualTo(8_800L)
+            assertThat(cartRepository.findAll(userId)).containsExactly(
+                CartItem(activeProductId, 2),
+                CartItem(inactiveProductId, 3),
+                CartItem(ghostProductId, 4)
+            )
+        } finally {
+            cartRepository.clear(userId)
+            deleteProduct(inactiveProductId)
+            deleteProduct(activeProductId)
+        }
+    }
+
+    @Test
     @Transactional
     fun `conditionally decreases stock without allowing a negative value`() {
         val productId = productRepository.create(

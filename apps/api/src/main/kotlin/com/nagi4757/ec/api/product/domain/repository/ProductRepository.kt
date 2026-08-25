@@ -4,6 +4,7 @@ import com.nagi4757.ec.api.product.domain.model.Product
 
 interface ProductRepository {
     fun findById(id: Long): Product?
+    fun findByIds(ids: Collection<Long>): List<Product>
     fun findActiveById(id: Long): Product?
     fun findAll(): List<Product>
     fun search(condition: ProductSearchCondition): ProductSearchResult

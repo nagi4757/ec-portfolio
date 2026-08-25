@@ -6,6 +6,7 @@ import org.apache.ibatis.annotations.Param
 @Mapper
 interface ProductMapper {
     fun selectById(id: Long): ProductRecord?
+    fun selectByIds(@Param("ids") ids: Collection<Long>): List<ProductRecord>
     fun selectActiveById(id: Long): ProductRecord?
     fun selectAll(): List<ProductRecord>
     fun countSearch(
