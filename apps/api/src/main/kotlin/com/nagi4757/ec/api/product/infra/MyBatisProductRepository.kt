@@ -19,6 +19,11 @@ class MyBatisProductRepository(
         return row?.let(factory::fromRecord)
     }
 
+    override fun findActiveById(id: Long): Product? {
+        val row = mapper.selectActiveById(id)
+        return row?.let(factory::fromRecord)
+    }
+
     override fun findAll(): List<Product> {
         return mapper.selectAll().map(factory::fromRecord)
     }
@@ -80,7 +85,7 @@ class MyBatisProductRepository(
     }
 
     @Transactional
-    override fun delete(id: Long): Boolean {
-        return mapper.delete(id) > 0
+    override fun deactivate(id: Long): Boolean {
+        return mapper.deactivate(id) > 0
     }
 }

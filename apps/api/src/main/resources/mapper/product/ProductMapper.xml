@@ -10,10 +10,12 @@
         <result property="stockQuantity" column="stock_quantity"/>
         <result property="imageUrl" column="image_url"/>
         <result property="description" column="description"/>
+        <result property="active" column="active"/>
     </resultMap>
 
     <sql id="searchCondition">
         <where>
+            active = TRUE
             <if test="keyword != null">
                 AND (name LIKE CONCAT('%', #{keyword}, '%')
                 OR description LIKE CONCAT('%', #{keyword}, '%'))
@@ -28,13 +30,20 @@
     </sql>
 
     <select id="selectById" resultMap="productResultMap">
-        SELECT id, name, price, stock_quantity, image_url, description
+        SELECT id, name, price, stock_quantity, image_url, description, active
         FROM products
         WHERE id = #{id}
     </select>
 
+    <select id="selectActiveById" resultMap="productResultMap">
+        SELECT id, name, price, stock_quantity, image_url, description, active
+        FROM products
+        WHERE id = #{id}
+          AND active = TRUE
+    </select>
+
     <select id="selectAll" resultMap="productResultMap">
-        SELECT id, name, price, stock_quantity, image_url, description
+        SELECT id, name, price, stock_quantity, image_url, description, active
         FROM products
         ORDER BY id DESC
     </select>
@@ -46,7 +55,7 @@
     </select>
 
     <select id="search" resultMap="productResultMap">
-        SELECT id, name, price, stock_quantity, image_url, description
+        SELECT id, name, price, stock_quantity, image_url, description, active
         FROM products
         <include refid="searchCondition"/>
         <choose>
@@ -59,8 +68,8 @@
     </select>
 
     <insert id="insert" useGeneratedKeys="true" keyProperty="id">
-        INSERT INTO products (name, price, stock_quantity, image_url, description)
-        VALUES (#{name}, #{price}, #{stockQuantity}, #{imageUrl}, #{description})
+        INSERT INTO products (name, price, stock_quantity, image_url, description, active)
+        VALUES (#{name}, #{price}, #{stockQuantity}, #{imageUrl}, #{description}, #{active})
     </insert>
 
     <update id="update">
@@ -69,7 +78,8 @@
             price = #{price},
             stock_quantity = #{stockQuantity},
             image_url = #{imageUrl},
-            description = #{description}
+            description = #{description},
+            active = #{active}
         WHERE id = #{id}
     </update>
 
@@ -77,6 +87,7 @@
         UPDATE products
         SET stock_quantity = stock_quantity - #{quantity}
         WHERE id = #{productId}
+          AND active = TRUE
           AND stock_quantity &gt;= #{quantity}
     </update>
 
@@ -86,8 +97,11 @@
         WHERE id = #{productId}
     </update>
 
-    <delete id="delete">
-        DELETE FROM products WHERE id = #{id}
-    </delete>
+    <update id="deactivate">
+        UPDATE products
+        SET active = FALSE
+        WHERE id = #{id}
+          AND active = TRUE
+    </update>
 
 </mapper>

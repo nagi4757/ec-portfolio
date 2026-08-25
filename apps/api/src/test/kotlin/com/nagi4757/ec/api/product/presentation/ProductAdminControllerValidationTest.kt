@@ -11,6 +11,7 @@ import org.mockito.Mockito.mock
 import org.mockito.Mockito.`when`
 import org.springframework.http.MediaType
 import org.springframework.test.web.servlet.MockMvc
+import org.springframework.test.web.servlet.delete
 import org.springframework.test.web.servlet.get
 import org.springframework.test.web.servlet.patch
 import org.springframework.test.web.servlet.post
@@ -82,17 +83,55 @@ class ProductAdminControllerValidationTest {
             description = null
         )
         `when`(productService.get(1L)).thenReturn(product)
+        `when`(productService.getActive(1L)).thenReturn(product)
 
         mockMvc.get("/api/admin/products/1")
             .andExpect {
                 status { isOk() }
                 jsonPath("$.stockQuantity") { value(8) }
+                jsonPath("$.active") { value(true) }
             }
 
         mockMvc.get("/api/public/products/1")
             .andExpect {
                 status { isOk() }
                 jsonPath("$.stockQuantity") { value(8) }
+                jsonPath("$.active") { value(true) }
+            }
+    }
+
+    @Test
+    fun `delete returns no content after deactivation`() {
+        mockMvc.delete("/api/admin/products/1")
+            .andExpect {
+                status { isNoContent() }
+            }
+    }
+
+    @Test
+    fun `inactive product is visible to admin but hidden from public API`() {
+        val inactiveProduct = Product(
+            id = 1L,
+            name = "Inactive Product",
+            price = 1_000L,
+            stockQuantity = 8,
+            imageUrl = null,
+            description = null,
+            active = false
+        )
+        `when`(productService.get(1L)).thenReturn(inactiveProduct)
+        `when`(productService.getActive(1L)).thenReturn(null)
+
+        mockMvc.get("/api/admin/products/1")
+            .andExpect {
+                status { isOk() }
+                jsonPath("$.active") { value(false) }
+            }
+
+        mockMvc.get("/api/public/products/1")
+            .andExpect {
+                status { isNotFound() }
+                jsonPath("$.code") { value("PRODUCT_NOT_FOUND") }
             }
     }
 }

@@ -7,9 +7,13 @@ import com.nagi4757.ec.api.product.application.command.UpdateProductCommand
 import com.nagi4757.ec.api.product.domain.model.Product
 import com.nagi4757.ec.api.product.domain.repository.ProductRepository
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Test
 import org.mockito.Mockito.mock
+import org.mockito.Mockito.never
 import org.mockito.Mockito.verify
 import org.mockito.Mockito.`when`
 
@@ -40,6 +44,7 @@ class ProductServiceTest {
 
         verify(productRepository).create(newProduct)
         assertEquals(9, result.stockQuantity)
+        assertTrue(result.active)
     }
 
     @Test
@@ -65,6 +70,18 @@ class ProductServiceTest {
     }
 
     @Test
+    fun `update reactivates inactive product when active is provided`() {
+        val current = product(stockQuantity = 6).copy(id = 1L, active = false)
+        val updated = current.copy(active = true)
+        `when`(productRepository.findById(1L)).thenReturn(current, updated)
+
+        val result = productService.update(1L, UpdateProductCommand(active = true))
+
+        verify(productRepository).update(updated)
+        assertTrue(result.active)
+    }
+
+    @Test
     fun `domain rejects negative stock quantity`() {
         assertThrows(IllegalArgumentException::class.java) {
             product(stockQuantity = -1)
@@ -81,12 +98,52 @@ class ProductServiceTest {
     }
 
     @Test
-    fun `delete throws product not found when product does not exist`() {
+    fun `deactivate marks active product inactive`() {
+        val current = product(stockQuantity = 6).copy(id = 1L)
+        `when`(productRepository.findById(1L)).thenReturn(current)
+
+        productService.deactivate(1L)
+
+        verify(productRepository).deactivate(1L)
+    }
+
+    @Test
+    fun `deactivate is idempotent for inactive product`() {
+        val current = product(stockQuantity = 6).copy(id = 1L, active = false)
+        `when`(productRepository.findById(1L)).thenReturn(current)
+
+        productService.deactivate(1L)
+
+        verify(productRepository).findById(1L)
+        verify(productRepository, never()).deactivate(1L)
+    }
+
+    @Test
+    fun `deactivate throws product not found when product does not exist`() {
         val exception = assertThrows(ApplicationException::class.java) {
-            productService.delete(999L)
+            productService.deactivate(999L)
         }
 
         assertEquals(ApiErrorCode.PRODUCT_NOT_FOUND, exception.errorCode)
+    }
+
+    @Test
+    fun `admin lookup includes inactive product`() {
+        val inactive = product(stockQuantity = 6).copy(id = 1L, active = false)
+        `when`(productRepository.findById(1L)).thenReturn(inactive)
+
+        val result = productService.get(1L)
+
+        assertFalse(requireNotNull(result).active)
+    }
+
+    @Test
+    fun `public lookup excludes inactive product`() {
+        `when`(productRepository.findActiveById(1L)).thenReturn(null)
+
+        val result = productService.getActive(1L)
+
+        assertNull(result)
     }
 
     private fun product(stockQuantity: Int): Product = Product(

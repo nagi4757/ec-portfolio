@@ -9,6 +9,7 @@ import com.nagi4757.ec.api.product.presentation.shared.ProductRequest
 import com.nagi4757.ec.api.product.presentation.shared.ProductResponse
 import com.nagi4757.ec.api.product.presentation.shared.toResponse
 import jakarta.validation.Valid
+import org.springframework.http.HttpStatus
 import org.springframework.web.bind.annotation.DeleteMapping
 import org.springframework.web.bind.annotation.GetMapping
 import org.springframework.web.bind.annotation.PatchMapping
@@ -17,6 +18,7 @@ import org.springframework.web.bind.annotation.PostMapping
 import org.springframework.web.bind.annotation.RequestBody
 import org.springframework.web.bind.annotation.RequestMapping
 import org.springframework.web.bind.annotation.RestController
+import org.springframework.web.bind.annotation.ResponseStatus
 
 @RestController
 @RequestMapping("/api/admin/products")
@@ -60,14 +62,16 @@ class ProductAdminController(
                 price = req.price,
                 stockQuantity = req.stockQuantity,
                 imageUrl = req.imageUrl,
-                description = req.description
+                description = req.description,
+                active = req.active
             )
         )
         return saved.toResponse()
     }
 
     @DeleteMapping("/{id}")
+    @ResponseStatus(HttpStatus.NO_CONTENT)
     fun delete(@PathVariable id: Long) {
-        productService.delete(id)
+        productService.deactivate(id)
     }
 }

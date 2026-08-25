@@ -19,7 +19,8 @@ object ProductRequest {
         @field:Min(0) val price: Long? = null,
         @field:Min(0) val stockQuantity: Int? = null,
         val imageUrl: String? = null,
-        val description: String? = null
+        val description: String? = null,
+        val active: Boolean? = null
     )
 }
 
@@ -29,7 +30,8 @@ data class ProductResponse(
     val price: Long,
     val stockQuantity: Int,
     val imageUrl: String?,
-    val description: String?
+    val description: String?,
+    val active: Boolean
 )
 
 fun Product.toResponse() = ProductResponse(
@@ -38,7 +40,8 @@ fun Product.toResponse() = ProductResponse(
     price = price,
     stockQuantity = stockQuantity,
     imageUrl = imageUrl,
-    description = description
+    description = description,
+    active = active
 )
 
 data class ProductListResponse(

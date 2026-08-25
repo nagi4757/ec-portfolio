@@ -6,6 +6,7 @@ import org.apache.ibatis.annotations.Param
 @Mapper
 interface ProductMapper {
     fun selectById(id: Long): ProductRecord?
+    fun selectActiveById(id: Long): ProductRecord?
     fun selectAll(): List<ProductRecord>
     fun countSearch(
         @Param("keyword") keyword: String?,
@@ -32,7 +33,7 @@ interface ProductMapper {
         @Param("productId") productId: Long,
         @Param("quantity") quantity: Int
     ): Int
-    fun delete(id: Long): Int
+    fun deactivate(id: Long): Int
 }
 
 data class ProductRecord(
@@ -41,5 +42,6 @@ data class ProductRecord(
     var price: Long? = null,
     var stockQuantity: Int? = null,
     var imageUrl: String? = null,
-    var description: String? = null
+    var description: String? = null,
+    var active: Boolean? = null
 )

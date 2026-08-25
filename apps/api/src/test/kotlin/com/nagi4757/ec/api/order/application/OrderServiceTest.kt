@@ -161,6 +161,24 @@ class OrderServiceTest {
         verifyNoInteractions(cartService)
     }
 
+    @Test
+    fun `cancelOrder fails when referenced product stock cannot be restored`() {
+        val orderRepository = FakeOrderRepository()
+        val cartService = mock(CartService::class.java)
+        val productRepository = mock(ProductRepository::class.java)
+        val orderService = OrderService(orderRepository, cartService, productRepository)
+        orderRepository.seed(order(status = OrderStatus.PENDING))
+        `when`(productRepository.increaseStock(101L, 2)).thenReturn(true)
+        `when`(productRepository.increaseStock(102L, 3)).thenReturn(false)
+
+        assertThrows(IllegalStateException::class.java) {
+            orderService.cancelOrder(7L, 10L)
+        }
+
+        verify(productRepository).increaseStock(101L, 2)
+        verify(productRepository).increaseStock(102L, 3)
+    }
+
     @ParameterizedTest
     @EnumSource(
         value = OrderStatus::class,

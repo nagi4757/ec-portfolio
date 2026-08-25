@@ -49,16 +49,21 @@ class InfrastructureIntegrationTest @Autowired constructor(
 ) {
 
     @Test
-    fun `applies Flyway migrations V1 through V6 and initializes existing stock to zero`() {
+    fun `applies Flyway migrations V1 through V7 and initializes existing products`() {
         val appliedVersions = flyway.info().applied()
             .mapNotNull { it.version?.version }
 
-        assertThat(appliedVersions).containsExactly("1", "2", "3", "4", "5", "6")
+        assertThat(appliedVersions).containsExactly("1", "2", "3", "4", "5", "6", "7")
         val existingStock = jdbcTemplate.queryForList(
             "SELECT stock_quantity FROM products WHERE id IN (1, 2, 3) ORDER BY id",
             Int::class.java
         )
         assertThat(existingStock).containsExactly(0, 0, 0)
+        val existingActive = jdbcTemplate.queryForList(
+            "SELECT active FROM products WHERE id IN (1, 2, 3) ORDER BY id",
+            Boolean::class.java
+        )
+        assertThat(existingActive).containsExactly(true, true, true)
     }
 
     @Test
@@ -88,7 +93,7 @@ class InfrastructureIntegrationTest @Autowired constructor(
                 .load()
                 .migrate()
 
-            assertThat(migrationResult.migrationsExecuted).isEqualTo(1)
+            assertThat(migrationResult.migrationsExecuted).isEqualTo(2)
             assertThat(legacyJdbcTemplate.queryForObject(
                 "SELECT status FROM orders LIMIT 1",
                 String::class.java
@@ -216,6 +221,72 @@ class InfrastructureIntegrationTest @Autowired constructor(
 
     @Test
     @Transactional
+    fun `database rejects invalid product active value`() {
+        val productId = productRepository.create(
+            product(stockQuantity = 1, namePrefix = "invalid-active")
+        )
+
+        org.junit.jupiter.api.assertThrows<DataIntegrityViolationException> {
+            jdbcTemplate.update(
+                "UPDATE products SET active = 2 WHERE id = ?",
+                productId
+            )
+        }
+    }
+
+    @Test
+    @Transactional
+    fun `deactivation retains product for admin and excludes it from public search and count`() {
+        val keyword = "inactive-${UUID.randomUUID()}"
+        val productId = productRepository.create(
+            Product(
+                name = keyword,
+                price = 10_000L,
+                stockQuantity = 3,
+                imageUrl = null,
+                description = keyword
+            )
+        )
+
+        assertThat(productRepository.deactivate(productId)).isTrue()
+
+        val stored = requireNotNull(productRepository.findById(productId))
+        assertThat(stored.active).isFalse()
+        assertThat(productRepository.findAll()).contains(stored)
+        assertThat(productRepository.findActiveById(productId)).isNull()
+
+        val result = productRepository.search(
+            ProductSearchCondition(
+                keyword = keyword,
+                minPrice = null,
+                maxPrice = null,
+                sort = "newest",
+                page = 1,
+                size = 12
+            )
+        )
+        assertThat(result.total).isZero()
+        assertThat(result.items).isEmpty()
+    }
+
+    @Test
+    @Transactional
+    fun `inactive product rejects stock decrease but accepts stock restoration`() {
+        val productId = productRepository.create(
+            product(stockQuantity = 3, namePrefix = "inactive-stock")
+        )
+        assertThat(productRepository.deactivate(productId)).isTrue()
+
+        assertThat(productRepository.decreaseStockIfAvailable(productId, 1)).isFalse()
+        assertThat(productRepository.increaseStock(productId, 2)).isTrue()
+
+        val stored = requireNotNull(productRepository.findById(productId))
+        assertThat(stored.stockQuantity).isEqualTo(5)
+        assertThat(stored.active).isFalse()
+    }
+
+    @Test
+    @Transactional
     fun `conditionally decreases stock without allowing a negative value`() {
         val productId = productRepository.create(
             product(stockQuantity = 3, namePrefix = "conditional-stock")
@@ -256,8 +327,8 @@ class InfrastructureIntegrationTest @Autowired constructor(
         } finally {
             cartRepository.clear(userId)
             deleteOrdersForUser(userId)
-            productRepository.delete(availableProductId)
-            productRepository.delete(unavailableProductId)
+            deleteProduct(availableProductId)
+            deleteProduct(unavailableProductId)
         }
     }
 
@@ -318,7 +389,7 @@ class InfrastructureIntegrationTest @Autowired constructor(
                 cartRepository.clear(userId)
                 deleteOrdersForUser(userId)
             }
-            productRepository.delete(productId)
+            deleteProduct(productId)
         }
     }
 
@@ -343,7 +414,7 @@ class InfrastructureIntegrationTest @Autowired constructor(
         } finally {
             cartRepository.clear(userId)
             deleteOrdersForUser(userId)
-            productRepository.delete(productId)
+            deleteProduct(productId)
         }
     }
 
@@ -382,7 +453,7 @@ class InfrastructureIntegrationTest @Autowired constructor(
             executor.shutdownNow()
             cartRepository.clear(userId)
             deleteOrdersForUser(userId)
-            productRepository.delete(productId)
+            deleteProduct(productId)
         }
     }
 
@@ -435,42 +506,39 @@ class InfrastructureIntegrationTest @Autowired constructor(
             executor.shutdownNow()
             cartRepository.clear(userId)
             deleteOrdersForUser(userId)
-            productRepository.delete(productId)
+            deleteProduct(productId)
         }
     }
 
     @Test
-    fun `rolls back cancellation and earlier stock restoration when a product is missing`() {
+    fun `database rejects hard delete for product referenced by order item`() {
         val userId = uniqueUserId()
-        val firstProductId = productRepository.create(
-            product(stockQuantity = 1, namePrefix = "restore-first")
-        )
-        val missingProductId = productRepository.create(
-            product(stockQuantity = 1, namePrefix = "restore-missing")
+        val productId = productRepository.create(
+            product(stockQuantity = 1, namePrefix = "delete-restricted")
         )
         cartRepository.clear(userId)
-        cartRepository.increment(userId, firstProductId, 1)
-        cartRepository.increment(userId, missingProductId, 1)
-        val orderId = requireNotNull(orderService.placeOrder(userId).id)
-        productRepository.delete(missingProductId)
+        cartRepository.increment(userId, productId, 1)
+        orderService.placeOrder(userId)
 
         try {
-            org.junit.jupiter.api.assertThrows<IllegalStateException> {
-                orderService.cancelOrder(userId, orderId)
+            org.junit.jupiter.api.assertThrows<DataIntegrityViolationException> {
+                jdbcTemplate.update("DELETE FROM products WHERE id = ?", productId)
             }
 
-            assertThat(orderRepository.findById(orderId)?.status).isEqualTo(OrderStatus.PENDING)
-            assertThat(productRepository.findById(firstProductId)?.stockQuantity).isZero()
+            assertThat(productRepository.findById(productId)).isNotNull()
         } finally {
             cartRepository.clear(userId)
             deleteOrdersForUser(userId)
-            productRepository.delete(firstProductId)
+            deleteProduct(productId)
         }
     }
 
     @Test
     @Transactional
     fun `saves an order and reloads generated identifiers`() {
+        val productId = productRepository.create(
+            product(stockQuantity = 2, namePrefix = "order-identifiers")
+        )
         val order = Order(
             id = null,
             userId = 9_001L,
@@ -479,7 +547,7 @@ class InfrastructureIntegrationTest @Autowired constructor(
                 OrderItem(
                     id = null,
                     orderId = 0L,
-                    productId = 8_001L,
+                    productId = productId,
                     name = "Integration Test Product",
                     price = 12_500L,
                     quantity = 2,
@@ -502,7 +570,7 @@ class InfrastructureIntegrationTest @Autowired constructor(
         assertThat(reloaded.createdAt).isNotNull()
         assertThat(reloadedItem.id).isNotNull()
         assertThat(reloadedItem.orderId).isEqualTo(orderId)
-        assertThat(reloadedItem.productId).isEqualTo(8_001L)
+        assertThat(reloadedItem.productId).isEqualTo(productId)
         assertThat(reloadedItem.name).isEqualTo("Integration Test Product")
         assertThat(reloadedItem.price).isEqualTo(12_500L)
         assertThat(reloadedItem.quantity).isEqualTo(2)
@@ -559,6 +627,10 @@ class InfrastructureIntegrationTest @Autowired constructor(
             jdbcTemplate.update("DELETE FROM order_items WHERE order_id = ?", orderId)
             jdbcTemplate.update("DELETE FROM orders WHERE id = ?", orderId)
         }
+    }
+
+    private fun deleteProduct(productId: Long) {
+        jdbcTemplate.update("DELETE FROM products WHERE id = ?", productId)
     }
 
     companion object {

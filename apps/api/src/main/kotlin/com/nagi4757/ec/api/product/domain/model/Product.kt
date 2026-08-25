@@ -6,7 +6,8 @@ data class Product(
     val price: Long,
     val stockQuantity: Int,
     val imageUrl: String?,
-    val description: String?
+    val description: String?,
+    val active: Boolean = true
 ) {
     init {
         require(stockQuantity >= 0) { "stockQuantity must be greater than or equal to 0" }

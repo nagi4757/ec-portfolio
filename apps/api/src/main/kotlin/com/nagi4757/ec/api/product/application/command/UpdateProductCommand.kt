@@ -5,5 +5,6 @@ data class UpdateProductCommand(
     val price: Long? = null,
     val stockQuantity: Int? = null,
     val imageUrl: String? = null,
-    val description: String? = null
+    val description: String? = null,
+    val active: Boolean? = null
 )
