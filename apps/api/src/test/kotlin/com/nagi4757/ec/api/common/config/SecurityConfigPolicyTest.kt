@@ -6,6 +6,8 @@ import org.apache.ibatis.session.Configuration
 import org.apache.ibatis.session.SqlSessionFactory
 import org.apache.ibatis.transaction.jdbc.JdbcTransactionFactory
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.params.ParameterizedTest
+import org.junit.jupiter.params.provider.ValueSource
 import org.mockito.Mockito.mock
 import org.mockito.Mockito.`when`
 import org.springframework.beans.factory.annotation.Autowired
@@ -31,6 +33,42 @@ class SecurityConfigPolicyTest(
     @Autowired private val mockMvc: MockMvc,
     @Autowired private val jwtTokenProvider: JwtTokenProvider
 ) {
+    @ParameterizedTest
+    @ValueSource(strings = [
+        "/actuator/health",
+        "/actuator/health/liveness",
+        "/actuator/health/readiness"
+    ])
+    fun `health endpoints are public without exposing infrastructure details`(path: String) {
+        mockMvc.get(path)
+            .andExpect {
+                status { isOk() }
+                jsonPath("$.status") { value("UP") }
+                jsonPath("$.components") { doesNotExist() }
+                jsonPath("$.details") { doesNotExist() }
+                jsonPath("$.db") { doesNotExist() }
+                jsonPath("$.redis") { doesNotExist() }
+            }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = [
+        "/actuator",
+        "/actuator/env",
+        "/actuator/beans",
+        "/actuator/configprops",
+        "/actuator/flyway",
+        "/actuator/metrics",
+        "/actuator/health/db",
+        "/actuator/health/redis"
+    ])
+    fun `non-public actuator endpoints require authentication`(path: String) {
+        mockMvc.get(path)
+            .andExpect {
+                status { isUnauthorized() }
+            }
+    }
+
     @Test
     fun `public endpoint is allowed without authentication`() {
         mockMvc.get("/api/public/ping")

@@ -19,12 +19,16 @@ import org.flywaydb.core.api.MigrationVersion
 import org.junit.jupiter.api.Tag
 import org.junit.jupiter.api.Test
 import org.springframework.beans.factory.annotation.Autowired
+import org.springframework.boot.actuate.health.HealthContributorRegistry
+import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc
 import org.springframework.boot.test.context.SpringBootTest
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection
 import org.springframework.dao.DataIntegrityViolationException
 import org.springframework.jdbc.core.JdbcTemplate
 import org.springframework.jdbc.datasource.DriverManagerDataSource
 import org.springframework.test.context.ActiveProfiles
+import org.springframework.test.web.servlet.MockMvc
+import org.springframework.test.web.servlet.get
 import org.springframework.transaction.annotation.Transactional
 import org.testcontainers.containers.GenericContainer
 import org.testcontainers.containers.MariaDBContainer
@@ -40,6 +44,7 @@ import java.util.concurrent.TimeUnit
 @Testcontainers
 @SpringBootTest
 @ActiveProfiles("integration-test")
+@AutoConfigureMockMvc
 class InfrastructureIntegrationTest @Autowired constructor(
     private val flyway: Flyway,
     private val jdbcTemplate: JdbcTemplate,
@@ -47,8 +52,32 @@ class InfrastructureIntegrationTest @Autowired constructor(
     private val orderRepository: OrderRepository,
     private val cartRepository: CartRepository,
     private val cartService: CartService,
-    private val orderService: OrderService
+    private val orderService: OrderService,
+    private val healthContributorRegistry: HealthContributorRegistry,
+    private val mockMvc: MockMvc
 ) {
+
+    @Test
+    fun `reports actual database and redis readiness without exposing infrastructure details`() {
+        assertThat(healthContributorRegistry.getContributor("db")).isNotNull()
+        assertThat(healthContributorRegistry.getContributor("redis")).isNotNull()
+
+        listOf(
+            "/actuator/health",
+            "/actuator/health/liveness",
+            "/actuator/health/readiness"
+        ).forEach { path ->
+            mockMvc.get(path)
+                .andExpect {
+                    status { isOk() }
+                    jsonPath("$.status") { value("UP") }
+                    jsonPath("$.components") { doesNotExist() }
+                    jsonPath("$.details") { doesNotExist() }
+                    jsonPath("$.db") { doesNotExist() }
+                    jsonPath("$.redis") { doesNotExist() }
+                }
+        }
+    }
 
     @Test
     fun `applies Flyway migrations V1 through V7 and initializes existing products`() {
