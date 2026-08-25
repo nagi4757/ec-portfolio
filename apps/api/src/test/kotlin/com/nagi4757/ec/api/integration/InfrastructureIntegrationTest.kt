@@ -5,6 +5,7 @@ import com.nagi4757.ec.api.cart.domain.model.CartItem
 import com.nagi4757.ec.api.cart.domain.repository.CartRepository
 import com.nagi4757.ec.api.common.error.ApiErrorCode
 import com.nagi4757.ec.api.common.error.ApplicationException
+import com.nagi4757.ec.api.common.logging.CorrelationIdContext
 import com.nagi4757.ec.api.order.application.OrderService
 import com.nagi4757.ec.api.order.domain.model.Order
 import com.nagi4757.ec.api.order.domain.model.OrderItem
@@ -70,6 +71,7 @@ class InfrastructureIntegrationTest @Autowired constructor(
             mockMvc.get(path)
                 .andExpect {
                     status { isOk() }
+                    header { exists(CorrelationIdContext.HEADER_NAME) }
                     jsonPath("$.status") { value("UP") }
                     jsonPath("$.components") { doesNotExist() }
                     jsonPath("$.details") { doesNotExist() }

@@ -1,6 +1,7 @@
 package com.nagi4757.ec.api.product.presentation
 
 import com.nagi4757.ec.api.common.error.GlobalExceptionHandler
+import com.nagi4757.ec.api.common.logging.CorrelationIdFilter
 import com.nagi4757.ec.api.product.application.ProductService
 import com.nagi4757.ec.api.product.domain.model.Product
 import com.nagi4757.ec.api.product.presentation.admin.ProductAdminController
@@ -16,6 +17,7 @@ import org.springframework.test.web.servlet.get
 import org.springframework.test.web.servlet.patch
 import org.springframework.test.web.servlet.post
 import org.springframework.test.web.servlet.setup.MockMvcBuilders
+import org.springframework.test.web.servlet.setup.StandaloneMockMvcBuilder
 
 class ProductAdminControllerValidationTest {
     private lateinit var productService: ProductService
@@ -30,6 +32,7 @@ class ProductAdminControllerValidationTest {
                 ProductPublicController(productService)
             )
             .setControllerAdvice(GlobalExceptionHandler())
+            .addFilters<StandaloneMockMvcBuilder>(CorrelationIdFilter())
             .build()
     }
 

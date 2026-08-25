@@ -1,5 +1,6 @@
 package com.nagi4757.ec.api.common.config
 
+import com.nagi4757.ec.api.common.logging.CorrelationIdContext
 import com.nagi4757.ec.api.common.security.JwtTokenProvider
 import org.apache.ibatis.mapping.Environment
 import org.apache.ibatis.session.Configuration
@@ -43,6 +44,7 @@ class SecurityConfigPolicyTest(
         mockMvc.get(path)
             .andExpect {
                 status { isOk() }
+                header { exists(CorrelationIdContext.HEADER_NAME) }
                 jsonPath("$.status") { value("UP") }
                 jsonPath("$.components") { doesNotExist() }
                 jsonPath("$.details") { doesNotExist() }
@@ -92,7 +94,9 @@ class SecurityConfigPolicyTest(
 
     @Test
     fun `user endpoint requires authentication`() {
-        mockMvc.get("/api/user/ping")
+        mockMvc.get("/api/user/ping") {
+            header(CorrelationIdContext.HEADER_NAME, CORRELATION_ID)
+        }
             .andExpect {
                 status { isUnauthorized() }
                 content { contentTypeCompatibleWith(MediaType.APPLICATION_JSON) }
@@ -100,7 +104,9 @@ class SecurityConfigPolicyTest(
                 jsonPath("$.code") { value("UNAUTHORIZED") }
                 jsonPath("$.message") { value("Authentication is required") }
                 jsonPath("$.path") { value("/api/user/ping") }
+                jsonPath("$.correlationId") { value(CORRELATION_ID) }
                 jsonPath("$.fieldErrors") { isArray() }
+                header { string(CorrelationIdContext.HEADER_NAME, CORRELATION_ID) }
             }
     }
 
@@ -123,6 +129,7 @@ class SecurityConfigPolicyTest(
 
         mockMvc.get("/api/admin/ping") {
             header("Authorization", "Bearer $token")
+            header(CorrelationIdContext.HEADER_NAME, CORRELATION_ID)
         }.andExpect {
             status { isForbidden() }
             content { contentTypeCompatibleWith(MediaType.APPLICATION_JSON) }
@@ -130,7 +137,9 @@ class SecurityConfigPolicyTest(
             jsonPath("$.code") { value("ACCESS_DENIED") }
             jsonPath("$.message") { value("Access is denied") }
             jsonPath("$.path") { value("/api/admin/ping") }
+            jsonPath("$.correlationId") { value(CORRELATION_ID) }
             jsonPath("$.fieldErrors") { isArray() }
+            header { string(CorrelationIdContext.HEADER_NAME, CORRELATION_ID) }
         }
     }
 
@@ -175,5 +184,9 @@ class SecurityConfigPolicyTest(
                 }
                 `when`(configuration).thenReturn(cfg)
             }
+    }
+
+    companion object {
+        private const val CORRELATION_ID = "21e2a145-37da-47d0-bb27-b5c2a630446a"
     }
 }
