@@ -34,8 +34,12 @@ dependencies {
 
 	// 테스트
 	testImplementation("org.springframework.boot:spring-boot-starter-test")
+	testImplementation("org.springframework.boot:spring-boot-testcontainers")
 	testImplementation("org.jetbrains.kotlin:kotlin-test-junit5")
 	testImplementation("org.mybatis.spring.boot:mybatis-spring-boot-starter-test:3.0.5")
+	testImplementation("org.testcontainers:testcontainers")
+	testImplementation("org.testcontainers:junit-jupiter")
+	testImplementation("org.testcontainers:mariadb")
 	testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 
@@ -45,4 +49,25 @@ tasks.named<org.springframework.boot.gradle.tasks.run.BootRun>("bootRun") {
 	}
 }
 
-tasks.withType<Test> { useJUnitPlatform() }
+tasks.named<Test>("test") {
+	useJUnitPlatform {
+		excludeTags("integration")
+	}
+}
+
+tasks.register<Test>("integrationTest") {
+	group = "verification"
+	description = "Runs Testcontainers integration tests."
+	testClassesDirs = sourceSets["test"].output.classesDirs
+	classpath = sourceSets["test"].runtimeClasspath
+	dependsOn(tasks.named("testClasses"))
+	shouldRunAfter(tasks.named("test"))
+	// Testcontainers 1.21.3 defaults to an API version rejected by Docker 29.
+	val dockerApiVersion = System.getProperty("api.version")
+		?: System.getenv("DOCKER_API_VERSION")
+		?: "1.44"
+	systemProperty("api.version", dockerApiVersion)
+	useJUnitPlatform {
+		includeTags("integration")
+	}
+}

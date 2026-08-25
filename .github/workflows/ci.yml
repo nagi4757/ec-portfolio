@@ -32,6 +32,9 @@ jobs:
       - name: Build and test backend
         run: ./gradlew clean build --no-daemon
 
+      - name: Run backend integration tests
+        run: ./gradlew integrationTest --no-daemon
+
   frontend:
     name: Frontend
     runs-on: ubuntu-latest
