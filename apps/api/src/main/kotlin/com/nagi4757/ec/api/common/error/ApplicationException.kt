@@ -13,6 +13,8 @@ class EmptyCartException : ApplicationException(ApiErrorCode.EMPTY_CART)
 
 class InvalidCartQuantityException : ApplicationException(ApiErrorCode.INVALID_CART_QUANTITY)
 
+class InsufficientStockException : ApplicationException(ApiErrorCode.INSUFFICIENT_STOCK)
+
 class InvalidOrderStatusException : ApplicationException(ApiErrorCode.INVALID_ORDER_STATUS)
 
 class EmailAlreadyExistsException : ApplicationException(ApiErrorCode.EMAIL_ALREADY_EXISTS)

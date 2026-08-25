@@ -9,12 +9,14 @@ import com.nagi4757.ec.api.order.domain.model.Order
 import com.nagi4757.ec.api.order.domain.model.OrderStatus
 import com.nagi4757.ec.api.order.domain.repository.OrderPage
 import com.nagi4757.ec.api.order.domain.repository.OrderRepository
+import com.nagi4757.ec.api.product.domain.repository.ProductRepository
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Test
 import org.mockito.Mockito.verify
 import org.mockito.Mockito.`when`
 import org.mockito.Mockito.mock
+import org.mockito.Mockito.never
 import java.time.LocalDateTime
 
 class OrderServiceTest {
@@ -22,7 +24,8 @@ class OrderServiceTest {
     fun `placeOrder creates pending order and clears cart`() {
         val orderRepository = FakeOrderRepository()
         val cartService = mock(CartService::class.java)
-        val orderService = OrderService(orderRepository, cartService)
+        val productRepository = mock(ProductRepository::class.java)
+        val orderService = OrderService(orderRepository, cartService, productRepository)
 
         val userId = 7L
         val cart = CartView(
@@ -41,9 +44,11 @@ class OrderServiceTest {
         )
 
         `when`(cartService.getCart(userId)).thenReturn(cart)
+        `when`(productRepository.decreaseStockIfAvailable(101L, 2)).thenReturn(true)
 
         val result = orderService.placeOrder(userId)
 
+        verify(productRepository).decreaseStockIfAvailable(101L, 2)
         verify(cartService).clear(userId)
 
         val saved = orderRepository.savedOrders.single()
@@ -59,7 +64,8 @@ class OrderServiceTest {
     fun `placeOrder throws bad request when cart is empty`() {
         val orderRepository = FakeOrderRepository()
         val cartService = mock(CartService::class.java)
-        val orderService = OrderService(orderRepository, cartService)
+        val productRepository = mock(ProductRepository::class.java)
+        val orderService = OrderService(orderRepository, cartService, productRepository)
 
         val userId = 7L
         `when`(cartService.getCart(userId)).thenReturn(CartView(emptyList(), 0, 0))
@@ -73,10 +79,44 @@ class OrderServiceTest {
     }
 
     @Test
+    fun `placeOrder keeps cart and does not save order when stock is insufficient`() {
+        val orderRepository = FakeOrderRepository()
+        val cartService = mock(CartService::class.java)
+        val productRepository = mock(ProductRepository::class.java)
+        val orderService = OrderService(orderRepository, cartService, productRepository)
+        val userId = 7L
+        val cart = CartView(
+            items = listOf(
+                CartLine(
+                    productId = 101L,
+                    name = "T-Shirt",
+                    price = 19_000L,
+                    imageUrl = null,
+                    quantity = 2,
+                    lineAmount = 38_000L
+                )
+            ),
+            totalQuantity = 2,
+            totalAmount = 38_000L
+        )
+        `when`(cartService.getCart(userId)).thenReturn(cart)
+        `when`(productRepository.decreaseStockIfAvailable(101L, 2)).thenReturn(false)
+
+        val exception = assertThrows(ApplicationException::class.java) {
+            orderService.placeOrder(userId)
+        }
+
+        assertEquals(ApiErrorCode.INSUFFICIENT_STOCK, exception.errorCode)
+        assertEquals(0, orderRepository.savedOrders.size)
+        verify(cartService, never()).clear(userId)
+    }
+
+    @Test
     fun `getOrder throws not found for another user's order`() {
         val orderRepository = FakeOrderRepository()
         val cartService = mock(CartService::class.java)
-        val orderService = OrderService(orderRepository, cartService)
+        val productRepository = mock(ProductRepository::class.java)
+        val orderService = OrderService(orderRepository, cartService, productRepository)
 
         val ex = assertThrows(ApplicationException::class.java) {
             orderService.getOrder(7L, 1L)
@@ -89,7 +129,8 @@ class OrderServiceTest {
     fun `getOrderAdmin throws order not found when order does not exist`() {
         val orderRepository = FakeOrderRepository()
         val cartService = mock(CartService::class.java)
-        val orderService = OrderService(orderRepository, cartService)
+        val productRepository = mock(ProductRepository::class.java)
+        val orderService = OrderService(orderRepository, cartService, productRepository)
 
         val ex = assertThrows(ApplicationException::class.java) {
             orderService.getOrderAdmin(999L)
@@ -102,7 +143,8 @@ class OrderServiceTest {
     fun `updateStatus updates and returns refreshed order`() {
         val orderRepository = FakeOrderRepository()
         val cartService = mock(CartService::class.java)
-        val orderService = OrderService(orderRepository, cartService)
+        val productRepository = mock(ProductRepository::class.java)
+        val orderService = OrderService(orderRepository, cartService, productRepository)
 
         val before = Order(
             id = 10L,
