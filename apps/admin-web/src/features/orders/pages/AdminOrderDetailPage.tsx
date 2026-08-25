@@ -1,18 +1,21 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { OrderAdminApi } from '@/features/orders/api'
-import { ORDER_STATUS_LABEL, ORDER_STATUS_OPTIONS } from '@/types/order'
+import { isApiErrorCode } from '@/lib/api'
+import { ORDER_STATUS_TRANSITIONS, ORDER_STATUS_TRANSLATION_KEY } from '@/types/order'
 import type { Order, OrderStatus } from '@/types/order'
 
-const statusColor: Record<string, string> = {
+const statusColor: Record<OrderStatus, string> = {
     PENDING: '#b7791f',
-    CONFIRMED: '#2b6cb0',
+    PREPARING: '#2b6cb0',
     SHIPPED: '#6b46c1',
     DELIVERED: '#276749',
     CANCELLED: '#c53030',
 }
 
 export default function AdminOrderDetailPage() {
+    const { t } = useTranslation()
     const { id } = useParams()
     const navigate = useNavigate()
     const [order, setOrder] = useState<Order | null>(null)
@@ -20,7 +23,7 @@ export default function AdminOrderDetailPage() {
     const [error, setError] = useState<string | null>(null)
     const [updating, setUpdating] = useState(false)
 
-    useEffect(() => {
+    const loadOrder = useCallback(async () => {
         if (!id) {
             setError('주문 ID가 없습니다.')
             setLoading(false)
@@ -29,20 +32,39 @@ export default function AdminOrderDetailPage() {
 
         setLoading(true)
         setError(null)
-        OrderAdminApi.get(Number(id))
-            .then(setOrder)
-            .catch((e) => setError(e.message))
-            .finally(() => setLoading(false))
-    }, [id])
+        try {
+            setOrder(await OrderAdminApi.get(Number(id)))
+        } catch (cause) {
+            setError(
+                isApiErrorCode(cause, 'ORDER_NOT_FOUND')
+                    ? t('admin.errors.api.orderNotFound')
+                    : t('admin.order.loadFailed')
+            )
+        } finally {
+            setLoading(false)
+        }
+    }, [id, t])
 
-    async function changeStatus(nextStatus: string) {
+    useEffect(() => {
+        void loadOrder()
+    }, [loadOrder])
+
+    async function changeStatus(nextStatus: OrderStatus) {
         if (!id || !order) return
         setUpdating(true)
         try {
             const updated = await OrderAdminApi.updateStatus(Number(id), nextStatus)
             setOrder(updated)
-        } catch (e) {
-            alert(e instanceof Error ? e.message : '상태 변경 실패')
+        } catch (cause) {
+            if (isApiErrorCode(cause, 'INVALID_ORDER_TRANSITION')) {
+                alert(t('admin.errors.api.invalidOrderTransition'))
+                await loadOrder()
+            } else if (isApiErrorCode(cause, 'ORDER_NOT_FOUND')) {
+                alert(t('admin.errors.api.orderNotFound'))
+                await loadOrder()
+            } else {
+                alert(t('admin.order.transition.failed'))
+            }
         } finally {
             setUpdating(false)
         }
@@ -59,6 +81,8 @@ export default function AdminOrderDetailPage() {
     }
     if (!order) return <div style={{ padding: 24 }}>주문을 찾을 수 없습니다.</div>
 
+    const nextStatuses = ORDER_STATUS_TRANSITIONS[order.status]
+
     return (
         <div style={{ padding: 'clamp(12px, 4vw, 24px)', maxWidth: 980, margin: '0 auto' }}>
             <Link to="/orders" style={{ display: 'inline-block', marginBottom: 12 }}>
@@ -70,7 +94,7 @@ export default function AdminOrderDetailPage() {
                 <div>
                     <div style={label}>주문 상태</div>
                     <span style={{ ...badgeStyle, background: statusColor[order.status] ?? '#555' }}>
-                        {ORDER_STATUS_LABEL[order.status] ?? order.status}
+                        {t(ORDER_STATUS_TRANSLATION_KEY[order.status])}
                     </span>
                 </div>
                 <div>
@@ -83,18 +107,27 @@ export default function AdminOrderDetailPage() {
                 </div>
                 <div>
                     <div style={label}>상태 변경</div>
-                    <select
-                        value={order.status}
-                        disabled={updating}
-                        onChange={(e) => changeStatus(e.target.value)}
-                        style={{ padding: '6px 10px', borderRadius: 6, border: '1px solid #ddd', fontSize: 13 }}
-                    >
-                        {ORDER_STATUS_OPTIONS.map((s) => (
-                            <option key={s} value={s}>
-                                {ORDER_STATUS_LABEL[s as OrderStatus]}
+                    {nextStatuses.length > 0 ? (
+                        <select
+                            value=""
+                            disabled={updating}
+                            onChange={(e) => changeStatus(e.target.value as OrderStatus)}
+                            style={{ padding: '6px 10px', borderRadius: 6, border: '1px solid #ddd', fontSize: 13 }}
+                        >
+                            <option value="" disabled>
+                                {t('admin.order.transition.select')}
                             </option>
-                        ))}
-                    </select>
+                            {nextStatuses.map((status) => (
+                                <option key={status} value={status}>
+                                    {t(ORDER_STATUS_TRANSLATION_KEY[status])}
+                                </option>
+                            ))}
+                        </select>
+                    ) : (
+                        <span style={{ color: '#777', fontSize: 13 }}>
+                            {t('admin.order.transition.none')}
+                        </span>
+                    )}
                 </div>
             </div>
 
@@ -174,4 +207,3 @@ const td: React.CSSProperties = {
     padding: '12px 14px',
     fontSize: 14,
 }
-

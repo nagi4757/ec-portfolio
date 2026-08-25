@@ -1,30 +1,74 @@
 import { useEffect, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { Link, useParams } from 'react-router-dom'
 import { OrderAPI } from '@/features/orders/api'
-import { ORDER_STATUS_LABEL } from '@/types/order'
-import type { Order } from '@/types/order'
+import { isApiErrorCode } from '@/lib/api'
+import { ORDER_STATUS_TRANSLATION_KEY } from '@/types/order'
+import type { Order, OrderStatus } from '@/types/order'
 
-const statusColor: Record<string, string> = {
-    PENDING:   '#b7791f',
-    CONFIRMED: '#2b6cb0',
-    SHIPPED:   '#6b46c1',
+const statusColor: Record<OrderStatus, string> = {
+    PENDING: '#b7791f',
+    PREPARING: '#2b6cb0',
+    SHIPPED: '#6b46c1',
     DELIVERED: '#276749',
     CANCELLED: '#c53030',
 }
 
+type CancelFeedback = 'success' | 'invalidOrderTransition' | 'orderNotFound' | 'failed'
+
+const cancelFeedbackTranslationKey: Record<CancelFeedback, string> = {
+    success: 'store.order.cancel.success',
+    invalidOrderTransition: 'store.errors.api.invalidOrderTransition',
+    orderNotFound: 'store.errors.api.orderNotFound',
+    failed: 'store.order.cancel.failed',
+}
+
 export default function OrderDetailPage() {
+    const { t } = useTranslation()
     const { id } = useParams()
     const [order, setOrder] = useState<Order | null>(null)
     const [loading, setLoading] = useState(true)
     const [error, setError] = useState<string | null>(null)
+    const [cancelling, setCancelling] = useState(false)
+    const [cancelFeedback, setCancelFeedback] = useState<CancelFeedback | null>(null)
 
     useEffect(() => {
         if (!id) return
+        setLoading(true)
+        setError(null)
         OrderAPI.get(Number(id))
             .then(setOrder)
-            .catch((e) => setError(e.message))
+            .catch((cause) => setError(
+                isApiErrorCode(cause, 'ORDER_NOT_FOUND')
+                    ? t('store.errors.api.orderNotFound')
+                    : t('store.order.loadFailed')
+            ))
             .finally(() => setLoading(false))
-    }, [id])
+    }, [id, t])
+
+    async function cancelOrder() {
+        if (!id || !order || order.status !== 'PENDING') return
+        if (!window.confirm(t('store.order.cancel.confirm'))) return
+
+        setCancelling(true)
+        setCancelFeedback(null)
+        try {
+            const updated = await OrderAPI.cancel(Number(id))
+            setOrder(updated)
+            setCancelFeedback('success')
+        } catch (cause) {
+            if (isApiErrorCode(cause, 'INVALID_ORDER_TRANSITION')) {
+                setCancelFeedback('invalidOrderTransition')
+                OrderAPI.get(Number(id)).then(setOrder).catch(() => undefined)
+            } else if (isApiErrorCode(cause, 'ORDER_NOT_FOUND')) {
+                setCancelFeedback('orderNotFound')
+            } else {
+                setCancelFeedback('failed')
+            }
+        } finally {
+            setCancelling(false)
+        }
+    }
 
     if (loading) return <div style={{ padding: 24 }}>Loading...</div>
     if (error)   return <div style={{ padding: 24, color: 'crimson' }}>Error: {error}</div>
@@ -45,7 +89,7 @@ export default function OrderDetailPage() {
                     fontSize: 13,
                     fontWeight: 600,
                 }}>
-                    {ORDER_STATUS_LABEL[order.status] ?? order.status}
+                    {t(ORDER_STATUS_TRANSLATION_KEY[order.status])}
                 </span>
             </div>
 
@@ -72,6 +116,41 @@ export default function OrderDetailPage() {
                     합계: {order.totalAmount.toLocaleString()}원
                 </span>
             </div>
+
+            {order.status === 'PENDING' && (
+                <div style={{ marginTop: 20, textAlign: 'right' }}>
+                    <button
+                        type="button"
+                        disabled={cancelling}
+                        onClick={cancelOrder}
+                        style={{
+                            border: 'none',
+                            borderRadius: 6,
+                            padding: '9px 16px',
+                            background: cancelling ? '#a0aec0' : '#c53030',
+                            color: '#fff',
+                            cursor: cancelling ? 'not-allowed' : 'pointer',
+                            fontWeight: 600,
+                        }}
+                    >
+                        {cancelling
+                            ? t('store.order.actions.cancelling')
+                            : t('store.order.actions.cancel')}
+                    </button>
+                </div>
+            )}
+            {cancelFeedback && (
+                <div
+                    role={cancelFeedback === 'success' ? 'status' : 'alert'}
+                    style={{
+                        marginTop: 12,
+                        color: cancelFeedback === 'success' ? '#276749' : '#c53030',
+                        textAlign: 'right',
+                    }}
+                >
+                    {t(cancelFeedbackTranslationKey[cancelFeedback])}
+                </div>
+            )}
         </div>
     )
 }
@@ -86,4 +165,3 @@ const rowStyle: React.CSSProperties = {
     gap: 12,
     background: '#fff',
 }
-

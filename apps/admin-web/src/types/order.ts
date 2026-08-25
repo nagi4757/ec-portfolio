@@ -1,16 +1,20 @@
-export type OrderStatus = 'PENDING' | 'CONFIRMED' | 'SHIPPED' | 'DELIVERED' | 'CANCELLED'
+export type OrderStatus = 'PENDING' | 'PREPARING' | 'SHIPPED' | 'DELIVERED' | 'CANCELLED'
 
-export const ORDER_STATUS_LABEL: Record<OrderStatus, string> = {
-    PENDING:   '결제 대기',
-    CONFIRMED: '주문 확인',
-    SHIPPED:   '배송 중',
-    DELIVERED: '배송 완료',
-    CANCELLED: '취소됨',
+export const ORDER_STATUS_TRANSLATION_KEY: Record<OrderStatus, string> = {
+    PENDING: 'admin.order.status.pending',
+    PREPARING: 'admin.order.status.preparing',
+    SHIPPED: 'admin.order.status.shipped',
+    DELIVERED: 'admin.order.status.delivered',
+    CANCELLED: 'admin.order.status.cancelled',
 }
 
-export const ORDER_STATUS_OPTIONS: OrderStatus[] = [
-    'PENDING', 'CONFIRMED', 'SHIPPED', 'DELIVERED', 'CANCELLED'
-]
+export const ORDER_STATUS_TRANSITIONS: Record<OrderStatus, readonly OrderStatus[]> = {
+    PENDING: ['PREPARING', 'CANCELLED'],
+    PREPARING: ['SHIPPED', 'CANCELLED'],
+    SHIPPED: ['DELIVERED'],
+    DELIVERED: [],
+    CANCELLED: [],
+}
 
 export type OrderItem = {
     productId: number
@@ -43,4 +47,3 @@ export type OrderListResponse = {
     total: number
     totalPages: number
 }
-

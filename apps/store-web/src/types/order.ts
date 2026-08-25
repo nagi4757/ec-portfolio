@@ -1,11 +1,11 @@
-export type OrderStatus = 'PENDING' | 'CONFIRMED' | 'SHIPPED' | 'DELIVERED' | 'CANCELLED'
+export type OrderStatus = 'PENDING' | 'PREPARING' | 'SHIPPED' | 'DELIVERED' | 'CANCELLED'
 
-export const ORDER_STATUS_LABEL: Record<OrderStatus, string> = {
-    PENDING:   '결제 대기',
-    CONFIRMED: '주문 확인',
-    SHIPPED:   '배송 중',
-    DELIVERED: '배송 완료',
-    CANCELLED: '취소됨',
+export const ORDER_STATUS_TRANSLATION_KEY: Record<OrderStatus, string> = {
+    PENDING: 'store.order.status.pending',
+    PREPARING: 'store.order.status.preparing',
+    SHIPPED: 'store.order.status.shipped',
+    DELIVERED: 'store.order.status.delivered',
+    CANCELLED: 'store.order.status.cancelled',
 }
 
 export type OrderItem = {
@@ -31,4 +31,3 @@ export type OrderSummary = {
     totalAmount: number
     createdAt: string | null
 }
-

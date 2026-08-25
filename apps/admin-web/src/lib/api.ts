@@ -2,6 +2,26 @@ import { authStore } from '@/lib/authStore'
 
 const BASE_URL = import.meta.env.VITE_API_BASE_URL ?? ''
 
+type ApiErrorResponse = {
+    code?: unknown
+}
+
+export class ApiError extends Error {
+    public readonly status: number
+    public readonly code: string | null
+
+    constructor(status: number, code: string | null, message: string) {
+        super(message)
+        this.name = 'ApiError'
+        this.status = status
+        this.code = code
+    }
+}
+
+export function isApiErrorCode(error: unknown, code: string): error is ApiError {
+    return error instanceof ApiError && error.code === code
+}
+
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
     const token = authStore.getToken()
     const headers: Record<string, string> = { 'Content-Type': 'application/json' }
@@ -25,7 +45,16 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
     }
     if (!res.ok) {
         const text = await res.text().catch(() => '')
-        throw new Error(`HTTP ${res.status} ${res.statusText} :: ${text}`)
+        let code: string | null = null
+        if (text) {
+            try {
+                const body = JSON.parse(text) as ApiErrorResponse
+                code = typeof body.code === 'string' ? body.code : null
+            } catch {
+                // Preserve the existing text fallback for non-JSON error responses.
+            }
+        }
+        throw new ApiError(res.status, code, `HTTP ${res.status} ${res.statusText} :: ${text}`)
     }
 
     if (res.status === 204) {
