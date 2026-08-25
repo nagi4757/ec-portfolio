@@ -6,6 +6,7 @@ import com.nagi4757.ec.api.cart.application.CartView
 import com.nagi4757.ec.api.common.error.ApiErrorCode
 import com.nagi4757.ec.api.common.error.ApplicationException
 import com.nagi4757.ec.api.order.domain.model.Order
+import com.nagi4757.ec.api.order.domain.model.OrderItem
 import com.nagi4757.ec.api.order.domain.model.OrderStatus
 import com.nagi4757.ec.api.order.domain.repository.OrderPage
 import com.nagi4757.ec.api.order.domain.repository.OrderRepository
@@ -13,10 +14,13 @@ import com.nagi4757.ec.api.product.domain.repository.ProductRepository
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.params.ParameterizedTest
+import org.junit.jupiter.params.provider.EnumSource
 import org.mockito.Mockito.verify
 import org.mockito.Mockito.`when`
 import org.mockito.Mockito.mock
 import org.mockito.Mockito.never
+import org.mockito.Mockito.verifyNoInteractions
 import java.time.LocalDateTime
 
 class OrderServiceTest {
@@ -140,6 +144,112 @@ class OrderServiceTest {
     }
 
     @Test
+    fun `cancelOrder cancels pending order and restores every item stock`() {
+        val orderRepository = FakeOrderRepository()
+        val cartService = mock(CartService::class.java)
+        val productRepository = mock(ProductRepository::class.java)
+        val orderService = OrderService(orderRepository, cartService, productRepository)
+        orderRepository.seed(order(status = OrderStatus.PENDING))
+        `when`(productRepository.increaseStock(101L, 2)).thenReturn(true)
+        `when`(productRepository.increaseStock(102L, 3)).thenReturn(true)
+
+        val result = orderService.cancelOrder(7L, 10L)
+
+        assertEquals(OrderStatus.CANCELLED, result.status)
+        verify(productRepository).increaseStock(101L, 2)
+        verify(productRepository).increaseStock(102L, 3)
+        verifyNoInteractions(cartService)
+    }
+
+    @ParameterizedTest
+    @EnumSource(
+        value = OrderStatus::class,
+        names = ["PREPARING", "SHIPPED", "DELIVERED", "CANCELLED"]
+    )
+    fun `cancelOrder rejects non-cancellable user order statuses`(status: OrderStatus) {
+        val orderRepository = FakeOrderRepository()
+        val cartService = mock(CartService::class.java)
+        val productRepository = mock(ProductRepository::class.java)
+        val orderService = OrderService(orderRepository, cartService, productRepository)
+        orderRepository.seed(order(status = status))
+
+        val exception = assertThrows(ApplicationException::class.java) {
+            orderService.cancelOrder(7L, 10L)
+        }
+
+        assertEquals(ApiErrorCode.INVALID_ORDER_TRANSITION, exception.errorCode)
+        verifyNoInteractions(productRepository)
+    }
+
+    @Test
+    fun `cancelOrder returns not found for another user order`() {
+        val orderRepository = FakeOrderRepository()
+        val cartService = mock(CartService::class.java)
+        val productRepository = mock(ProductRepository::class.java)
+        val orderService = OrderService(orderRepository, cartService, productRepository)
+        orderRepository.seed(order(status = OrderStatus.PENDING, userId = 8L))
+
+        val exception = assertThrows(ApplicationException::class.java) {
+            orderService.cancelOrder(7L, 10L)
+        }
+
+        assertEquals(ApiErrorCode.ORDER_NOT_FOUND, exception.errorCode)
+        verifyNoInteractions(productRepository)
+    }
+
+    @Test
+    fun `cancelOrder does not restore stock when conditional transition fails`() {
+        val orderRepository = FakeOrderRepository().apply { rejectTransitions = true }
+        val cartService = mock(CartService::class.java)
+        val productRepository = mock(ProductRepository::class.java)
+        val orderService = OrderService(orderRepository, cartService, productRepository)
+        orderRepository.seed(order(status = OrderStatus.PENDING))
+
+        val exception = assertThrows(ApplicationException::class.java) {
+            orderService.cancelOrder(7L, 10L)
+        }
+
+        assertEquals(ApiErrorCode.INVALID_ORDER_TRANSITION, exception.errorCode)
+        assertEquals(OrderStatus.PENDING, orderRepository.findById(10L)?.status)
+        verifyNoInteractions(productRepository)
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = OrderStatus::class, names = ["PENDING", "PREPARING"])
+    fun `updateStatus restores stock when admin cancels an eligible order`(status: OrderStatus) {
+        val orderRepository = FakeOrderRepository()
+        val cartService = mock(CartService::class.java)
+        val productRepository = mock(ProductRepository::class.java)
+        val orderService = OrderService(orderRepository, cartService, productRepository)
+        orderRepository.seed(order(status = status))
+        `when`(productRepository.increaseStock(101L, 2)).thenReturn(true)
+        `when`(productRepository.increaseStock(102L, 3)).thenReturn(true)
+
+        val result = orderService.updateStatus(10L, OrderStatus.CANCELLED)
+
+        assertEquals(OrderStatus.CANCELLED, result.status)
+        verify(productRepository).increaseStock(101L, 2)
+        verify(productRepository).increaseStock(102L, 3)
+    }
+
+    @Test
+    fun `updateStatus rejects an invalid admin transition`() {
+        val orderRepository = FakeOrderRepository()
+        val cartService = mock(CartService::class.java)
+        val productRepository = mock(ProductRepository::class.java)
+        val orderService = OrderService(orderRepository, cartService, productRepository)
+        orderRepository.seed(order(status = OrderStatus.PENDING))
+
+        val exception = assertThrows(ApplicationException::class.java) {
+            orderService.updateStatus(10L, OrderStatus.SHIPPED)
+        }
+
+        assertEquals(ApiErrorCode.INVALID_ORDER_TRANSITION, exception.errorCode)
+        assertEquals(OrderStatus.PENDING, orderRepository.findById(10L)?.status)
+        verifyNoInteractions(productRepository)
+    }
+
+    @Test
     fun `updateStatus updates and returns refreshed order`() {
         val orderRepository = FakeOrderRepository()
         val cartService = mock(CartService::class.java)
@@ -156,13 +266,45 @@ class OrderServiceTest {
         )
         orderRepository.seed(before)
 
-        val result = orderService.updateStatus(10L, OrderStatus.SHIPPED)
+        val result = orderService.updateStatus(10L, OrderStatus.PREPARING)
 
-        assertEquals(OrderStatus.SHIPPED, result.status)
+        assertEquals(OrderStatus.PREPARING, result.status)
     }
+
+    private fun order(
+        status: OrderStatus,
+        userId: Long = 7L
+    ): Order = Order(
+        id = 10L,
+        userId = userId,
+        status = status,
+        items = listOf(
+            OrderItem(
+                id = 1L,
+                orderId = 10L,
+                productId = 101L,
+                name = "First Product",
+                price = 10_000L,
+                quantity = 2,
+                lineAmount = 20_000L
+            ),
+            OrderItem(
+                id = 2L,
+                orderId = 10L,
+                productId = 102L,
+                name = "Second Product",
+                price = 20_000L,
+                quantity = 3,
+                lineAmount = 60_000L
+            )
+        ),
+        totalAmount = 80_000L,
+        createdAt = LocalDateTime.of(2026, 8, 25, 10, 0)
+    )
 
     private class FakeOrderRepository : OrderRepository {
         val savedOrders: MutableList<Order> = mutableListOf()
+        var rejectTransitions: Boolean = false
         private val ordersById: MutableMap<Long, Order> = mutableMapOf()
         private var nextId = 1L
 
@@ -199,9 +341,28 @@ class OrderServiceTest {
             return OrderPage(items, safePage, safeSize, total, totalPages)
         }
 
-        override fun updateStatus(id: Long, status: OrderStatus): Boolean {
+        override fun transitionStatus(
+            id: Long,
+            expectedStatus: OrderStatus,
+            targetStatus: OrderStatus
+        ): Boolean {
+            if (rejectTransitions) return false
             val current = ordersById[id] ?: return false
-            ordersById[id] = current.copy(status = status)
+            if (current.status != expectedStatus) return false
+            ordersById[id] = current.copy(status = targetStatus)
+            return true
+        }
+
+        override fun transitionStatusForUser(
+            id: Long,
+            userId: Long,
+            expectedStatus: OrderStatus,
+            targetStatus: OrderStatus
+        ): Boolean {
+            if (rejectTransitions) return false
+            val current = ordersById[id] ?: return false
+            if (current.userId != userId || current.status != expectedStatus) return false
+            ordersById[id] = current.copy(status = targetStatus)
             return true
         }
     }

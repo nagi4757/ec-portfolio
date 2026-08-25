@@ -53,12 +53,17 @@
     </select>
 
     <select id="selectItemsByOrderId" resultMap="orderItemResultMap">
-        SELECT * FROM order_items WHERE order_id = #{orderId}
+        SELECT * FROM order_items WHERE order_id = #{orderId} ORDER BY id
     </select>
 
     <update id="updateOrderStatus">
-        UPDATE orders SET status = #{status} WHERE id = #{id}
+        UPDATE orders
+        SET status = #{targetStatus}
+        WHERE id = #{id}
+          AND status = #{expectedStatus}
+        <if test="userId != null">
+          AND user_id = #{userId}
+        </if>
     </update>
 
 </mapper>
-

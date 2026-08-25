@@ -9,7 +9,13 @@ interface OrderRepository {
     fun findByIdAndUserId(id: Long, userId: Long): Order?
     fun findByUserId(userId: Long): List<Order>
     fun findAll(page: Int, size: Int): OrderPage
-    fun updateStatus(id: Long, status: OrderStatus): Boolean
+    fun transitionStatus(id: Long, expectedStatus: OrderStatus, targetStatus: OrderStatus): Boolean
+    fun transitionStatusForUser(
+        id: Long,
+        userId: Long,
+        expectedStatus: OrderStatus,
+        targetStatus: OrderStatus
+    ): Boolean
 }
 
 data class OrderPage(
@@ -19,4 +25,3 @@ data class OrderPage(
     val total: Long,
     val totalPages: Int
 )
-

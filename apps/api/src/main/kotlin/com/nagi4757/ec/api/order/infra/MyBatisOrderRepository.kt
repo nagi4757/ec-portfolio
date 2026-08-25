@@ -60,7 +60,26 @@ class MyBatisOrderRepository(
         )
     }
 
-    override fun updateStatus(id: Long, status: OrderStatus): Boolean =
-        mapper.updateOrderStatus(id, status.name) > 0
-}
+    override fun transitionStatus(
+        id: Long,
+        expectedStatus: OrderStatus,
+        targetStatus: OrderStatus
+    ): Boolean = mapper.updateOrderStatus(
+        id = id,
+        userId = null,
+        expectedStatus = expectedStatus.name,
+        targetStatus = targetStatus.name
+    ) > 0
 
+    override fun transitionStatusForUser(
+        id: Long,
+        userId: Long,
+        expectedStatus: OrderStatus,
+        targetStatus: OrderStatus
+    ): Boolean = mapper.updateOrderStatus(
+        id = id,
+        userId = userId,
+        expectedStatus = expectedStatus.name,
+        targetStatus = targetStatus.name
+    ) > 0
+}

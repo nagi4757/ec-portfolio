@@ -14,7 +14,12 @@ interface OrderMapper {
     fun selectAllOrders(@Param("offset") offset: Int, @Param("limit") limit: Int): List<OrderRecord>
     fun countAllOrders(): Long
     fun selectItemsByOrderId(orderId: Long): List<OrderItemRecord>
-    fun updateOrderStatus(@Param("id") id: Long, @Param("status") status: String): Int
+    fun updateOrderStatus(
+        @Param("id") id: Long,
+        @Param("userId") userId: Long?,
+        @Param("expectedStatus") expectedStatus: String,
+        @Param("targetStatus") targetStatus: String
+    ): Int
 }
 
 data class OrderRecord(
@@ -35,4 +40,3 @@ data class OrderItemRecord(
     val quantity: Int = 0,
     val lineAmount: Long = 0
 )
-
