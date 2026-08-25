@@ -1,6 +1,8 @@
 import { Link, useNavigate } from 'react-router-dom'
 import { authStore } from '@/lib/authStore'
+import LanguageSwitcher from '@/components/LanguageSwitcher'
 import type { ReactNode } from 'react'
+import { useTranslation } from 'react-i18next'
 
 type Props = {
     children: ReactNode
@@ -8,6 +10,7 @@ type Props = {
 
 export default function AdminLayout({ children }: Props) {
     const navigate = useNavigate()
+    const { t } = useTranslation()
     const user = authStore.getUser()
 
     function handleLogout() {
@@ -22,9 +25,9 @@ export default function AdminLayout({ children }: Props) {
                 <div style={{ display: 'flex', alignItems: 'center', gap: '24px', flexWrap: 'wrap' }}>
                     <span style={{ fontWeight: 700, fontSize: '16px' }}>EC Admin</span>
                     <nav style={{ display: 'flex', gap: '16px', flexWrap: 'wrap' }}>
-                        <Link to="/products" style={{ color: '#fff', textDecoration: 'none', fontWeight: 500 }}>상품</Link>
-                        <Link to="/categories" style={{ color: '#fff', textDecoration: 'none', fontWeight: 500 }}>카테고리</Link>
-                        <Link to="/orders" style={{ color: '#fff', textDecoration: 'none', fontWeight: 500 }}>주문</Link>
+                        <Link to="/products" style={{ color: '#fff', textDecoration: 'none', fontWeight: 500 }}>{t('admin.navigation.products')}</Link>
+                        <Link to="/categories" style={{ color: '#fff', textDecoration: 'none', fontWeight: 500 }}>{t('admin.navigation.categories')}</Link>
+                        <Link to="/orders" style={{ color: '#fff', textDecoration: 'none', fontWeight: 500 }}>{t('admin.navigation.orders')}</Link>
                     </nav>
                 </div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '12px', fontSize: '14px', flexWrap: 'wrap' }}>
@@ -43,8 +46,9 @@ export default function AdminLayout({ children }: Props) {
                             fontSize: '13px',
                         }}
                     >
-                        로그아웃
+                        {t('actions.logout')}
                     </button>
+                    <LanguageSwitcher />
                 </div>
             </header>
 
@@ -67,4 +71,3 @@ const headerStyle: React.CSSProperties = {
     gap: '12px',
     flexWrap: 'wrap',
 }
-

@@ -9,11 +9,14 @@ import OrderDetailPage from '@/features/orders/pages/OrderDetailPage';
 import { CartAPI } from '@/features/cart/api';
 import { authStore } from '@/lib/authStore';
 import { cartStore } from '@/lib/cartStore';
+import LanguageSwitcher from '@/components/LanguageSwitcher';
 import { useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 
 function Header() {
     const navigate = useNavigate();
     const location = useLocation();
+    const { t } = useTranslation();
     const [totalQuantity, setTotalQuantity] = useState(cartStore.getTotalQuantity());
 
     const user = authStore.getUser();
@@ -46,25 +49,26 @@ function Header() {
             <Link to="/" style={brand}>EC Store</Link>
             <nav style={nav}>
                 <Link to="/cart" style={{ ...navLink, position: 'relative', paddingRight: totalQuantity > 0 ? 20 : undefined }}>
-                    장바구니
+                    {t('store.navigation.cart')}
                     {totalQuantity > 0 && (
                         <span style={badge}>{totalQuantity > 99 ? '99+' : totalQuantity}</span>
                     )}
                 </Link>
                 {user && (
-                    <Link to="/orders" style={navLink}>내 주문</Link>
+                    <Link to="/orders" style={navLink}>{t('store.navigation.myOrders')}</Link>
                 )}
                 {user ? (
                     <>
-                        <span style={userName}>{user.name}님</span>
-                        <button onClick={handleLogout} style={navBtn}>로그아웃</button>
+                        <span style={userName}>{t('store.navigation.signedInUser', { name: user.name })}</span>
+                        <button onClick={handleLogout} style={navBtn}>{t('actions.logout')}</button>
                     </>
                 ) : (
                     <>
-                        <Link to="/login" style={navLink}>로그인</Link>
-                        <Link to="/signup" style={{ ...navLink, ...signUpLink }}>회원가입</Link>
+                        <Link to="/login" style={navLink}>{t('actions.login')}</Link>
+                        <Link to="/signup" style={{ ...navLink, ...signUpLink }}>{t('store.actions.signUp')}</Link>
                     </>
                 )}
+                <LanguageSwitcher />
             </nav>
         </header>
     );
