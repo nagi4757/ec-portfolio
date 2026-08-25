@@ -17,6 +17,7 @@ enum class ApiErrorCode(
     ORDER_NOT_FOUND(HttpStatus.NOT_FOUND, "Order was not found"),
     EMPTY_CART(HttpStatus.BAD_REQUEST, "Cart is empty"),
     INVALID_CART_QUANTITY(HttpStatus.BAD_REQUEST, "Cart quantity is invalid"),
+    INSUFFICIENT_STOCK(HttpStatus.CONFLICT, "Product stock is insufficient"),
     INVALID_ORDER_STATUS(HttpStatus.BAD_REQUEST, "Order status is invalid"),
     EMAIL_ALREADY_EXISTS(HttpStatus.CONFLICT, "Email already exists"),
     INVALID_CREDENTIALS(HttpStatus.UNAUTHORIZED, "Invalid credentials"),

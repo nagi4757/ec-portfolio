@@ -3,25 +3,34 @@ package com.nagi4757.ec.api.order.application
 import com.nagi4757.ec.api.cart.application.CartService
 import com.nagi4757.ec.api.common.error.ApiErrorCode
 import com.nagi4757.ec.api.common.error.EmptyCartException
+import com.nagi4757.ec.api.common.error.InsufficientStockException
 import com.nagi4757.ec.api.common.error.ResourceNotFoundException
 import com.nagi4757.ec.api.order.domain.model.Order
 import com.nagi4757.ec.api.order.domain.model.OrderItem
 import com.nagi4757.ec.api.order.domain.model.OrderStatus
 import com.nagi4757.ec.api.order.domain.repository.OrderPage
 import com.nagi4757.ec.api.order.domain.repository.OrderRepository
+import com.nagi4757.ec.api.product.domain.repository.ProductRepository
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
 
 @Service
 class OrderService(
     private val orderRepository: OrderRepository,
-    private val cartService: CartService
+    private val cartService: CartService,
+    private val productRepository: ProductRepository
 ) {
     /* 장바구니 → 주문 생성 + 장바구니 비우기 */
     @Transactional
     fun placeOrder(userId: Long): Order {
         val cart = cartService.getCart(userId)
         if (cart.items.isEmpty()) throw EmptyCartException()
+
+        cart.items.forEach { line ->
+            if (!productRepository.decreaseStockIfAvailable(line.productId, line.quantity)) {
+                throw InsufficientStockException()
+            }
+        }
 
         val order = Order(
             id = null,

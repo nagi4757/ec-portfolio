@@ -2,9 +2,11 @@ package com.nagi4757.ec.api.cart.application
 
 import com.nagi4757.ec.api.cart.domain.repository.CartRepository
 import com.nagi4757.ec.api.common.error.ApiErrorCode
+import com.nagi4757.ec.api.common.error.InsufficientStockException
 import com.nagi4757.ec.api.common.error.InvalidCartQuantityException
 import com.nagi4757.ec.api.common.error.ResourceNotFoundException
 import com.nagi4757.ec.api.product.application.ProductService
+import com.nagi4757.ec.api.product.domain.model.Product
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
 
@@ -37,17 +39,23 @@ class CartService(
     @Transactional
     fun addItem(userId: Long, productId: Long, quantity: Int): CartView {
         if (quantity <= 0) throw InvalidCartQuantityException()
-        ensureProductExists(productId)
+        val product = getRequiredProduct(productId)
+        val currentQuantity = cartRepository.findAll(userId)
+            .firstOrNull { it.productId == productId }
+            ?.quantity
+            ?: 0
+        ensureStockAvailable(product, currentQuantity.toLong() + quantity)
         cartRepository.increment(userId, productId, quantity)
         return getCart(userId)
     }
 
     @Transactional
     fun updateItem(userId: Long, productId: Long, quantity: Int): CartView {
-        ensureProductExists(productId)
+        val product = getRequiredProduct(productId)
         if (quantity <= 0) {
             cartRepository.remove(userId, productId)
         } else {
+            ensureStockAvailable(product, quantity.toLong())
             cartRepository.setQuantity(userId, productId, quantity)
         }
         return getCart(userId)
@@ -65,9 +73,13 @@ class CartService(
         return CartView(emptyList(), 0, 0L)
     }
 
-    private fun ensureProductExists(productId: Long) {
-        if (productService.get(productId) == null) {
-            throw ResourceNotFoundException(ApiErrorCode.PRODUCT_NOT_FOUND)
+    private fun getRequiredProduct(productId: Long): Product =
+        productService.get(productId)
+            ?: throw ResourceNotFoundException(ApiErrorCode.PRODUCT_NOT_FOUND)
+
+    private fun ensureStockAvailable(product: Product, requestedQuantity: Long) {
+        if (requestedQuantity > product.stockQuantity.toLong()) {
+            throw InsufficientStockException()
         }
     }
 }

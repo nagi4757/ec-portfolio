@@ -49,6 +49,17 @@ class GlobalExceptionHandlerTest {
     }
 
     @Test
+    fun `insufficient stock returns conflict response`() {
+        mockMvc.get("/test/insufficient-stock")
+            .andExpect {
+                status { isConflict() }
+                jsonPath("$.status") { value(409) }
+                jsonPath("$.code") { value("INSUFFICIENT_STOCK") }
+                jsonPath("$.message") { value("Product stock is insufficient") }
+            }
+    }
+
+    @Test
     fun `validation failure includes field errors`() {
         mockMvc.post("/test/validation") {
             contentType = MediaType.APPLICATION_JSON
@@ -157,6 +168,9 @@ class GlobalExceptionHandlerTest {
         @GetMapping("/not-found")
         fun notFound(): Nothing =
             throw ResourceNotFoundException(ApiErrorCode.PRODUCT_NOT_FOUND)
+
+        @GetMapping("/insufficient-stock")
+        fun insufficientStock(): Nothing = throw InsufficientStockException()
 
         @PostMapping("/validation")
         fun validate(@Valid @RequestBody request: TestRequest): TestRequest = request

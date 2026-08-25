@@ -2,6 +2,9 @@ package com.nagi4757.ec.api.integration
 
 import com.nagi4757.ec.api.cart.domain.model.CartItem
 import com.nagi4757.ec.api.cart.domain.repository.CartRepository
+import com.nagi4757.ec.api.common.error.ApiErrorCode
+import com.nagi4757.ec.api.common.error.ApplicationException
+import com.nagi4757.ec.api.order.application.OrderService
 import com.nagi4757.ec.api.order.domain.model.Order
 import com.nagi4757.ec.api.order.domain.model.OrderItem
 import com.nagi4757.ec.api.order.domain.model.OrderStatus
@@ -25,7 +28,10 @@ import org.testcontainers.containers.MariaDBContainer
 import org.testcontainers.junit.jupiter.Container
 import org.testcontainers.junit.jupiter.Testcontainers
 import java.util.UUID
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
 import java.util.concurrent.ThreadLocalRandom
+import java.util.concurrent.TimeUnit
 
 @Tag("integration")
 @Testcontainers
@@ -36,7 +42,8 @@ class InfrastructureIntegrationTest @Autowired constructor(
     private val jdbcTemplate: JdbcTemplate,
     private val productRepository: ProductRepository,
     private val orderRepository: OrderRepository,
-    private val cartRepository: CartRepository
+    private val cartRepository: CartRepository,
+    private val orderService: OrderService
 ) {
 
     @Test
@@ -123,6 +130,114 @@ class InfrastructureIntegrationTest @Autowired constructor(
 
     @Test
     @Transactional
+    fun `conditionally decreases stock without allowing a negative value`() {
+        val productId = productRepository.create(
+            product(stockQuantity = 3, namePrefix = "conditional-stock")
+        )
+
+        assertThat(productRepository.decreaseStockIfAvailable(productId, 2)).isTrue()
+        assertThat(productRepository.findById(productId)?.stockQuantity).isEqualTo(1)
+        assertThat(productRepository.decreaseStockIfAvailable(productId, 2)).isFalse()
+        assertThat(productRepository.findById(productId)?.stockQuantity).isEqualTo(1)
+    }
+
+    @Test
+    fun `rolls back earlier stock decrease when another order item is insufficient`() {
+        val userId = uniqueUserId()
+        val availableProductId = productRepository.create(
+            product(stockQuantity = 1, namePrefix = "rollback-available")
+        )
+        val unavailableProductId = productRepository.create(
+            product(stockQuantity = 0, namePrefix = "rollback-unavailable")
+        )
+        cartRepository.clear(userId)
+        cartRepository.increment(userId, availableProductId, 1)
+        cartRepository.increment(userId, unavailableProductId, 1)
+
+        try {
+            val exception = org.junit.jupiter.api.assertThrows<ApplicationException> {
+                orderService.placeOrder(userId)
+            }
+
+            assertThat(exception.errorCode).isEqualTo(ApiErrorCode.INSUFFICIENT_STOCK)
+            assertThat(productRepository.findById(availableProductId)?.stockQuantity).isEqualTo(1)
+            assertThat(productRepository.findById(unavailableProductId)?.stockQuantity).isZero()
+            assertThat(orderRepository.findByUserId(userId)).isEmpty()
+            assertThat(cartRepository.findAll(userId)).containsExactly(
+                CartItem(availableProductId, 1),
+                CartItem(unavailableProductId, 1)
+            )
+        } finally {
+            cartRepository.clear(userId)
+            deleteOrdersForUser(userId)
+            productRepository.delete(availableProductId)
+            productRepository.delete(unavailableProductId)
+        }
+    }
+
+    @Test
+    fun `allows only one of two concurrent orders for the last item`() {
+        val productName = "concurrent-stock-${UUID.randomUUID()}"
+        val productId = productRepository.create(
+            Product(
+                name = productName,
+                price = 25_000L,
+                stockQuantity = 1,
+                imageUrl = null,
+                description = "concurrent order test"
+            )
+        )
+        val userIds = listOf(uniqueUserId(), uniqueUserId())
+        userIds.forEach { userId ->
+            cartRepository.clear(userId)
+            cartRepository.increment(userId, productId, 1)
+        }
+        val start = CountDownLatch(1)
+        val executor = Executors.newFixedThreadPool(userIds.size)
+
+        try {
+            val futures = userIds.map { userId ->
+                executor.submit<Pair<Long, ApiErrorCode?>> {
+                    start.await()
+                    try {
+                        orderService.placeOrder(userId)
+                        userId to null
+                    } catch (exception: ApplicationException) {
+                        userId to exception.errorCode
+                    }
+                }
+            }
+            start.countDown()
+            val attempts = futures.map { it.get(10, TimeUnit.SECONDS) }
+            val successUserId = attempts.single { it.second == null }.first
+            val failedAttempt = attempts.single { it.second != null }
+
+            assertThat(failedAttempt.second).isEqualTo(ApiErrorCode.INSUFFICIENT_STOCK)
+            assertThat(productRepository.findById(productId)?.stockQuantity).isZero()
+
+            val savedOrder = orderRepository.findByUserId(successUserId).single()
+            val savedItem = savedOrder.items.single()
+            assertThat(savedItem.productId).isEqualTo(productId)
+            assertThat(savedItem.name).isEqualTo(productName)
+            assertThat(savedItem.price).isEqualTo(25_000L)
+            assertThat(savedItem.quantity).isEqualTo(1)
+            assertThat(savedItem.lineAmount).isEqualTo(25_000L)
+
+            assertThat(cartRepository.findAll(successUserId)).isEmpty()
+            assertThat(cartRepository.findAll(failedAttempt.first))
+                .containsExactly(CartItem(productId, 1))
+        } finally {
+            executor.shutdownNow()
+            userIds.forEach { userId ->
+                cartRepository.clear(userId)
+                deleteOrdersForUser(userId)
+            }
+            productRepository.delete(productId)
+        }
+    }
+
+    @Test
+    @Transactional
     fun `saves an order and reloads generated identifiers`() {
         val order = Order(
             id = null,
@@ -188,6 +303,29 @@ class InfrastructureIntegrationTest @Autowired constructor(
             assertThat(cartRepository.findAll(userId)).isEmpty()
         } finally {
             cartRepository.clear(userId)
+        }
+    }
+
+    private fun product(stockQuantity: Int, namePrefix: String): Product = Product(
+        name = "$namePrefix-${UUID.randomUUID()}",
+        price = 10_000L,
+        stockQuantity = stockQuantity,
+        imageUrl = null,
+        description = "stock integration test"
+    )
+
+    private fun uniqueUserId(): Long =
+        ThreadLocalRandom.current().nextLong(1_000_000_000L, Long.MAX_VALUE)
+
+    private fun deleteOrdersForUser(userId: Long) {
+        val orderIds = jdbcTemplate.queryForList(
+            "SELECT id FROM orders WHERE user_id = ?",
+            Long::class.java,
+            userId
+        )
+        orderIds.forEach { orderId ->
+            jdbcTemplate.update("DELETE FROM order_items WHERE order_id = ?", orderId)
+            jdbcTemplate.update("DELETE FROM orders WHERE id = ?", orderId)
         }
     }
 

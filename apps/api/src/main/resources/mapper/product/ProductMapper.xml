@@ -73,6 +73,13 @@
         WHERE id = #{id}
     </update>
 
+    <update id="decreaseStockIfAvailable">
+        UPDATE products
+        SET stock_quantity = stock_quantity - #{quantity}
+        WHERE id = #{productId}
+          AND stock_quantity &gt;= #{quantity}
+    </update>
+
     <delete id="delete">
         DELETE FROM products WHERE id = #{id}
     </delete>
