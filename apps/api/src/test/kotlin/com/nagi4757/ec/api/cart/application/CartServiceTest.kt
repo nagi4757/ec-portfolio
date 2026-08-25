@@ -11,6 +11,7 @@ import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import org.mockito.ArgumentMatchers.anyLong
 import org.mockito.Mockito.mock
 import org.mockito.Mockito.never
 import org.mockito.Mockito.verify
@@ -115,7 +116,8 @@ class CartServiceTest {
         val userId = 7L
         val productId = 101L
         `when`(cartRepository.findAll(userId)).thenReturn(listOf(CartItem(productId, 2)))
-        `when`(productService.get(productId)).thenReturn(product(stockQuantity = 3, active = false))
+        `when`(productService.getByIds(listOf(productId)))
+            .thenReturn(listOf(product(stockQuantity = 3, active = false)))
 
         val result = cartService.getCart(userId)
 
@@ -131,7 +133,8 @@ class CartServiceTest {
         val userId = 7L
         val productId = 101L
         `when`(cartRepository.findAll(userId)).thenReturn(listOf(CartItem(productId, 1)))
-        `when`(productService.get(productId)).thenReturn(product(stockQuantity = 3))
+        `when`(productService.getByIds(listOf(productId)))
+            .thenReturn(listOf(product(stockQuantity = 3)))
 
         val result = cartService.getCart(userId)
 
@@ -148,6 +151,8 @@ class CartServiceTest {
             listOf(CartItem(productId, 2))
         )
         `when`(cartRepository.increment(userId, productId, 2)).thenReturn(2)
+        `when`(productService.getByIds(listOf(productId)))
+            .thenReturn(listOf(product(stockQuantity = 3)))
 
         val result = cartService.addItem(userId, productId, 2)
 
@@ -157,10 +162,61 @@ class CartServiceTest {
         assertTrue(result.items.single().available)
     }
 
-    private fun product(stockQuantity: Int, active: Boolean = true): Product = Product(
-        id = 101L,
-        name = "Product",
-        price = 10_000L,
+    @Test
+    fun `getCart loads five products in one batch and preserves cart order`() {
+        val userId = 7L
+        val cartItems = listOf(
+            CartItem(30L, 4),
+            CartItem(10L, 1),
+            CartItem(999L, 7),
+            CartItem(20L, 2),
+            CartItem(40L, 3)
+        )
+        `when`(cartRepository.findAll(userId)).thenReturn(cartItems)
+        `when`(productService.getByIds(cartItems.map { it.productId })).thenReturn(
+            listOf(
+                product(id = 40L, name = "Product 40", price = 4_000L, stockQuantity = 4, active = false),
+                product(id = 20L, name = "Product 20", price = 2_000L, stockQuantity = 3),
+                product(id = 10L, name = "Product 10", price = 1_000L, stockQuantity = 2, active = false),
+                product(id = 30L, name = "Product 30", price = 3_000L, stockQuantity = 5)
+            )
+        )
+
+        val result = cartService.getCart(userId)
+
+        assertEquals(listOf(30L, 10L, 20L, 40L), result.items.map { it.productId })
+        assertEquals(listOf(4, 1, 2, 3), result.items.map { it.quantity })
+        assertEquals(listOf(true, false, true, false), result.items.map { it.available })
+        assertEquals(listOf(12_000L, 1_000L, 4_000L, 12_000L), result.items.map { it.lineAmount })
+        assertEquals(10, result.totalQuantity)
+        assertEquals(29_000L, result.totalAmount)
+        verify(productService).getByIds(cartItems.map { it.productId })
+        verify(productService, never()).get(anyLong())
+    }
+
+    @Test
+    fun `getCart skips product lookup for an empty cart`() {
+        val userId = 7L
+        `when`(cartRepository.findAll(userId)).thenReturn(emptyList())
+
+        val result = cartService.getCart(userId)
+
+        assertTrue(result.items.isEmpty())
+        assertEquals(0, result.totalQuantity)
+        assertEquals(0L, result.totalAmount)
+        verifyNoInteractions(productService)
+    }
+
+    private fun product(
+        stockQuantity: Int,
+        active: Boolean = true,
+        id: Long = 101L,
+        name: String = "Product",
+        price: Long = 10_000L
+    ): Product = Product(
+        id = id,
+        name = name,
+        price = price,
         stockQuantity = stockQuantity,
         imageUrl = null,
         description = null,

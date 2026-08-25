@@ -19,6 +19,12 @@ class MyBatisProductRepository(
         return row?.let(factory::fromRecord)
     }
 
+    override fun findByIds(ids: Collection<Long>): List<Product> {
+        val distinctIds = ids.distinct()
+        if (distinctIds.isEmpty()) return emptyList()
+        return mapper.selectByIds(distinctIds).map(factory::fromRecord)
+    }
+
     override fun findActiveById(id: Long): Product? {
         val row = mapper.selectActiveById(id)
         return row?.let(factory::fromRecord)

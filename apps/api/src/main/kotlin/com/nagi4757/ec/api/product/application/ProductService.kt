@@ -18,6 +18,9 @@ class ProductService(
     fun get(id: Long): Product? = productRepository.findById(id)
 
     @Transactional(readOnly = true)
+    fun getByIds(ids: Collection<Long>): List<Product> = productRepository.findByIds(ids)
+
+    @Transactional(readOnly = true)
     fun getActive(id: Long): Product? = productRepository.findActiveById(id)
 
     @Transactional(readOnly = true)
