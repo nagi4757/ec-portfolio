@@ -4,6 +4,7 @@ import com.nagi4757.ec.api.cart.domain.repository.CartRepository
 import com.nagi4757.ec.api.common.error.ApiErrorCode
 import com.nagi4757.ec.api.common.error.InsufficientStockException
 import com.nagi4757.ec.api.common.error.InvalidCartQuantityException
+import com.nagi4757.ec.api.common.error.ProductNotAvailableException
 import com.nagi4757.ec.api.common.error.ResourceNotFoundException
 import com.nagi4757.ec.api.product.application.ProductService
 import com.nagi4757.ec.api.product.domain.model.Product
@@ -25,7 +26,8 @@ class CartService(
                 price = product.price,
                 imageUrl = product.imageUrl,
                 quantity = item.quantity,
-                lineAmount = product.price * item.quantity
+                lineAmount = product.price * item.quantity,
+                available = product.active
             )
         }
 
@@ -40,6 +42,7 @@ class CartService(
     fun addItem(userId: Long, productId: Long, quantity: Int): CartView {
         if (quantity <= 0) throw InvalidCartQuantityException()
         val product = getRequiredProduct(productId)
+        ensureAvailable(product)
         val currentQuantity = cartRepository.findAll(userId)
             .firstOrNull { it.productId == productId }
             ?.quantity
@@ -55,6 +58,7 @@ class CartService(
         if (quantity <= 0) {
             cartRepository.remove(userId, productId)
         } else {
+            ensureAvailable(product)
             ensureStockAvailable(product, quantity.toLong())
             cartRepository.setQuantity(userId, productId, quantity)
         }
@@ -82,6 +86,12 @@ class CartService(
             throw InsufficientStockException()
         }
     }
+
+    private fun ensureAvailable(product: Product) {
+        if (!product.active) {
+            throw ProductNotAvailableException()
+        }
+    }
 }
 
 data class CartLine(
@@ -90,7 +100,8 @@ data class CartLine(
     val price: Long,
     val imageUrl: String?,
     val quantity: Int,
-    val lineAmount: Long
+    val lineAmount: Long,
+    val available: Boolean
 )
 
 data class CartView(

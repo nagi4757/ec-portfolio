@@ -10,6 +10,7 @@ import com.nagi4757.ec.api.order.domain.model.OrderItem
 import com.nagi4757.ec.api.order.domain.model.OrderStatus
 import com.nagi4757.ec.api.order.domain.repository.OrderPage
 import com.nagi4757.ec.api.order.domain.repository.OrderRepository
+import com.nagi4757.ec.api.product.domain.model.Product
 import com.nagi4757.ec.api.product.domain.repository.ProductRepository
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertThrows
@@ -40,7 +41,8 @@ class OrderServiceTest {
                     price = 19000,
                     imageUrl = null,
                     quantity = 2,
-                    lineAmount = 38000
+                    lineAmount = 38000,
+                    available = true
                 )
             ),
             totalQuantity = 2,
@@ -97,7 +99,8 @@ class OrderServiceTest {
                     price = 19_000L,
                     imageUrl = null,
                     quantity = 2,
-                    lineAmount = 38_000L
+                    lineAmount = 38_000L,
+                    available = true
                 )
             ),
             totalQuantity = 2,
@@ -105,12 +108,73 @@ class OrderServiceTest {
         )
         `when`(cartService.getCart(userId)).thenReturn(cart)
         `when`(productRepository.decreaseStockIfAvailable(101L, 2)).thenReturn(false)
+        `when`(productRepository.findById(101L)).thenReturn(product(stockQuantity = 1))
 
         val exception = assertThrows(ApplicationException::class.java) {
             orderService.placeOrder(userId)
         }
 
         assertEquals(ApiErrorCode.INSUFFICIENT_STOCK, exception.errorCode)
+        assertEquals(0, orderRepository.savedOrders.size)
+        verify(cartService, never()).clear(userId)
+    }
+
+    @Test
+    fun `placeOrder rejects inactive cart item before changing stock`() {
+        val orderRepository = FakeOrderRepository()
+        val cartService = mock(CartService::class.java)
+        val productRepository = mock(ProductRepository::class.java)
+        val orderService = OrderService(orderRepository, cartService, productRepository)
+        val userId = 7L
+        val cart = cart(available = false)
+        `when`(cartService.getCart(userId)).thenReturn(cart)
+
+        val exception = assertThrows(ApplicationException::class.java) {
+            orderService.placeOrder(userId)
+        }
+
+        assertEquals(ApiErrorCode.PRODUCT_NOT_AVAILABLE, exception.errorCode)
+        assertEquals(0, orderRepository.savedOrders.size)
+        verifyNoInteractions(productRepository)
+        verify(cartService, never()).clear(userId)
+    }
+
+    @Test
+    fun `placeOrder classifies concurrent deactivation as product not available`() {
+        val orderRepository = FakeOrderRepository()
+        val cartService = mock(CartService::class.java)
+        val productRepository = mock(ProductRepository::class.java)
+        val orderService = OrderService(orderRepository, cartService, productRepository)
+        val userId = 7L
+        `when`(cartService.getCart(userId)).thenReturn(cart(available = true))
+        `when`(productRepository.decreaseStockIfAvailable(101L, 2)).thenReturn(false)
+        `when`(productRepository.findById(101L)).thenReturn(product(stockQuantity = 2, active = false))
+
+        val exception = assertThrows(ApplicationException::class.java) {
+            orderService.placeOrder(userId)
+        }
+
+        assertEquals(ApiErrorCode.PRODUCT_NOT_AVAILABLE, exception.errorCode)
+        assertEquals(0, orderRepository.savedOrders.size)
+        verify(cartService, never()).clear(userId)
+    }
+
+    @Test
+    fun `placeOrder classifies missing product after failed stock update as not found`() {
+        val orderRepository = FakeOrderRepository()
+        val cartService = mock(CartService::class.java)
+        val productRepository = mock(ProductRepository::class.java)
+        val orderService = OrderService(orderRepository, cartService, productRepository)
+        val userId = 7L
+        `when`(cartService.getCart(userId)).thenReturn(cart(available = true))
+        `when`(productRepository.decreaseStockIfAvailable(101L, 2)).thenReturn(false)
+        `when`(productRepository.findById(101L)).thenReturn(null)
+
+        val exception = assertThrows(ApplicationException::class.java) {
+            orderService.placeOrder(userId)
+        }
+
+        assertEquals(ApiErrorCode.PRODUCT_NOT_FOUND, exception.errorCode)
         assertEquals(0, orderRepository.savedOrders.size)
         verify(cartService, never()).clear(userId)
     }
@@ -318,6 +382,32 @@ class OrderServiceTest {
         ),
         totalAmount = 80_000L,
         createdAt = LocalDateTime.of(2026, 8, 25, 10, 0)
+    )
+
+    private fun cart(available: Boolean): CartView = CartView(
+        items = listOf(
+            CartLine(
+                productId = 101L,
+                name = "T-Shirt",
+                price = 19_000L,
+                imageUrl = null,
+                quantity = 2,
+                lineAmount = 38_000L,
+                available = available
+            )
+        ),
+        totalQuantity = 2,
+        totalAmount = 38_000L
+    )
+
+    private fun product(stockQuantity: Int, active: Boolean = true): Product = Product(
+        id = 101L,
+        name = "T-Shirt",
+        price = 19_000L,
+        stockQuantity = stockQuantity,
+        imageUrl = null,
+        description = null,
+        active = active
     )
 
     private class FakeOrderRepository : OrderRepository {

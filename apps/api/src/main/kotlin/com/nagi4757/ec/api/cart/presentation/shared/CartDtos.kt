@@ -21,7 +21,8 @@ data class CartItemResponse(
     val price: Long,
     val imageUrl: String?,
     val quantity: Int,
-    val lineAmount: Long
+    val lineAmount: Long,
+    val available: Boolean
 )
 
 data class CartResponse(
@@ -36,7 +37,8 @@ fun CartLine.toResponse() = CartItemResponse(
     price = price,
     imageUrl = imageUrl,
     quantity = quantity,
-    lineAmount = lineAmount
+    lineAmount = lineAmount,
+    available = available
 )
 
 fun CartView.toResponse() = CartResponse(
@@ -44,4 +46,3 @@ fun CartView.toResponse() = CartResponse(
     totalQuantity = totalQuantity,
     totalAmount = totalAmount
 )
-
