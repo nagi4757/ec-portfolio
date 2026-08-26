@@ -228,6 +228,57 @@ set +a
 ./gradlew bootRun
 ```
 
+### D. Production API 이미지
+
+Production 배포도 local Compose와 동일한 `apps/api/Dockerfile`을 사용합니다. 이미지는 Spring Profile이나 환경별 설정을 포함하지 않으며, ECS 같은 실행 환경에서 `SPRING_PROFILES_ACTIVE=prod`와 필요한 환경변수를 주입합니다.
+
+```zsh
+docker build -t ec-api:prod apps/api
+
+docker run --rm -p 8080:8080 \
+  -e SPRING_PROFILES_ACTIVE=prod \
+  -e DB_HOST \
+  -e DB_PORT \
+  -e DB_NAME \
+  -e DB_USERNAME \
+  -e DB_PASSWORD \
+  -e REDIS_HOST \
+  -e REDIS_PORT \
+  -e APP_AUTH_JWT_SECRET \
+  -e APP_CORS_ALLOWED_ORIGINS \
+  ec-api:prod
+```
+
+필수 runtime 환경변수:
+
+| 환경변수 | 용도 |
+|---|---|
+| `SPRING_PROFILES_ACTIVE` | Production에서는 `prod`로 지정 |
+| `DB_HOST` | MariaDB 호스트 |
+| `DB_PORT` | MariaDB 포트 |
+| `DB_NAME` | MariaDB 데이터베이스 이름 |
+| `DB_USERNAME` | MariaDB 사용자 |
+| `DB_PASSWORD` | MariaDB 비밀번호 |
+| `REDIS_HOST` | Redis 호스트 |
+| `REDIS_PORT` | Redis 포트 |
+| `APP_AUTH_JWT_SECRET` | JWT 서명 Secret |
+| `APP_CORS_ALLOWED_ORIGINS` | 허용할 Frontend Origin 목록 |
+
+선택 runtime 환경변수:
+
+| 환경변수 | 기본값 | 용도 |
+|---|---:|---|
+| `APP_AUTH_JWT_ACCESS_TOKEN_EXPIRATION_SECONDS` | `3600` | Access Token 만료 시간(초) |
+| `APP_OPENAPI_ENABLED` | `false` | Production OpenAPI/Swagger UI 활성화 여부 |
+
+Secret은 Docker build argument, Dockerfile `ENV`, 이미지 레이어에 넣지 않고 runtime secret으로 전달합니다. Production에서 OpenAPI와 Swagger UI는 기본적으로 비활성입니다.
+
+향후 AWS health check 연결 기준은 다음과 같습니다.
+
+- ECS Container Health Check: `GET /actuator/health/liveness` — 애플리케이션 프로세스 생존 여부
+- ALB Target Group Health Check: `GET /actuator/health/readiness` — MariaDB와 Redis를 포함한 트래픽 수신 가능 여부
+- 수동 전체 상태 확인: `GET /actuator/health`
+
 ---
 
 ## 프론트 실행

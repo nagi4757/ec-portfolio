@@ -1,6 +1,12 @@
+.env
+.env.*
 .gradle
 build
 out
 .idea
 *.iml
-
+.kotlin
+src/test
+HELP.md
+gradlew.bat
+*.log
