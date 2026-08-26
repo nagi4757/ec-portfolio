@@ -2,7 +2,9 @@ package com.nagi4757.ec.api.order.presentation.shared
 
 import com.nagi4757.ec.api.order.domain.model.Order
 import com.nagi4757.ec.api.order.domain.model.OrderItem
+import com.nagi4757.ec.api.order.domain.model.OrderStatus
 import com.nagi4757.ec.api.order.domain.repository.OrderPage
+import io.swagger.v3.oas.annotations.media.Schema
 import jakarta.validation.constraints.NotBlank
 import java.time.format.DateTimeFormatter
 
@@ -10,7 +12,11 @@ private val DT_FORMAT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
 
 /* ── Request ── */
 object OrderRequest {
-    data class UpdateStatus(@field:NotBlank val status: String)
+    data class UpdateStatus(
+        @field:NotBlank
+        @field:Schema(implementation = OrderStatus::class)
+        val status: String
+    )
 }
 
 /* ── Response ── */
@@ -24,17 +30,27 @@ data class OrderItemResponse(
 
 data class OrderResponse(
     val id: Long,
+    @field:Schema(implementation = OrderStatus::class)
     val status: String,
     val items: List<OrderItemResponse>,
     val totalAmount: Long,
+    @field:Schema(
+        description = "Order creation time formatted as yyyy-MM-dd HH:mm:ss.",
+        pattern = "^\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}$"
+    )
     val createdAt: String?
 )
 
 data class OrderSummaryResponse(
     val id: Long,
     val userId: Long,
+    @field:Schema(implementation = OrderStatus::class)
     val status: String,
     val totalAmount: Long,
+    @field:Schema(
+        description = "Order creation time formatted as yyyy-MM-dd HH:mm:ss.",
+        pattern = "^\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}$"
+    )
     val createdAt: String?
 )
 
@@ -78,4 +94,3 @@ fun OrderPage.toResponse() = OrderListResponse(
     total = total,
     totalPages = totalPages
 )
-

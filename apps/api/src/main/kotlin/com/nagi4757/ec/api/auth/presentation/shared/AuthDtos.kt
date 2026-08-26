@@ -2,6 +2,8 @@ package com.nagi4757.ec.api.auth.presentation.shared
 
 import com.nagi4757.ec.api.auth.application.dto.AuthResult
 import com.nagi4757.ec.api.auth.domain.model.User
+import com.nagi4757.ec.api.auth.domain.model.UserRole
+import io.swagger.v3.oas.annotations.media.Schema
 import jakarta.validation.constraints.Email
 import jakarta.validation.constraints.NotBlank
 import jakarta.validation.constraints.Size
@@ -23,6 +25,7 @@ data class AuthUserResponse(
     val id: Long,
     val email: String,
     val name: String,
+    @field:Schema(implementation = UserRole::class)
     val role: String
 )
 
@@ -44,4 +47,3 @@ fun AuthResult.toResponse() = AuthResponse(
     tokenType = "Bearer",
     user = user.toAuthUserResponse()
 )
-
