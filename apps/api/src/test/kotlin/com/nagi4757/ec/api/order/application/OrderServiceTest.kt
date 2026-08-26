@@ -5,6 +5,9 @@ import com.nagi4757.ec.api.cart.application.CartService
 import com.nagi4757.ec.api.cart.application.CartView
 import com.nagi4757.ec.api.common.error.ApiErrorCode
 import com.nagi4757.ec.api.common.error.ApplicationException
+import com.nagi4757.ec.api.order.application.query.OrderQueryRepository
+import com.nagi4757.ec.api.order.application.query.OrderSummary
+import com.nagi4757.ec.api.order.application.query.OrderSummaryPage
 import com.nagi4757.ec.api.order.domain.model.Order
 import com.nagi4757.ec.api.order.domain.model.OrderItem
 import com.nagi4757.ec.api.order.domain.model.OrderStatus
@@ -30,7 +33,7 @@ class OrderServiceTest {
         val orderRepository = FakeOrderRepository()
         val cartService = mock(CartService::class.java)
         val productRepository = mock(ProductRepository::class.java)
-        val orderService = OrderService(orderRepository, cartService, productRepository)
+        val orderService = OrderService(orderRepository, mock(OrderQueryRepository::class.java), cartService, productRepository)
 
         val userId = 7L
         val cart = CartView(
@@ -72,7 +75,7 @@ class OrderServiceTest {
         val orderRepository = FakeOrderRepository()
         val cartService = mock(CartService::class.java)
         val productRepository = mock(ProductRepository::class.java)
-        val orderService = OrderService(orderRepository, cartService, productRepository)
+        val orderService = OrderService(orderRepository, mock(OrderQueryRepository::class.java), cartService, productRepository)
 
         val userId = 7L
         `when`(cartService.getCart(userId)).thenReturn(CartView(emptyList(), 0, 0))
@@ -90,7 +93,7 @@ class OrderServiceTest {
         val orderRepository = FakeOrderRepository()
         val cartService = mock(CartService::class.java)
         val productRepository = mock(ProductRepository::class.java)
-        val orderService = OrderService(orderRepository, cartService, productRepository)
+        val orderService = OrderService(orderRepository, mock(OrderQueryRepository::class.java), cartService, productRepository)
         val userId = 7L
         val cart = CartView(
             items = listOf(
@@ -126,7 +129,7 @@ class OrderServiceTest {
         val orderRepository = FakeOrderRepository()
         val cartService = mock(CartService::class.java)
         val productRepository = mock(ProductRepository::class.java)
-        val orderService = OrderService(orderRepository, cartService, productRepository)
+        val orderService = OrderService(orderRepository, mock(OrderQueryRepository::class.java), cartService, productRepository)
         val userId = 7L
         val cart = cart(available = false)
         `when`(cartService.getCart(userId)).thenReturn(cart)
@@ -146,7 +149,7 @@ class OrderServiceTest {
         val orderRepository = FakeOrderRepository()
         val cartService = mock(CartService::class.java)
         val productRepository = mock(ProductRepository::class.java)
-        val orderService = OrderService(orderRepository, cartService, productRepository)
+        val orderService = OrderService(orderRepository, mock(OrderQueryRepository::class.java), cartService, productRepository)
         val userId = 7L
         `when`(cartService.getCart(userId)).thenReturn(cart(available = true))
         `when`(productRepository.decreaseStockIfAvailable(101L, 2)).thenReturn(false)
@@ -166,7 +169,7 @@ class OrderServiceTest {
         val orderRepository = FakeOrderRepository()
         val cartService = mock(CartService::class.java)
         val productRepository = mock(ProductRepository::class.java)
-        val orderService = OrderService(orderRepository, cartService, productRepository)
+        val orderService = OrderService(orderRepository, mock(OrderQueryRepository::class.java), cartService, productRepository)
         val userId = 7L
         `when`(cartService.getCart(userId)).thenReturn(cart(available = true))
         `when`(productRepository.decreaseStockIfAvailable(101L, 2)).thenReturn(false)
@@ -186,7 +189,7 @@ class OrderServiceTest {
         val orderRepository = FakeOrderRepository()
         val cartService = mock(CartService::class.java)
         val productRepository = mock(ProductRepository::class.java)
-        val orderService = OrderService(orderRepository, cartService, productRepository)
+        val orderService = OrderService(orderRepository, mock(OrderQueryRepository::class.java), cartService, productRepository)
 
         val ex = assertThrows(ApplicationException::class.java) {
             orderService.getOrder(7L, 1L)
@@ -200,7 +203,7 @@ class OrderServiceTest {
         val orderRepository = FakeOrderRepository()
         val cartService = mock(CartService::class.java)
         val productRepository = mock(ProductRepository::class.java)
-        val orderService = OrderService(orderRepository, cartService, productRepository)
+        val orderService = OrderService(orderRepository, mock(OrderQueryRepository::class.java), cartService, productRepository)
 
         val ex = assertThrows(ApplicationException::class.java) {
             orderService.getOrderAdmin(999L)
@@ -214,7 +217,7 @@ class OrderServiceTest {
         val orderRepository = FakeOrderRepository()
         val cartService = mock(CartService::class.java)
         val productRepository = mock(ProductRepository::class.java)
-        val orderService = OrderService(orderRepository, cartService, productRepository)
+        val orderService = OrderService(orderRepository, mock(OrderQueryRepository::class.java), cartService, productRepository)
         orderRepository.seed(order(status = OrderStatus.PENDING))
         `when`(productRepository.increaseStock(101L, 2)).thenReturn(true)
         `when`(productRepository.increaseStock(102L, 3)).thenReturn(true)
@@ -232,7 +235,7 @@ class OrderServiceTest {
         val orderRepository = FakeOrderRepository()
         val cartService = mock(CartService::class.java)
         val productRepository = mock(ProductRepository::class.java)
-        val orderService = OrderService(orderRepository, cartService, productRepository)
+        val orderService = OrderService(orderRepository, mock(OrderQueryRepository::class.java), cartService, productRepository)
         orderRepository.seed(order(status = OrderStatus.PENDING))
         `when`(productRepository.increaseStock(101L, 2)).thenReturn(true)
         `when`(productRepository.increaseStock(102L, 3)).thenReturn(false)
@@ -254,7 +257,7 @@ class OrderServiceTest {
         val orderRepository = FakeOrderRepository()
         val cartService = mock(CartService::class.java)
         val productRepository = mock(ProductRepository::class.java)
-        val orderService = OrderService(orderRepository, cartService, productRepository)
+        val orderService = OrderService(orderRepository, mock(OrderQueryRepository::class.java), cartService, productRepository)
         orderRepository.seed(order(status = status))
 
         val exception = assertThrows(ApplicationException::class.java) {
@@ -270,7 +273,7 @@ class OrderServiceTest {
         val orderRepository = FakeOrderRepository()
         val cartService = mock(CartService::class.java)
         val productRepository = mock(ProductRepository::class.java)
-        val orderService = OrderService(orderRepository, cartService, productRepository)
+        val orderService = OrderService(orderRepository, mock(OrderQueryRepository::class.java), cartService, productRepository)
         orderRepository.seed(order(status = OrderStatus.PENDING, userId = 8L))
 
         val exception = assertThrows(ApplicationException::class.java) {
@@ -286,7 +289,7 @@ class OrderServiceTest {
         val orderRepository = FakeOrderRepository().apply { rejectTransitions = true }
         val cartService = mock(CartService::class.java)
         val productRepository = mock(ProductRepository::class.java)
-        val orderService = OrderService(orderRepository, cartService, productRepository)
+        val orderService = OrderService(orderRepository, mock(OrderQueryRepository::class.java), cartService, productRepository)
         orderRepository.seed(order(status = OrderStatus.PENDING))
 
         val exception = assertThrows(ApplicationException::class.java) {
@@ -304,7 +307,7 @@ class OrderServiceTest {
         val orderRepository = FakeOrderRepository()
         val cartService = mock(CartService::class.java)
         val productRepository = mock(ProductRepository::class.java)
-        val orderService = OrderService(orderRepository, cartService, productRepository)
+        val orderService = OrderService(orderRepository, mock(OrderQueryRepository::class.java), cartService, productRepository)
         orderRepository.seed(order(status = status))
         `when`(productRepository.increaseStock(101L, 2)).thenReturn(true)
         `when`(productRepository.increaseStock(102L, 3)).thenReturn(true)
@@ -321,7 +324,7 @@ class OrderServiceTest {
         val orderRepository = FakeOrderRepository()
         val cartService = mock(CartService::class.java)
         val productRepository = mock(ProductRepository::class.java)
-        val orderService = OrderService(orderRepository, cartService, productRepository)
+        val orderService = OrderService(orderRepository, mock(OrderQueryRepository::class.java), cartService, productRepository)
         orderRepository.seed(order(status = OrderStatus.PENDING))
 
         val exception = assertThrows(ApplicationException::class.java) {
@@ -338,7 +341,7 @@ class OrderServiceTest {
         val orderRepository = FakeOrderRepository()
         val cartService = mock(CartService::class.java)
         val productRepository = mock(ProductRepository::class.java)
-        val orderService = OrderService(orderRepository, cartService, productRepository)
+        val orderService = OrderService(orderRepository, mock(OrderQueryRepository::class.java), cartService, productRepository)
 
         val before = Order(
             id = 10L,
@@ -354,6 +357,46 @@ class OrderServiceTest {
 
         assertEquals(OrderStatus.PREPARING, result.status)
     }
+
+    @Test
+    fun `getOrders uses the summary query repository`() {
+        val orderRepository = mock(OrderRepository::class.java)
+        val orderQueryRepository = mock(OrderQueryRepository::class.java)
+        val cartService = mock(CartService::class.java)
+        val productRepository = mock(ProductRepository::class.java)
+        val orderService = OrderService(orderRepository, orderQueryRepository, cartService, productRepository)
+        val summaries = listOf(summary(id = 2L), summary(id = 1L))
+        `when`(orderQueryRepository.findSummariesByUserId(7L)).thenReturn(summaries)
+
+        assertEquals(summaries, orderService.getOrders(7L))
+
+        verify(orderQueryRepository).findSummariesByUserId(7L)
+        verifyNoInteractions(orderRepository)
+    }
+
+    @Test
+    fun `listAllOrders uses the paged summary query repository`() {
+        val orderRepository = mock(OrderRepository::class.java)
+        val orderQueryRepository = mock(OrderQueryRepository::class.java)
+        val cartService = mock(CartService::class.java)
+        val productRepository = mock(ProductRepository::class.java)
+        val orderService = OrderService(orderRepository, orderQueryRepository, cartService, productRepository)
+        val page = OrderSummaryPage(listOf(summary(id = 3L)), 1, 20, 1L, 1)
+        `when`(orderQueryRepository.findSummaryPage(1, 20)).thenReturn(page)
+
+        assertEquals(page, orderService.listAllOrders(1, 20))
+
+        verify(orderQueryRepository).findSummaryPage(1, 20)
+        verifyNoInteractions(orderRepository)
+    }
+
+    private fun summary(id: Long) = OrderSummary(
+        id = id,
+        userId = 7L,
+        status = OrderStatus.PENDING,
+        totalAmount = 10_000L,
+        createdAt = LocalDateTime.of(2026, 8, 26, 10, 0)
+    )
 
     private fun order(
         status: OrderStatus,

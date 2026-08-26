@@ -8,7 +8,6 @@ import com.nagi4757.ec.api.order.application.OrderService
 import com.nagi4757.ec.api.order.presentation.shared.OrderResponse
 import com.nagi4757.ec.api.order.presentation.shared.OrderSummaryResponse
 import com.nagi4757.ec.api.order.presentation.shared.toResponse
-import com.nagi4757.ec.api.order.presentation.shared.toSummary
 import io.swagger.v3.oas.annotations.Operation
 import io.swagger.v3.oas.annotations.security.SecurityRequirement
 import io.swagger.v3.oas.annotations.tags.Tag
@@ -46,7 +45,7 @@ class OrderUserController(
     /* 내 주문 목록 */
     @GetMapping
     fun getOrders(): List<OrderSummaryResponse> =
-        orderService.getOrders(currentUserId()).map { it.toSummary() }
+        orderService.getOrders(currentUserId()).map { it.toResponse() }
 
     /* 내 주문 상세 */
     @GetMapping("/{id}")
