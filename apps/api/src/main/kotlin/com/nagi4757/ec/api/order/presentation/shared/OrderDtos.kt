@@ -1,9 +1,10 @@
 package com.nagi4757.ec.api.order.presentation.shared
 
+import com.nagi4757.ec.api.order.application.query.OrderSummary
+import com.nagi4757.ec.api.order.application.query.OrderSummaryPage
 import com.nagi4757.ec.api.order.domain.model.Order
 import com.nagi4757.ec.api.order.domain.model.OrderItem
 import com.nagi4757.ec.api.order.domain.model.OrderStatus
-import com.nagi4757.ec.api.order.domain.repository.OrderPage
 import io.swagger.v3.oas.annotations.media.Schema
 import jakarta.validation.constraints.NotBlank
 import java.time.format.DateTimeFormatter
@@ -79,16 +80,16 @@ fun Order.toResponse() = OrderResponse(
     createdAt = createdAt?.format(DT_FORMAT)
 )
 
-fun Order.toSummary() = OrderSummaryResponse(
-    id = id!!,
+fun OrderSummary.toResponse() = OrderSummaryResponse(
+    id = id,
     userId = userId,
     status = status.name,
     totalAmount = totalAmount,
     createdAt = createdAt?.format(DT_FORMAT)
 )
 
-fun OrderPage.toResponse() = OrderListResponse(
-    items = items.map { it.toSummary() },
+fun OrderSummaryPage.toResponse() = OrderListResponse(
+    items = items.map { it.toResponse() },
     page = page,
     size = size,
     total = total,

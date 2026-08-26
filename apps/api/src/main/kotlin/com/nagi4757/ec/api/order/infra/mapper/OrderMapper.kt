@@ -12,6 +12,8 @@ interface OrderMapper {
     fun selectOrderByIdAndUserId(@Param("id") id: Long, @Param("userId") userId: Long): OrderRecord?
     fun selectOrdersByUserId(userId: Long): List<OrderRecord>
     fun selectAllOrders(@Param("offset") offset: Int, @Param("limit") limit: Int): List<OrderRecord>
+    fun selectOrderSummariesByUserId(userId: Long): List<OrderSummaryRecord>
+    fun selectOrderSummaryPage(@Param("offset") offset: Int, @Param("limit") limit: Int): List<OrderSummaryRecord>
     fun countAllOrders(): Long
     fun selectItemsByOrderId(orderId: Long): List<OrderItemRecord>
     fun updateOrderStatus(
@@ -39,4 +41,12 @@ data class OrderItemRecord(
     val price: Long = 0,
     val quantity: Int = 0,
     val lineAmount: Long = 0
+)
+
+data class OrderSummaryRecord(
+    val id: Long = 0,
+    val userId: Long = 0,
+    val status: String = "PENDING",
+    val totalAmount: Long = 0,
+    val createdAt: LocalDateTime? = null
 )

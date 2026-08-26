@@ -7,10 +7,12 @@ import com.nagi4757.ec.api.common.error.InsufficientStockException
 import com.nagi4757.ec.api.common.error.InvalidOrderTransitionException
 import com.nagi4757.ec.api.common.error.ProductNotAvailableException
 import com.nagi4757.ec.api.common.error.ResourceNotFoundException
+import com.nagi4757.ec.api.order.application.query.OrderQueryRepository
+import com.nagi4757.ec.api.order.application.query.OrderSummary
+import com.nagi4757.ec.api.order.application.query.OrderSummaryPage
 import com.nagi4757.ec.api.order.domain.model.Order
 import com.nagi4757.ec.api.order.domain.model.OrderItem
 import com.nagi4757.ec.api.order.domain.model.OrderStatus
-import com.nagi4757.ec.api.order.domain.repository.OrderPage
 import com.nagi4757.ec.api.order.domain.repository.OrderRepository
 import com.nagi4757.ec.api.product.domain.repository.ProductRepository
 import org.springframework.stereotype.Service
@@ -20,6 +22,7 @@ import org.springframework.transaction.annotation.Transactional
 @Service
 class OrderService(
     private val orderRepository: OrderRepository,
+    private val orderQueryRepository: OrderQueryRepository,
     private val cartService: CartService,
     private val productRepository: ProductRepository
 ) {
@@ -61,7 +64,7 @@ class OrderService(
     }
 
     /* 내 주문 목록 */
-    fun getOrders(userId: Long): List<Order> = orderRepository.findByUserId(userId)
+    fun getOrders(userId: Long): List<OrderSummary> = orderQueryRepository.findSummariesByUserId(userId)
 
     /* 내 주문 상세 */
     fun getOrder(userId: Long, orderId: Long): Order =
@@ -88,7 +91,7 @@ class OrderService(
     }
 
     /* 어드민: 전체 주문 목록 */
-    fun listAllOrders(page: Int, size: Int): OrderPage = orderRepository.findAll(page, size)
+    fun listAllOrders(page: Int, size: Int): OrderSummaryPage = orderQueryRepository.findSummaryPage(page, size)
 
     /* 어드민: 주문 상세 */
     fun getOrderAdmin(orderId: Long): Order =

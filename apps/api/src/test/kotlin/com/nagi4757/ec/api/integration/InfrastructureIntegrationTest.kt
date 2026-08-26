@@ -7,6 +7,7 @@ import com.nagi4757.ec.api.common.error.ApiErrorCode
 import com.nagi4757.ec.api.common.error.ApplicationException
 import com.nagi4757.ec.api.common.logging.CorrelationIdContext
 import com.nagi4757.ec.api.order.application.OrderService
+import com.nagi4757.ec.api.order.application.query.OrderQueryRepository
 import com.nagi4757.ec.api.order.domain.model.Order
 import com.nagi4757.ec.api.order.domain.model.OrderItem
 import com.nagi4757.ec.api.order.domain.model.OrderStatus
@@ -51,6 +52,7 @@ class InfrastructureIntegrationTest @Autowired constructor(
     private val jdbcTemplate: JdbcTemplate,
     private val productRepository: ProductRepository,
     private val orderRepository: OrderRepository,
+    private val orderQueryRepository: OrderQueryRepository,
     private val cartRepository: CartRepository,
     private val cartService: CartService,
     private val orderService: OrderService,
@@ -181,6 +183,59 @@ class InfrastructureIntegrationTest @Autowired constructor(
             OrderStatus.CANCELLED
         )).isFalse()
         assertThat(orderRepository.findById(orderId)?.status).isEqualTo(OrderStatus.PREPARING)
+    }
+
+    @Test
+    @Transactional
+    fun `reads lightweight order summaries while detail keeps full items`() {
+        val userId = uniqueUserId()
+        val productId = productRepository.create(
+            product(stockQuantity = 20, namePrefix = "order-summary")
+        )
+        val initialTotal = orderQueryRepository.findSummaryPage(1, 1).total
+        val statuses = listOf(OrderStatus.PENDING, OrderStatus.PREPARING, OrderStatus.SHIPPED)
+        val savedOrders = statuses.mapIndexed { index, status ->
+            orderRepository.save(
+                Order(
+                    id = null,
+                    userId = userId,
+                    status = status,
+                    items = listOf(
+                        orderItem(productId, "summary-item-${index + 1}-a", index + 1),
+                        orderItem(productId, "summary-item-${index + 1}-b", index + 2)
+                    ),
+                    totalAmount = (index + 1) * 10_000L,
+                    createdAt = null
+                )
+            )
+        }
+        val expectedDescending = savedOrders.map { requireNotNull(it.id) }.sortedDescending()
+
+        val userSummaries = orderService.getOrders(userId)
+
+        assertThat(userSummaries.map { it.id }).containsExactlyElementsOf(expectedDescending)
+        assertThat(userSummaries.map { it.userId }).containsOnly(userId)
+        assertThat(userSummaries.map { it.status })
+            .containsExactly(OrderStatus.SHIPPED, OrderStatus.PREPARING, OrderStatus.PENDING)
+        assertThat(userSummaries.map { it.totalAmount }).containsExactly(30_000L, 20_000L, 10_000L)
+        assertThat(userSummaries.map { it.createdAt }).doesNotContainNull()
+
+        val adminPage = orderService.listAllOrders(page = 1, size = 2)
+
+        assertThat(adminPage.items.map { it.id }).containsExactlyElementsOf(expectedDescending.take(2))
+        assertThat(adminPage.page).isEqualTo(1)
+        assertThat(adminPage.size).isEqualTo(2)
+        assertThat(adminPage.total).isEqualTo(initialTotal + 3)
+        assertThat(adminPage.totalPages).isEqualTo(((initialTotal + 4) / 2).toInt())
+
+        val userDetail = orderService.getOrder(userId, expectedDescending.first())
+        val adminDetail = orderService.getOrderAdmin(expectedDescending[1])
+        assertThat(userDetail.items).hasSize(2)
+        assertThat(adminDetail.items).hasSize(2)
+        assertThat(userDetail.items.map { it.name })
+            .containsExactly("summary-item-3-a", "summary-item-3-b")
+        assertThat(adminDetail.items.map { it.name })
+            .containsExactly("summary-item-2-a", "summary-item-2-b")
     }
 
     @Test
@@ -840,6 +895,16 @@ class InfrastructureIntegrationTest @Autowired constructor(
         stockQuantity = stockQuantity,
         imageUrl = null,
         description = "stock integration test"
+    )
+
+    private fun orderItem(productId: Long, name: String, quantity: Int) = OrderItem(
+        id = null,
+        orderId = 0L,
+        productId = productId,
+        name = name,
+        price = 1_000L,
+        quantity = quantity,
+        lineAmount = 1_000L * quantity
     )
 
     private fun uniqueUserId(): Long =
