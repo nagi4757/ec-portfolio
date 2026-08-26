@@ -5,6 +5,7 @@ import com.nagi4757.ec.api.common.security.RestAccessDeniedHandler
 import com.nagi4757.ec.api.common.security.RestAuthenticationEntryPoint
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
+import org.springframework.beans.factory.annotation.Value
 import org.springframework.http.HttpMethod
 import org.springframework.security.config.annotation.web.builders.HttpSecurity
 import org.springframework.security.config.http.SessionCreationPolicy
@@ -19,7 +20,8 @@ class SecurityConfig(
     private val jwtAuthenticationFilter: JwtAuthenticationFilter,
     private val restAuthenticationEntryPoint: RestAuthenticationEntryPoint,
     private val restAccessDeniedHandler: RestAccessDeniedHandler,
-    private val corsConfigurationSource: CorsConfigurationSource
+    private val corsConfigurationSource: CorsConfigurationSource,
+    @Value("\${app.openapi.enabled:false}") private val openApiEnabled: Boolean
 ) {
     @Bean
     fun passwordEncoder(): PasswordEncoder = BCryptPasswordEncoder()
@@ -37,6 +39,15 @@ class SecurityConfig(
                 it.accessDeniedHandler(restAccessDeniedHandler)
             }
             .authorizeHttpRequests {
+                if (openApiEnabled) {
+                    it.requestMatchers(
+                        "/v3/api-docs",
+                        "/v3/api-docs.yaml",
+                        "/v3/api-docs/swagger-config",
+                        "/swagger-ui.html",
+                        "/swagger-ui/**"
+                    ).permitAll()
+                }
                 it
                     .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
                     .requestMatchers(
