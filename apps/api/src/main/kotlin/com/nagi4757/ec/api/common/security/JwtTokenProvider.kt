@@ -41,10 +41,15 @@ class JwtTokenProvider(
     fun parseAccessToken(token: String): JwtUserClaims? =
         runCatching {
             val claims = parseClaims(token)
+            val role = claims[ROLE_CLAIM]
+                ?.toString()
+                ?.takeIf { it.isNotBlank() && it in ALLOWED_ROLES }
+                ?: error("JWT role claim is missing or invalid")
+
             JwtUserClaims(
                 userId = claims.subject.toLong(),
                 email = claims["email"]?.toString() ?: "",
-                role = claims["role"]?.toString() ?: "USER"
+                role = role
             )
         }.getOrNull()
 
@@ -54,5 +59,9 @@ class JwtTokenProvider(
             .build()
             .parseSignedClaims(token)
             .payload
-}
 
+    private companion object {
+        const val ROLE_CLAIM = "role"
+        val ALLOWED_ROLES = setOf("USER", "ADMIN")
+    }
+}
