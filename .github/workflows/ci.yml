@@ -63,3 +63,34 @@ jobs:
 
       - name: Build admin web
         run: npm run build --workspace=admin-web
+
+  docker:
+    name: Production Docker image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Build production image
+        run: docker build --tag ec-api:ci apps/api
+
+      - name: Verify image metadata
+        run: |
+          test "$(docker image inspect --format '{{.Config.User}}' ec-api:ci)" = "10001:10001"
+          test "$(docker image inspect --format '{{json .Config.Entrypoint}}' ec-api:ci)" = '["java","-jar","/app/app.jar"]'
+          test "$(docker image inspect --format '{{json .Config.ExposedPorts}}' ec-api:ci)" = '{"8080/tcp":{}}'
+
+      - name: Verify runtime image contents
+        run: |
+          docker run --rm --entrypoint sh ec-api:ci -c '
+            set -eu
+            test -f /app/app.jar
+            test "$(find /app -mindepth 1 -maxdepth 1 | wc -l)" -eq 1
+            command -v curl
+            ! command -v gradle
+            test ! -e /workspace
+            test ! -e /app/gradlew
+            test ! -e /app/gradle
+            test ! -e /app/src
+            test ! -e /app/build
+          '
