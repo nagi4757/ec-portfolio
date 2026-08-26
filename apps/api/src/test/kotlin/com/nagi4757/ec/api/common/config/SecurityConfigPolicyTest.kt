@@ -2,6 +2,8 @@ package com.nagi4757.ec.api.common.config
 
 import com.nagi4757.ec.api.common.logging.CorrelationIdContext
 import com.nagi4757.ec.api.common.security.JwtTokenProvider
+import io.jsonwebtoken.Jwts
+import io.jsonwebtoken.security.Keys
 import org.apache.ibatis.mapping.Environment
 import org.apache.ibatis.session.Configuration
 import org.apache.ibatis.session.SqlSessionFactory
@@ -24,6 +26,9 @@ import org.springframework.test.web.servlet.options
 import org.springframework.test.context.ActiveProfiles
 import org.springframework.web.bind.annotation.GetMapping
 import org.springframework.web.bind.annotation.RestController
+import java.nio.charset.StandardCharsets
+import java.time.Instant
+import java.util.Date
 import javax.sql.DataSource
 
 @ActiveProfiles("test")
@@ -144,6 +149,22 @@ class SecurityConfigPolicyTest(
     }
 
     @Test
+    fun `user role can access user endpoint`() {
+        val token = jwtTokenProvider.createAccessToken(
+            userId = 1L,
+            email = "user@example.com",
+            role = "USER"
+        )
+
+        mockMvc.get("/api/user/ping") {
+            header("Authorization", "Bearer $token")
+        }.andExpect {
+            status { isOk() }
+            content { string("user-ok") }
+        }
+    }
+
+    @Test
     fun `admin role can access admin endpoint`() {
         val token = jwtTokenProvider.createAccessToken(
             userId = 1L,
@@ -157,6 +178,78 @@ class SecurityConfigPolicyTest(
             status { isOk() }
             content { string("admin-ok") }
         }
+    }
+
+    @Test
+    fun `admin role can access user endpoint`() {
+        val token = jwtTokenProvider.createAccessToken(
+            userId = 1L,
+            email = "admin@example.com",
+            role = "ADMIN"
+        )
+
+        mockMvc.get("/api/user/ping") {
+            header("Authorization", "Bearer $token")
+        }.andExpect {
+            status { isOk() }
+            content { string("user-ok") }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = [MISSING_ROLE, " ", "SUPER_ADMIN"])
+    fun `invalid role claim is unauthorized for protected endpoint`(role: String) {
+        val token = createToken(role.takeUnless { it == MISSING_ROLE })
+
+        expectUnauthorized(token)
+    }
+
+    @Test
+    fun `token with invalid signature is unauthorized for protected endpoint`() {
+        val token = createToken("USER", INVALID_SIGNATURE_SECRET)
+
+        expectUnauthorized(token)
+    }
+
+    @Test
+    fun `expired token is unauthorized for protected endpoint`() {
+        val token = createToken("USER", expiration = Instant.now().minusSeconds(1))
+
+        expectUnauthorized(token)
+    }
+
+    @Test
+    fun `malformed token is unauthorized for protected endpoint`() {
+        expectUnauthorized("not-a-jwt")
+    }
+
+    private fun expectUnauthorized(token: String) {
+        mockMvc.get("/api/user/ping") {
+            header("Authorization", "Bearer $token")
+        }.andExpect {
+            status { isUnauthorized() }
+            jsonPath("$.code") { value("UNAUTHORIZED") }
+        }
+    }
+
+    private fun createToken(
+        role: String?,
+        secret: String = TEST_SECRET,
+        expiration: Instant = Instant.now().plusSeconds(3600)
+    ): String {
+        val now = Instant.now()
+        val key = Keys.hmacShaKeyFor(secret.toByteArray(StandardCharsets.UTF_8))
+        val builder = Jwts.builder()
+            .subject("1")
+            .claim("email", "user@example.com")
+            .issuedAt(Date.from(now))
+            .expiration(Date.from(expiration))
+
+        if (role != null) {
+            builder.claim("role", role)
+        }
+
+        return builder.signWith(key).compact()
     }
 
     @RestController
@@ -188,5 +281,8 @@ class SecurityConfigPolicyTest(
 
     companion object {
         private const val CORRELATION_ID = "21e2a145-37da-47d0-bb27-b5c2a630446a"
+        private const val TEST_SECRET = "test-only-dummy-jwt-secret-at-least-32-bytes-long"
+        private const val INVALID_SIGNATURE_SECRET = "different-test-only-jwt-secret-at-least-32-bytes"
+        private const val MISSING_ROLE = "__MISSING__"
     }
 }
