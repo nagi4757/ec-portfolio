@@ -244,6 +244,8 @@ docker run --rm -p 8080:8080 \
   -e DB_PASSWORD \
   -e REDIS_HOST \
   -e REDIS_PORT \
+  -e REDIS_USERNAME \
+  -e REDIS_PASSWORD \
   -e APP_AUTH_JWT_SECRET \
   -e APP_CORS_ALLOWED_ORIGINS \
   ec-api:prod
@@ -261,6 +263,8 @@ docker run --rm -p 8080:8080 \
 | `DB_PASSWORD` | MariaDB 비밀번호 |
 | `REDIS_HOST` | Redis 호스트 |
 | `REDIS_PORT` | Redis 포트 |
+| `REDIS_USERNAME` | ElastiCache Valkey RBAC 사용자 |
+| `REDIS_PASSWORD` | ElastiCache Valkey RBAC 비밀번호 |
 | `APP_AUTH_JWT_SECRET` | JWT 서명 Secret |
 | `APP_CORS_ALLOWED_ORIGINS` | 허용할 Frontend Origin 목록 |
 
@@ -271,7 +275,9 @@ docker run --rm -p 8080:8080 \
 | `APP_AUTH_JWT_ACCESS_TOKEN_EXPIRATION_SECONDS` | `3600` | Access Token 만료 시간(초) |
 | `APP_OPENAPI_ENABLED` | `false` | Production OpenAPI/Swagger UI 활성화 여부 |
 
-Secret은 Docker build argument, Dockerfile `ENV`, 이미지 레이어에 넣지 않고 runtime secret으로 전달합니다. Production에서 OpenAPI와 Swagger UI는 기본적으로 비활성입니다.
+Production에서는 MariaDB 연결에 RDS Tokyo Region CA bundle을 사용한 `verify-full` TLS를 강제하며, Valkey 연결에도 TLS와 RBAC username/password 인증을 강제합니다. 이 보안 설정은 runtime flag로 비활성화할 수 없습니다.
+
+DB/Valkey credential과 JWT Secret은 Docker build argument, Dockerfile `ENV`, 이미지 레이어에 넣지 않습니다. 향후 ECS Task Definition이 Secrets Manager 값을 runtime 환경변수로 주입합니다. Production에서 OpenAPI와 Swagger UI는 기본적으로 비활성입니다.
 
 향후 AWS health check 연결 기준은 다음과 같습니다.
 

@@ -23,6 +23,7 @@ RUN groupadd --system --gid 10001 appgroup \
     && useradd --system --uid 10001 --gid appgroup appuser
 
 COPY --from=builder --chmod=0444 /out/app.jar /app/app.jar
+COPY --chown=0:0 --chmod=0444 docker/aws-rds-ap-northeast-1-bundle.pem /etc/ssl/certs/aws-rds-ap-northeast-1-bundle.pem
 
 USER 10001:10001
 EXPOSE 8080
