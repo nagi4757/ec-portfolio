@@ -1,5 +1,6 @@
 package com.nagi4757.ec.api.common.error
 
+import io.swagger.v3.oas.annotations.media.Schema
 import java.time.Instant
 
 data class ApiErrorResponse(
@@ -8,6 +9,10 @@ data class ApiErrorResponse(
     val code: String,
     val message: String,
     val path: String,
+    @field:Schema(
+        format = "uuid",
+        description = "Correlation ID matching the X-Correlation-ID response header."
+    )
     val correlationId: String,
     val fieldErrors: List<ApiFieldError> = emptyList()
 ) {
