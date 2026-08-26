@@ -2,6 +2,7 @@ import { api } from '@/lib/api'
 import type { AuthUser } from '@/lib/authStore'
 
 const BASE = '/api/public/auth'
+const AUTHENTICATED_BASE = '/api/user/auth'
 
 export type SignUpRequest = {
     email: string
@@ -23,6 +24,5 @@ export type AuthResponse = {
 export const authApi = {
     signUp: (data: SignUpRequest) => api.post<AuthResponse>(BASE + '/signup', data),
     login: (data: LoginRequest) => api.post<AuthResponse>(BASE + '/login', data),
-    me: () => api.get<AuthUser>(BASE + '/me'),
+    me: () => api.get<AuthUser>(AUTHENTICATED_BASE + '/me'),
 }
-
