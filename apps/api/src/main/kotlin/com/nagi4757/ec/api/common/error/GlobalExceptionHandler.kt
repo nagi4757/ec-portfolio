@@ -12,6 +12,7 @@ import org.springframework.web.bind.annotation.ExceptionHandler
 import org.springframework.web.bind.annotation.RestControllerAdvice
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException
 import org.springframework.web.server.ResponseStatusException
+import org.springframework.web.servlet.resource.NoResourceFoundException
 
 @RestControllerAdvice
 class GlobalExceptionHandler {
@@ -91,6 +92,10 @@ class GlobalExceptionHandler {
         request: HttpServletRequest
     ): ResponseEntity<ApiErrorResponse> =
         response(request, ApiErrorCode.BAD_REQUEST)
+
+    @ExceptionHandler(NoResourceFoundException::class)
+    fun handleNoResourceFound(request: HttpServletRequest): ResponseEntity<ApiErrorResponse> =
+        response(request, ApiErrorCode.RESOURCE_NOT_FOUND)
 
     @ExceptionHandler(Exception::class)
     fun handleUnexpectedException(

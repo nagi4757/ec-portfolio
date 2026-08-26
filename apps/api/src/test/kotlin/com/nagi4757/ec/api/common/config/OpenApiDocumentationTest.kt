@@ -80,6 +80,7 @@ class OpenApiDocumentationTest(
             "Public - Auth",
             "Public - Categories",
             "Public - Products",
+            "User - Auth",
             "User - Cart",
             "User - Orders",
             "Admin - Categories",
@@ -95,7 +96,14 @@ class OpenApiDocumentationTest(
         assertEquals("JWT", bearerAuth.path("bearerFormat").asText())
 
         assertFalse(operation("/api/public/products", "get").has("security"))
-        assertBearerAuth(operation("/api/public/auth/me", "get"))
+        assertFalse(document.path("paths").has("/api/public/auth/me"))
+        assertBearerAuth(operation("/api/user/auth/me", "get"))
+        assertEquals(
+            listOf("User - Auth"),
+            operation("/api/user/auth/me", "get").path("tags").map { it.asText() }
+        )
+        assertFalse(operation("/api/public/auth/signup", "post").has("security"))
+        assertFalse(operation("/api/public/auth/login", "post").has("security"))
         assertBearerAuth(operation("/api/user/cart", "get"))
         assertBearerAuth(operation("/api/admin/products", "get"))
     }

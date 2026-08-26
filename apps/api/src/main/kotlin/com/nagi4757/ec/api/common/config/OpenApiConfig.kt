@@ -45,6 +45,7 @@ class OpenApiConfig {
                 Tag().name("Public - Auth").description("Public authentication APIs."),
                 Tag().name("Public - Categories").description("Public category APIs."),
                 Tag().name("Public - Products").description("Public product APIs."),
+                Tag().name("User - Auth").description("Authenticated user APIs."),
                 Tag().name("User - Cart").description("Authenticated user cart APIs."),
                 Tag().name("User - Orders").description("Authenticated user order APIs."),
                 Tag().name("Admin - Categories").description("Category administration APIs. ADMIN role is required."),
