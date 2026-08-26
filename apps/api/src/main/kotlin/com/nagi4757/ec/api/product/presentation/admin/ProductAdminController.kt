@@ -46,6 +46,7 @@ class ProductAdminController(
             ?: throw ResourceNotFoundException(ApiErrorCode.PRODUCT_NOT_FOUND)
 
     @PostMapping
+    @ResponseStatus(HttpStatus.CREATED)
     @Operation(operationId = "createProduct")
     @ApiErrorCodes(ApiErrorCode.VALIDATION_FAILED, ApiErrorCode.MALFORMED_REQUEST)
     fun create(

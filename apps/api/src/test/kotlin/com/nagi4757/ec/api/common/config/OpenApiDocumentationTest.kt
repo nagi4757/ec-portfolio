@@ -160,10 +160,10 @@ class OpenApiDocumentationTest(
         assertFalse(schemas.path("CartItemResponse").path("properties").path("stockQuantity").isMissingNode)
 
         assertTrue(operation("/api/public/auth/signup", "post").path("responses").has("201"))
-        assertTrue(operation("/api/admin/categories", "post").path("responses").has("200"))
-        assertTrue(operation("/api/admin/categories/{id}", "delete").path("responses").has("200"))
-        assertTrue(operation("/api/admin/products", "post").path("responses").has("200"))
-        assertTrue(operation("/api/user/orders", "post").path("responses").has("200"))
+        assertTrue(operation("/api/admin/categories", "post").path("responses").has("201"))
+        assertTrue(operation("/api/admin/categories/{id}", "delete").path("responses").has("204"))
+        assertTrue(operation("/api/admin/products", "post").path("responses").has("201"))
+        assertTrue(operation("/api/user/orders", "post").path("responses").has("201"))
         assertTrue(operation("/api/admin/products/{id}", "delete").path("responses").has("204"))
     }
 
