@@ -389,6 +389,12 @@ npm run build
 - API Docker 이미지는 multi-stage build로 실행 JAR만 포함하며 non-root 사용자로 실행됩니다.
 - 인증 토큰 만료(401) 시 프론트에서 자동 로그아웃 처리합니다.
 
+### AWS Architecture
+
+- [Cost-optimized Demo AWS Architecture](docs/architecture/aws-demo.md)
+- [Production AWS Architecture](docs/architecture/aws-production.md)
+- [ADR-001: Cost-optimized Demo AWS Architecture](docs/adr/ADR-001-cost-optimized-demo-aws.md)
+
 ### 백엔드 레이어 일관성 체크리스트
 
 신규 도메인(`order`, `coupon` 등) 추가 시 아래 순서로 맞추면 구조가 일관됩니다.
