@@ -61,7 +61,7 @@ class OpenApiDocumentationTest(
 
     @Test
     fun `document contains exactly the business API operations without actuator paths`() {
-        assertTrue(document.path("openapi").asText().isNotBlank())
+        assertTrue(document.path("openapi").asText().matches(Regex("^3\\.1\\.\\d+$")))
         assertEquals(29, operations().size)
         assertTrue(document.path("paths").fieldNames().asSequence().all { it.startsWith("/api/") })
         assertFalse(document.path("paths").has("/actuator/health"))
@@ -179,9 +179,13 @@ class OpenApiDocumentationTest(
     fun `legacy shipping address is nullable only in order detail schema`() {
         val schemas = document.path("components").path("schemas")
         val shippingResponse = schemas.path("OrderResponse").path("properties").path("shippingAddress")
+        val union = shippingResponse.path("oneOf")
 
-        assertEquals("#/components/schemas/ShippingAddressResponse", shippingResponse.path("\$ref").asText())
-        assertEquals(listOf("object", "null"), shippingResponse.path("type").map { it.asText() })
+        assertFalse(shippingResponse.has("\$ref"))
+        assertFalse(shippingResponse.has("type"))
+        assertEquals(2, union.size())
+        assertEquals("#/components/schemas/ShippingAddressResponse", union[0].path("\$ref").asText())
+        assertEquals("null", union[1].path("type").asText())
         assertTrue(schemas.path("OrderSummaryResponse").path("properties").path("shippingAddress").isMissingNode)
     }
 

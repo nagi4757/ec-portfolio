@@ -7,9 +7,12 @@ import com.nagi4757.ec.api.common.logging.CorrelationIdContext
 import io.swagger.v3.core.converter.ModelConverters
 import io.swagger.v3.oas.models.Components
 import io.swagger.v3.oas.models.OpenAPI
+import io.swagger.v3.oas.models.SpecVersion
 import io.swagger.v3.oas.models.headers.Header
 import io.swagger.v3.oas.models.info.Info
 import io.swagger.v3.oas.models.media.Content
+import io.swagger.v3.oas.models.media.ComposedSchema
+import io.swagger.v3.oas.models.media.JsonSchema
 import io.swagger.v3.oas.models.media.MediaType
 import io.swagger.v3.oas.models.media.Schema
 import io.swagger.v3.oas.models.media.StringSchema
@@ -150,6 +153,28 @@ class OpenApiConfig {
         errorSchema?.properties?.get("correlationId")?.apply {
             format = "uuid"
             description = "Correlation ID matching the X-Correlation-ID response header."
+        }
+    }
+
+    @Bean
+    fun nullableShippingAddressOpenApiCustomizer(): OpenApiCustomizer = OpenApiCustomizer { openApi ->
+        val orderResponse = openApi.components?.schemas?.get("OrderResponse") ?: return@OpenApiCustomizer
+        val currentProperty = orderResponse.properties?.get("shippingAddress") ?: return@OpenApiCustomizer
+        val shippingAddressReference = currentProperty.`$ref` ?: return@OpenApiCustomizer
+
+        orderResponse.properties["shippingAddress"] = ComposedSchema().apply {
+            specVersion = SpecVersion.V31
+            description = currentProperty.description
+            oneOf = listOf(
+                JsonSchema().apply {
+                    specVersion = SpecVersion.V31
+                    `$ref` = shippingAddressReference
+                },
+                JsonSchema().apply {
+                    specVersion = SpecVersion.V31
+                    types = linkedSetOf("null")
+                }
+            )
         }
     }
 
