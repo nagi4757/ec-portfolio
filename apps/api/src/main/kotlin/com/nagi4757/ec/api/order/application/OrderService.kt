@@ -13,6 +13,7 @@ import com.nagi4757.ec.api.order.application.query.OrderSummaryPage
 import com.nagi4757.ec.api.order.domain.model.Order
 import com.nagi4757.ec.api.order.domain.model.OrderItem
 import com.nagi4757.ec.api.order.domain.model.OrderStatus
+import com.nagi4757.ec.api.order.domain.model.ShippingAddress
 import com.nagi4757.ec.api.order.domain.repository.OrderRepository
 import com.nagi4757.ec.api.product.domain.repository.ProductRepository
 import org.springframework.stereotype.Service
@@ -28,7 +29,7 @@ class OrderService(
 ) {
     /* 장바구니 → 주문 생성 + 장바구니 비우기 */
     @Transactional(isolation = Isolation.READ_COMMITTED)
-    fun placeOrder(userId: Long): Order {
+    fun placeOrder(userId: Long, shippingAddress: ShippingAddress): Order {
         val cart = cartService.getCart(userId)
         if (cart.items.isEmpty()) throw EmptyCartException()
         if (cart.items.any { !it.available }) throw ProductNotAvailableException()
@@ -45,6 +46,7 @@ class OrderService(
             status = OrderStatus.PENDING,
             totalAmount = cart.totalAmount,
             createdAt = null,
+            shippingAddress = shippingAddress,
             items = cart.items.map { line ->
                 OrderItem(
                     id = null,

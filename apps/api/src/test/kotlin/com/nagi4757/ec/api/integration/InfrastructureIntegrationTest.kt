@@ -11,6 +11,7 @@ import com.nagi4757.ec.api.order.application.query.OrderQueryRepository
 import com.nagi4757.ec.api.order.domain.model.Order
 import com.nagi4757.ec.api.order.domain.model.OrderItem
 import com.nagi4757.ec.api.order.domain.model.OrderStatus
+import com.nagi4757.ec.api.order.domain.model.ShippingAddress
 import com.nagi4757.ec.api.order.domain.repository.OrderRepository
 import com.nagi4757.ec.api.product.domain.model.Product
 import com.nagi4757.ec.api.product.domain.repository.ProductRepository
@@ -84,11 +85,11 @@ class InfrastructureIntegrationTest @Autowired constructor(
     }
 
     @Test
-    fun `applies Flyway migrations V1 through V7 and initializes existing products`() {
+    fun `applies Flyway migrations V1 through V8 and initializes existing products`() {
         val appliedVersions = flyway.info().applied()
             .mapNotNull { it.version?.version }
 
-        assertThat(appliedVersions).containsExactly("1", "2", "3", "4", "5", "6", "7")
+        assertThat(appliedVersions).containsExactly("1", "2", "3", "4", "5", "6", "7", "8")
         val existingStock = jdbcTemplate.queryForList(
             "SELECT stock_quantity FROM products WHERE id IN (1, 2, 3) ORDER BY id",
             Int::class.java
@@ -128,11 +129,15 @@ class InfrastructureIntegrationTest @Autowired constructor(
                 .load()
                 .migrate()
 
-            assertThat(migrationResult.migrationsExecuted).isEqualTo(2)
+            assertThat(migrationResult.migrationsExecuted).isEqualTo(3)
             assertThat(legacyJdbcTemplate.queryForObject(
                 "SELECT status FROM orders LIMIT 1",
                 String::class.java
             )).isEqualTo("PREPARING")
+            assertThat(legacyJdbcTemplate.queryForObject(
+                "SELECT shipping_recipient_name FROM orders LIMIT 1",
+                String::class.java
+            )).isNull()
             org.junit.jupiter.api.assertThrows<DataIntegrityViolationException> {
                 legacyJdbcTemplate.update(
                     "INSERT INTO orders (user_id, status, total_amount) VALUES (?, 'CONFIRMED', ?)",
@@ -205,7 +210,8 @@ class InfrastructureIntegrationTest @Autowired constructor(
                         orderItem(productId, "summary-item-${index + 1}-b", index + 2)
                     ),
                     totalAmount = (index + 1) * 10_000L,
-                    createdAt = null
+                    createdAt = null,
+                    shippingAddress = shippingAddress()
                 )
             )
         }
@@ -232,10 +238,27 @@ class InfrastructureIntegrationTest @Autowired constructor(
         val adminDetail = orderService.getOrderAdmin(expectedDescending[1])
         assertThat(userDetail.items).hasSize(2)
         assertThat(adminDetail.items).hasSize(2)
+        assertThat(userDetail.shippingAddress).isEqualTo(shippingAddress())
+        assertThat(adminDetail.shippingAddress).isEqualTo(shippingAddress())
         assertThat(userDetail.items.map { it.name })
             .containsExactly("summary-item-3-a", "summary-item-3-b")
         assertThat(adminDetail.items.map { it.name })
             .containsExactly("summary-item-2-a", "summary-item-2-b")
+    }
+
+    @Test
+    @Transactional
+    fun `loads a legacy order without shipping address safely`() {
+        jdbcTemplate.update(
+            "INSERT INTO orders (user_id, status, total_amount) VALUES (?, 'PENDING', ?)",
+            uniqueUserId(),
+            10_000L
+        )
+        val orderId = requireNotNull(jdbcTemplate.queryForObject("SELECT LAST_INSERT_ID()", Long::class.java))
+
+        val legacyOrder = requireNotNull(orderRepository.findById(orderId))
+
+        assertThat(legacyOrder.shippingAddress).isNull()
     }
 
     @Test
@@ -401,7 +424,7 @@ class InfrastructureIntegrationTest @Autowired constructor(
             assertThat(updateFailure.errorCode).isEqualTo(ApiErrorCode.PRODUCT_NOT_AVAILABLE)
 
             val orderFailure = org.junit.jupiter.api.assertThrows<ApplicationException> {
-                orderService.placeOrder(userId)
+                orderService.placeOrder(userId, shippingAddress())
             }
             assertThat(orderFailure.errorCode).isEqualTo(ApiErrorCode.PRODUCT_NOT_AVAILABLE)
 
@@ -513,7 +536,7 @@ class InfrastructureIntegrationTest @Autowired constructor(
 
         try {
             val exception = org.junit.jupiter.api.assertThrows<ApplicationException> {
-                orderService.placeOrder(userId)
+                orderService.placeOrder(userId, shippingAddress())
             }
 
             assertThat(exception.errorCode).isEqualTo(ApiErrorCode.INSUFFICIENT_STOCK)
@@ -557,7 +580,7 @@ class InfrastructureIntegrationTest @Autowired constructor(
                 executor.submit<Pair<Long, ApiErrorCode?>> {
                     start.await()
                     try {
-                        orderService.placeOrder(userId)
+                        orderService.placeOrder(userId, shippingAddress())
                         userId to null
                     } catch (exception: ApplicationException) {
                         userId to exception.errorCode
@@ -603,7 +626,7 @@ class InfrastructureIntegrationTest @Autowired constructor(
         cartRepository.increment(userId, productId, 3)
 
         try {
-            val order = orderService.placeOrder(userId)
+            val order = orderService.placeOrder(userId, shippingAddress())
             assertThat(productRepository.findById(productId)?.stockQuantity).isEqualTo(2)
 
             val cancelled = orderService.cancelOrder(userId, requireNotNull(order.id))
@@ -628,7 +651,7 @@ class InfrastructureIntegrationTest @Autowired constructor(
         cartRepository.increment(userId, productId, 3)
 
         try {
-            val order = orderService.placeOrder(userId)
+            val order = orderService.placeOrder(userId, shippingAddress())
             assertThat(productRepository.findById(productId)?.stockQuantity).isEqualTo(2)
             assertThat(productRepository.deactivate(productId)).isTrue()
 
@@ -664,7 +687,7 @@ class InfrastructureIntegrationTest @Autowired constructor(
             val orderFuture = executor.submit<ApiErrorCode?> {
                 start.await()
                 try {
-                    orderService.placeOrder(userId)
+                    orderService.placeOrder(userId, shippingAddress())
                     null
                 } catch (exception: ApplicationException) {
                     exception.errorCode
@@ -709,7 +732,7 @@ class InfrastructureIntegrationTest @Autowired constructor(
         )
         cartRepository.clear(userId)
         cartRepository.increment(userId, productId, 2)
-        val orderId = requireNotNull(orderService.placeOrder(userId).id)
+        val orderId = requireNotNull(orderService.placeOrder(userId, shippingAddress()).id)
         val start = CountDownLatch(1)
         val executor = Executors.newFixedThreadPool(2)
 
@@ -748,7 +771,7 @@ class InfrastructureIntegrationTest @Autowired constructor(
         )
         cartRepository.clear(userId)
         cartRepository.increment(userId, productId, 1)
-        val orderId = requireNotNull(orderService.placeOrder(userId).id)
+        val orderId = requireNotNull(orderService.placeOrder(userId, shippingAddress()).id)
         val start = CountDownLatch(1)
         val executor = Executors.newFixedThreadPool(2)
 
@@ -801,7 +824,7 @@ class InfrastructureIntegrationTest @Autowired constructor(
         )
         cartRepository.clear(userId)
         cartRepository.increment(userId, productId, 1)
-        orderService.placeOrder(userId)
+        orderService.placeOrder(userId, shippingAddress())
 
         try {
             org.junit.jupiter.api.assertThrows<DataIntegrityViolationException> {
@@ -838,7 +861,8 @@ class InfrastructureIntegrationTest @Autowired constructor(
                 )
             ),
             totalAmount = 25_000L,
-            createdAt = null
+            createdAt = null,
+            shippingAddress = shippingAddress()
         )
 
         val saved = orderRepository.save(order)
@@ -850,6 +874,7 @@ class InfrastructureIntegrationTest @Autowired constructor(
         assertThat(reloaded.userId).isEqualTo(order.userId)
         assertThat(reloaded.status).isEqualTo(OrderStatus.PENDING)
         assertThat(reloaded.totalAmount).isEqualTo(order.totalAmount)
+        assertThat(reloaded.shippingAddress).isEqualTo(order.shippingAddress)
         assertThat(reloaded.createdAt).isNotNull()
         assertThat(reloadedItem.id).isNotNull()
         assertThat(reloadedItem.orderId).isEqualTo(orderId)
@@ -905,6 +930,16 @@ class InfrastructureIntegrationTest @Autowired constructor(
         price = 1_000L,
         quantity = quantity,
         lineAmount = 1_000L * quantity
+    )
+
+    private fun shippingAddress() = ShippingAddress(
+        recipientName = "Integration Recipient",
+        postalCode = "100-0001",
+        prefecture = "Tokyo",
+        city = "Chiyoda-ku",
+        addressLine1 = "Chiyoda 1-1",
+        addressLine2 = "Integration Building 101",
+        phoneNumber = "03-1234-5678"
     )
 
     private fun uniqueUserId(): Long =

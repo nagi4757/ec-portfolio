@@ -11,6 +11,7 @@ import com.nagi4757.ec.api.order.application.OrderService
 import com.nagi4757.ec.api.order.domain.model.Order
 import com.nagi4757.ec.api.order.domain.model.OrderItem
 import com.nagi4757.ec.api.order.domain.model.OrderStatus
+import com.nagi4757.ec.api.order.domain.model.ShippingAddress
 import com.nagi4757.ec.api.order.presentation.user.OrderUserController
 import com.nagi4757.ec.api.product.application.ProductService
 import com.nagi4757.ec.api.product.application.command.CreateProductCommand
@@ -133,13 +134,23 @@ class HttpSuccessStatusContractTest {
 
     @Test
     fun `order creation returns created with the existing response body`() {
-        `when`(orderService.placeOrder(USER_ID)).thenReturn(
+        val shippingAddress = ShippingAddress(
+            recipientName = "Test Recipient",
+            postalCode = "100-0001",
+            prefecture = "Tokyo",
+            city = "Chiyoda-ku",
+            addressLine1 = "Chiyoda 1-1",
+            addressLine2 = null,
+            phoneNumber = "03-1234-5678"
+        )
+        `when`(orderService.placeOrder(USER_ID, shippingAddress)).thenReturn(
             Order(
                 id = 30L,
                 userId = USER_ID,
                 status = OrderStatus.PENDING,
                 totalAmount = 2_000L,
                 createdAt = null,
+                shippingAddress = shippingAddress,
                 items = listOf(
                     OrderItem(
                         id = 40L,
@@ -156,7 +167,7 @@ class HttpSuccessStatusContractTest {
 
         mockMvc.post("/api/user/orders") {
             contentType = MediaType.APPLICATION_JSON
-            content = "{}"
+            content = validOrderRequest()
         }.andExpect {
             status { isCreated() }
             content { contentTypeCompatibleWith(MediaType.APPLICATION_JSON) }
@@ -165,8 +176,44 @@ class HttpSuccessStatusContractTest {
             jsonPath("$.totalAmount") { value(2_000) }
             jsonPath("$.items[0].productId") { value(20) }
             jsonPath("$.items[0].quantity") { value(2) }
+            jsonPath("$.shippingAddress.recipientName") { value("Test Recipient") }
+            jsonPath("$.shippingAddress.postalCode") { value("100-0001") }
         }
     }
+
+    @Test
+    fun `order creation rejects a missing shipping address`() {
+        mockMvc.post("/api/user/orders") {
+            contentType = MediaType.APPLICATION_JSON
+            content = "{}"
+        }.andExpect {
+            status { isBadRequest() }
+        }
+    }
+
+    @Test
+    fun `order creation rejects an invalid Japanese postal code`() {
+        mockMvc.post("/api/user/orders") {
+            contentType = MediaType.APPLICATION_JSON
+            content = validOrderRequest().replace("100-0001", "invalid")
+        }.andExpect {
+            status { isBadRequest() }
+            jsonPath("$.code") { value("VALIDATION_FAILED") }
+        }
+    }
+
+    private fun validOrderRequest() = """
+        {
+          "shippingAddress": {
+            "recipientName": "Test Recipient",
+            "postalCode": "100-0001",
+            "prefecture": "Tokyo",
+            "city": "Chiyoda-ku",
+            "addressLine1": "Chiyoda 1-1",
+            "phoneNumber": "03-1234-5678"
+          }
+        }
+    """.trimIndent()
 
     companion object {
         private const val USER_ID = 1L

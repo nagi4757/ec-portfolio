@@ -8,6 +8,6 @@ data class Order(
     val status: OrderStatus,
     val items: List<OrderItem>,
     val totalAmount: Long,
-    val createdAt: LocalDateTime?
+    val createdAt: LocalDateTime?,
+    val shippingAddress: ShippingAddress? = null
 )
-

@@ -11,6 +11,7 @@ import com.nagi4757.ec.api.order.application.query.OrderSummaryPage
 import com.nagi4757.ec.api.order.domain.model.Order
 import com.nagi4757.ec.api.order.domain.model.OrderItem
 import com.nagi4757.ec.api.order.domain.model.OrderStatus
+import com.nagi4757.ec.api.order.domain.model.ShippingAddress
 import com.nagi4757.ec.api.order.domain.repository.OrderPage
 import com.nagi4757.ec.api.order.domain.repository.OrderRepository
 import com.nagi4757.ec.api.product.domain.model.Product
@@ -56,7 +57,8 @@ class OrderServiceTest {
         `when`(cartService.getCart(userId)).thenReturn(cart)
         `when`(productRepository.decreaseStockIfAvailable(101L, 2)).thenReturn(true)
 
-        val result = orderService.placeOrder(userId)
+        val shippingAddress = shippingAddress()
+        val result = orderService.placeOrder(userId, shippingAddress)
 
         verify(productRepository).decreaseStockIfAvailable(101L, 2)
         verify(cartService).clear(userId)
@@ -67,6 +69,7 @@ class OrderServiceTest {
         assertEquals(38000, saved.totalAmount)
         assertEquals(1, saved.items.size)
         assertEquals(101, saved.items.first().productId)
+        assertEquals(shippingAddress, saved.shippingAddress)
         assertEquals(1L, result.id)
     }
 
@@ -81,7 +84,7 @@ class OrderServiceTest {
         `when`(cartService.getCart(userId)).thenReturn(CartView(emptyList(), 0, 0))
 
         val ex = assertThrows(ApplicationException::class.java) {
-            orderService.placeOrder(userId)
+            orderService.placeOrder(userId, shippingAddress())
         }
 
         assertEquals(ApiErrorCode.EMPTY_CART, ex.errorCode)
@@ -116,7 +119,7 @@ class OrderServiceTest {
         `when`(productRepository.findById(101L)).thenReturn(product(stockQuantity = 1))
 
         val exception = assertThrows(ApplicationException::class.java) {
-            orderService.placeOrder(userId)
+            orderService.placeOrder(userId, shippingAddress())
         }
 
         assertEquals(ApiErrorCode.INSUFFICIENT_STOCK, exception.errorCode)
@@ -135,7 +138,7 @@ class OrderServiceTest {
         `when`(cartService.getCart(userId)).thenReturn(cart)
 
         val exception = assertThrows(ApplicationException::class.java) {
-            orderService.placeOrder(userId)
+            orderService.placeOrder(userId, shippingAddress())
         }
 
         assertEquals(ApiErrorCode.PRODUCT_NOT_AVAILABLE, exception.errorCode)
@@ -156,7 +159,7 @@ class OrderServiceTest {
         `when`(productRepository.findById(101L)).thenReturn(product(stockQuantity = 2, active = false))
 
         val exception = assertThrows(ApplicationException::class.java) {
-            orderService.placeOrder(userId)
+            orderService.placeOrder(userId, shippingAddress())
         }
 
         assertEquals(ApiErrorCode.PRODUCT_NOT_AVAILABLE, exception.errorCode)
@@ -176,7 +179,7 @@ class OrderServiceTest {
         `when`(productRepository.findById(101L)).thenReturn(null)
 
         val exception = assertThrows(ApplicationException::class.java) {
-            orderService.placeOrder(userId)
+            orderService.placeOrder(userId, shippingAddress())
         }
 
         assertEquals(ApiErrorCode.PRODUCT_NOT_FOUND, exception.errorCode)
@@ -454,6 +457,16 @@ class OrderServiceTest {
         imageUrl = null,
         description = null,
         active = active
+    )
+
+    private fun shippingAddress() = ShippingAddress(
+        recipientName = "Test Recipient",
+        postalCode = "100-0001",
+        prefecture = "Tokyo",
+        city = "Chiyoda-ku",
+        addressLine1 = "Chiyoda 1-1",
+        addressLine2 = "Test Building 101",
+        phoneNumber = "03-1234-5678"
     )
 
     private class FakeOrderRepository : OrderRepository {
