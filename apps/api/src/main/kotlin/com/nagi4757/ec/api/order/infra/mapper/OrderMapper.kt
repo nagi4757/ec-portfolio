@@ -29,6 +29,13 @@ data class OrderRecord(
     val userId: Long = 0,
     val status: String = "PENDING",
     val totalAmount: Long = 0,
+    val shippingRecipientName: String? = null,
+    val shippingPostalCode: String? = null,
+    val shippingPrefecture: String? = null,
+    val shippingCity: String? = null,
+    val shippingAddressLine1: String? = null,
+    val shippingAddressLine2: String? = null,
+    val shippingPhoneNumber: String? = null,
     val createdAt: LocalDateTime? = null,
     val updatedAt: LocalDateTime? = null
 )

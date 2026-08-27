@@ -162,6 +162,15 @@ class OpenApiDocumentationTest(
         assertEquals(expectedStatuses, schemas.path("OrderResponse").path("properties").path("status").path("enum").map { it.asText() })
         assertEquals(expectedStatuses, schemas.path("UpdateStatus").path("properties").path("status").path("enum").map { it.asText() })
 
+        val createOrder = schemas.path("Create")
+        assertTrue(createOrder.path("required").any { it.asText() == "shippingAddress" })
+        assertFalse(createOrder.path("properties").path("shippingAddress").isMissingNode)
+        val shippingRequest = schemas.path("ShippingAddressRequest").path("properties")
+        assertEquals("^\\d{3}-?\\d{4}$", shippingRequest.path("postalCode").path("pattern").asText())
+        assertEquals(100, shippingRequest.path("recipientName").path("maxLength").asInt())
+        assertFalse(schemas.path("OrderResponse").path("properties").path("shippingAddress").isMissingNode)
+        assertTrue(schemas.path("OrderSummaryResponse").path("properties").path("shippingAddress").isMissingNode)
+
         assertFalse(schemas.path("ProductResponse").path("properties").path("active").isMissingNode)
         assertFalse(schemas.path("ProductResponse").path("properties").path("stockQuantity").isMissingNode)
         assertFalse(schemas.path("CartItemResponse").path("properties").path("available").isMissingNode)
@@ -172,6 +181,7 @@ class OpenApiDocumentationTest(
         assertTrue(operation("/api/admin/categories/{id}", "delete").path("responses").has("204"))
         assertTrue(operation("/api/admin/products", "post").path("responses").has("201"))
         assertTrue(operation("/api/user/orders", "post").path("responses").has("201"))
+        assertTrue(operation("/api/user/orders", "post").path("responses").has("400"))
         assertTrue(operation("/api/admin/products/{id}", "delete").path("responses").has("204"))
     }
 

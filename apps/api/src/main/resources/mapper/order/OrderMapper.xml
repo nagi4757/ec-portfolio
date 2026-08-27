@@ -8,6 +8,13 @@
         <result property="userId"      column="user_id"/>
         <result property="status"      column="status"/>
         <result property="totalAmount" column="total_amount"/>
+        <result property="shippingRecipientName" column="shipping_recipient_name"/>
+        <result property="shippingPostalCode"    column="shipping_postal_code"/>
+        <result property="shippingPrefecture"    column="shipping_prefecture"/>
+        <result property="shippingCity"          column="shipping_city"/>
+        <result property="shippingAddressLine1"  column="shipping_address_line1"/>
+        <result property="shippingAddressLine2"  column="shipping_address_line2"/>
+        <result property="shippingPhoneNumber"   column="shipping_phone_number"/>
         <result property="createdAt"   column="created_at"/>
         <result property="updatedAt"   column="updated_at"/>
     </resultMap>
@@ -31,8 +38,30 @@
     </resultMap>
 
     <insert id="insertOrder" useGeneratedKeys="true" keyProperty="id">
-        INSERT INTO orders (user_id, status, total_amount)
-        VALUES (#{userId}, #{status}, #{totalAmount})
+        INSERT INTO orders (
+            user_id,
+            status,
+            total_amount,
+            shipping_recipient_name,
+            shipping_postal_code,
+            shipping_prefecture,
+            shipping_city,
+            shipping_address_line1,
+            shipping_address_line2,
+            shipping_phone_number
+        )
+        VALUES (
+            #{userId},
+            #{status},
+            #{totalAmount},
+            #{shippingRecipientName},
+            #{shippingPostalCode},
+            #{shippingPrefecture},
+            #{shippingCity},
+            #{shippingAddressLine1},
+            #{shippingAddressLine2},
+            #{shippingPhoneNumber}
+        )
     </insert>
 
     <insert id="insertOrderItem" useGeneratedKeys="true" keyProperty="id">
