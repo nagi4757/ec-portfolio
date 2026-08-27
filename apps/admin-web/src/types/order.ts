@@ -24,6 +24,16 @@ export type OrderItem = {
     lineAmount: number
 }
 
+export type ShippingAddress = {
+    recipientName: string
+    postalCode: string
+    prefecture: string
+    city: string
+    addressLine1: string
+    addressLine2: string | null
+    phoneNumber: string
+}
+
 export type OrderSummary = {
     id: number
     userId: number
@@ -37,6 +47,7 @@ export type Order = {
     status: OrderStatus
     items: OrderItem[]
     totalAmount: number
+    shippingAddress: ShippingAddress | null
     createdAt: string | null
 }
 

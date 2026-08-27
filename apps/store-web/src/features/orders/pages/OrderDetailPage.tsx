@@ -97,6 +97,24 @@ export default function OrderDetailPage() {
                 주문일시: {order.createdAt ?? '-'}
             </div>
 
+            <section style={shippingStyle}>
+                <h2 style={{ marginTop: 0 }}>{t('store.shipping.title')}</h2>
+                {order.shippingAddress ? (
+                    <address style={{ fontStyle: 'normal', lineHeight: 1.7 }}>
+                        <div>{order.shippingAddress.recipientName}</div>
+                        <div>〒{order.shippingAddress.postalCode}</div>
+                        <div>
+                            {order.shippingAddress.prefecture} {order.shippingAddress.city}
+                        </div>
+                        <div>{order.shippingAddress.addressLine1}</div>
+                        {order.shippingAddress.addressLine2 && <div>{order.shippingAddress.addressLine2}</div>}
+                        <div>{order.shippingAddress.phoneNumber}</div>
+                    </address>
+                ) : (
+                    <div style={{ color: '#777' }}>{t('store.shipping.legacyUnavailable')}</div>
+                )}
+            </section>
+
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
                 {order.items.map((item) => (
                     <div key={item.productId} style={rowStyle}>
@@ -163,5 +181,13 @@ const rowStyle: React.CSSProperties = {
     alignItems: 'center',
     flexWrap: 'wrap',
     gap: 12,
+    background: '#fff',
+}
+
+const shippingStyle: React.CSSProperties = {
+    border: '1px solid #eee',
+    borderRadius: 8,
+    padding: '12px 16px',
+    marginBottom: 20,
     background: '#fff',
 }
