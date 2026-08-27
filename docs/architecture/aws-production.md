@@ -88,7 +88,7 @@ Upgrade는 service 수를 한 번에 늘리지 않고 측정된 risk 순서로 �
 - 단일 EC2 또는 단일 AZ 장애를 수용할 수 없음
 - cache loss가 사용자 transaction 정확성에 영향
 - 배포 중 downtime을 수용할 수 없음
-- concurrent load가 t4g.medium baseline을 지속적으로 초과
+- concurrent load가 selected Demo instance baseline을 지속적으로 초과
 - RTO/RPO가 manual restore 범위를 벗어남
 - compliance가 private workload, managed rotation 또는 WAF를 요구
 

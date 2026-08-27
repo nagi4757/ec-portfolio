@@ -7,13 +7,13 @@
 이 문서는 EC Portfolio의 면접·포트폴리오 데모 환경을 위한 목표 아키텍처다. AWS 리소스를 실제로 생성하는 실행 계획이나 Terraform 명세가 아니다.
 
 - Region: Asia Pacific (Tokyo), `ap-northeast-1`
-- 운영 시간: 평일 09:00~19:00 JST, 월 220시간 가정
+- 운영 시간: 평일 22일 기준, RDS 08:45~19:15과 EC2 08:55~19:05 JST
 - 월 비용 목표: ¥3,500~¥4,500
 - 월 비용 상한: ¥5,000
 - Free Tier와 promotional credit은 비용 성립 조건으로 사용하지 않는다.
 - 단일 AZ와 예약된 downtime을 수용하는 demo 환경이다.
 
-**¥5,000 이하는 24/7 운영 기준이 아니라 평일 제한 운영 Demo 기준이다.** EC2와 RDS를 24/7로 실행하면 동일 단가에서도 약 ¥9,900/month로 증가해 hard ceiling을 초과한다.
+**¥5,000 이하는 24/7 운영 기준이 아니라 평일 제한 운영 Demo 기준이다.** EC2와 RDS를 24/7로 실행하면 동일 단가에서도 약 ¥10,560/month로 증가해 hard ceiling을 초과한다.
 
 관련 결정은 [ADR-001](../adr/ADR-001-cost-optimized-demo-aws.md), production 목표는 [Production AWS Architecture](aws-production.md)를 참조한다.
 
@@ -21,7 +21,7 @@
 
 | 영역 | 현재 준비 상태 | Demo 배포 전 남은 작업 |
 |---|---|---|
-| API image | Java 21 multi-stage image, non-root runtime, `/actuator/health/liveness`와 `/actuator/health/readiness` 제공 | ECR push와 EC2 runtime orchestration |
+| API image | Java 21 multi-stage image, non-root runtime, `/actuator/health/liveness`와 `/actuator/health/readiness` 제공. 현재 CI build 결과는 단일 `linux/amd64` | ECR push와 EC2 runtime orchestration; ARM64는 별도 build/validation 필요 |
 | Database | MariaDB/Flyway 사용, production profile에서 RDS Tokyo CA bundle과 `verify-full` 강제 | RDS endpoint와 credentials 주입 |
 | Cache | Redis protocol 사용, production profile에서 TLS와 username/password 강제 | EC2 local Valkey에 TLS/ACL을 구성하거나 TLS sidecar를 검증해야 함 |
 | Configuration | runtime 환경변수 기반이며 image layer에 DB/Redis/JWT secret을 넣지 않는 CI 검증 존재 | SSM Parameter Store 조회와 least-privilege instance role |
@@ -38,7 +38,7 @@ flowchart TD
     U[JP/KR demo user] --> R53[Route 53]
     R53 --> CF[CloudFront<br/>TLS + JP/KR allowlist]
     CF -->|Static / media| S3[S3 private bucket<br/>OAC]
-    CF -->|HTTPS 443 only<br/>prefix list + X-Origin-Verify| NGINX[Nginx on EC2<br/>origin verification]
+    CF -->|HTTPS 443 only<br/>prefix list + X-Origin-Verify| NGINX[Nginx on EC2 t3a.medium<br/>x86_64 origin verification]
     DIRECT[Direct EIP request] -- blocked by SG --> NGINX
     NGINX --> API[Spring Boot Docker<br/>private Docker network]
     API --> VALKEY[Valkey Docker<br/>internal network only]
@@ -94,14 +94,43 @@ EC2는 NAT Gateway 비용을 제거하기 위해 public subnet에서 EIP를 사�
 - Spring Boot port와 Valkey `6379/tcp`를 host/EIP에 publish하지 않음
 - RDS `3306/tcp`는 CIDR이 아니라 EC2 application security group reference만 source로 허용
 
-ALB를 제거하면 fixed hourly cost와 복수 AZ target 운영 비용을 피할 수 있지만, managed health routing, connection draining, target failover, private CloudFront VPC origin을 포기한다. EC2가 중지되거나 장애가 나면 API는 unavailable이다. 이 선택은 demo downtime을 허용할 때만 유효하다.
+ALB를 제거하면 fixed hourly cost와 복수 AZ target 운영 비용을 피할 수 있지만 managed health routing, connection draining과 target failover를 포기한다. CloudFront VPC Origin은 ALB뿐 아니라 private EC2도 지원하므로 기술적으로 불가능해서 제외하는 것이 아니다. Private EC2가 ECR pull, SSM, OS patch와 CloudWatch 전송을 하려면 NAT Gateway 또는 여러 VPC endpoint가 필요할 수 있고, 그 fixed cost와 운영 복잡성이 ¥5,000 constraint에 맞지 않아 protected public EC2를 의도적으로 선택한다. EC2가 중지되거나 장애가 나면 API는 unavailable이다.
+
+Source: [CloudFront VPC origins](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/private-content-vpc-origins.html)
+
+### Minimum L7 and DDoS controls without paid WAF
+
+Demo는 paid AWS WAF와 Shield Advanced를 사용하지 않는다. 다음 controls를 최소 contract로 적용한다.
+
+CloudFront:
+
+- 모든 viewer traffic 앞에 배치하고 viewer HTTPS를 강제한다.
+- 모든 AWS account에 기본 제공되는 Shield Standard network/transport-layer protection을 활용하되 WAF나 authentication의 대체로 간주하지 않는다.
+- JP/KR geo allowlist로 불필요한 노출을 줄인다.
+- Hashed static asset과 public media만 cache하고 versioned cache key와 bounded TTL을 사용한다.
+- `/api/**`, 특히 login/auth/cart/order/admin API는 caching을 끄며 authorization/cookie가 포함된 response, `401`, `403`을 shared cache에 저장하지 않는다.
+
+Nginx:
+
+- API JSON request의 `client_max_body_size`를 1 MiB로 제한하고 media는 S3 presigned upload로 분리한다.
+- Request line/header buffer를 기본보다 무제한 확장하지 않고 header 총량을 제한한다.
+- `client_header_timeout`/`client_body_timeout` 10초, `proxy_connect_timeout` 3초, `proxy_read_timeout` 30초를 초기값으로 두고 load test로 조정한다.
+- Origin 전체 concurrent connection limit과 CloudFront가 덮어쓰는 viewer-address key 기반의 보수적 request rate/burst limit을 둔다.
+- 반복되는 malformed request, body overflow와 rate limit event를 body 없이 sampling logging하고 과도한 retry를 차단한다.
+
+Application의 login/auth와 이후 payment 같은 민감 endpoint별 identity-aware rate limiting은 후속 Application Security task다. WAF가 없으므로 bot, cache-busting과 정교한 L7 abuse 방어는 제한적이라는 risk를 수용한다. Shield Standard는 WAF, rate limiting, authentication/authorization을 대체하지 않는다.
+
+Sources:
+
+- [AWS Shield Standard](https://aws.amazon.com/shield/features/)
+- [CloudFront caching and cache keys](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/ConfiguringCaching.html)
 
 ## Runtime and schedules
 
 ### EC2
 
-- `t4g.medium` Linux On-Demand, 2 vCPU/4 GiB로 Spring Boot와 Valkey의 합산 memory headroom을 확보한다.
-- EventBridge Scheduler가 평일 08:50에 start, 19:10에 stop하여 bootstrap과 graceful shutdown 여유를 둔다.
+- `t3a.medium` Linux On-Demand, x86_64 AMD, 2 vCPU/4 GiB로 Spring Boot와 Valkey의 합산 memory headroom을 확보한다.
+- EventBridge Scheduler가 평일 08:55에 start, 19:05에 stop한다. 하루 10시간 10분, 22일 기준 월 223시간 40분이다.
 - stopped 상태에서는 compute가 과금되지 않지만 EBS와 Elastic IP는 계속 과금된다.
 - 고정 CloudFront origin을 위해 EIP를 유지한다. 일반 public IPv4는 stop/start 시 변경된다.
 - SSH `22/tcp`를 공개하지 않고 SSM Session Manager를 운영 경로로 사용한다.
@@ -111,13 +140,35 @@ AWS는 stopped EC2 compute에는 instance usage를 청구하지 않지만 EBS와
 
 Sources:
 
+- [Amazon EC2 T3/T3a instances](https://aws.amazon.com/ec2/instance-types/t3/)
+- [EC2 general purpose instance specifications](https://docs.aws.amazon.com/ec2/latest/instancetypes/gp.html)
+- [EC2 instance types by Region](https://docs.aws.amazon.com/ec2/latest/instancetypes/ec2-instance-regions.html)
 - [EC2 instance state and billing](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-instance-lifecycle.html)
 - [EC2 public IP behavior](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/using-instance-addressing.html)
+
+#### x86_64 selection and ARM64 future optimization
+
+현재 production Docker CI는 GitHub `ubuntu-latest` runner의 기본 `docker build`만 사용하며 multi-platform `buildx`나 `linux/arm64` manifest validation이 없다. 따라서 현재 ECR image contract는 `linux/amd64`이고 Demo EC2도 x86_64를 사용한다.
+
+| Candidate | Architecture | vCPU / memory | Tokyo On-Demand | Decision |
+|---|---|---:|---:|---|
+| `t3a.medium` | x86_64, AMD EPYC | 2 / 4 GiB | $0.0490/h | Selected |
+| `t3.medium` | x86_64, Intel | 2 / 4 GiB | $0.0544/h | 약 10% 높아 제외 |
+
+`t3a.medium`은 동일 vCPU/memory의 x86_64 후보 중 비용이 낮고 현재 amd64 image를 재빌드 없이 실행할 수 있어 선택한다. T3/T3a의 burst credit charge 가능성은 budget buffer로 감시한다.
+
+ARM64/Graviton은 future optimization으로만 남긴다. 다음 gate가 모두 완료된 후 별도 review로 전환할 수 있다.
+
+- `docker buildx` multi-platform build
+- `linux/arm64` image와 ECR manifest/digest 제공
+- CI에서 image architecture validation
+- ARM64 runtime에서 production image smoke/readiness test
+- dependency와 operational tooling의 ARM64 compatibility 확인
 
 ### RDS
 
 - MariaDB `db.t4g.micro`, Single-AZ, gp3 20 GiB, public access disabled
-- 평일 08:45 start, 19:15 stop
+- 평일 08:45 start, 19:15 stop. 하루 10시간 30분, 22일 기준 월 231시간
 - EC2보다 먼저 시작하고 나중에 멈춰 connection 실패와 비정상 종료를 줄인다.
 - stopped 상태에서도 provisioned storage와 backup storage는 과금된다.
 - RDS는 최대 7일 연속 정지만 허용하며 이후 자동 시작한다. 평일 스케줄은 주말 정지가 7일 미만이므로 정상 운영에서는 제한에 걸리지 않지만, 장기 휴일에는 재정지 schedule과 상태 alert가 필요하다.
@@ -259,7 +310,7 @@ Sources:
 
 - Price snapshot: 2026-08-27
 - Region: Tokyo, Linux On-Demand, Single-AZ
-- 22 weekdays × 10 hours = 220 running hours; month = 730 hours
+- EC2: 22 weekdays × 10 h 10 m = 223 h 40 m; RDS: 22 weekdays × 10 h 30 m = 231 h; month = 730 h
 - Planning exchange rate: USD 1 = JPY 160; 실제 AWS 청구 환율·세금과 다를 수 있음
 - Traffic: CloudFront 5 GB out/100k requests, S3 5 GB, ECR 1 GB, SQS 100k requests, SES 500 recipients, CloudWatch Logs 0.5 GB ingestion
 - Free Tier와 promotional credit의 절감액은 계산에 반영하지 않음
@@ -267,10 +318,10 @@ Sources:
 
 | Cost item | Usage/rate assumption | USD/month | JPY/month |
 |---|---:|---:|---:|
-| EC2 compute | `t4g.medium`, $0.0432/h × 220 h | $9.50 | ¥1,520 |
+| EC2 compute | `t3a.medium`, $0.0490/h × 223 h 40 m | $10.96 | ¥1,754 |
 | EBS | gp3 20 GiB × $0.096/GiB-month | $1.92 | ¥307 |
 | Public IPv4 | 1 EIP × $0.005/h × 730 h | $3.65 | ¥584 |
-| RDS compute | `db.t4g.micro`, $0.026/h × 220 h | $5.72 | ¥915 |
+| RDS compute | `db.t4g.micro`, $0.026/h × 231 h | $6.01 | ¥961 |
 | RDS storage | gp3 20 GiB × $0.138/GiB-month | $2.76 | ¥442 |
 | CloudFront | Low traffic planning allowance | $1.00 | ¥160 |
 | S3 | 5 GB plus low request volume | $0.14 | ¥22 |
@@ -282,11 +333,11 @@ Sources:
 | SSM Parameter Store | Standard tier plus low KMS request allowance | $0.01 | ¥2 |
 | EventBridge Scheduler | Four weekday schedules, conservative allowance | $0.01 | ¥2 |
 | AWS Budgets | Monitoring budget | $0.00 | ¥0 |
-| **Estimated total** | | **$26.47** | **¥4,236** |
+| **Estimated total** | | **$28.22** | **¥4,515** |
 
-¥5,000은 계획 환율로 약 $31.25이며, 현재 estimate 대비 약 ¥764의 여유가 있다. 이 여유는 tax, 환율, CPU credit, backup, log burst, cache miss, data transfer와 잘못된 schedule을 위한 buffer다. CloudFront와 일부 service가 recurring free allowance 안에 들더라도 estimate를 낮추는 근거로 사용하지 않는다.
+¥5,000은 계획 환율로 약 $31.25이며, 현재 estimate 대비 약 ¥485의 여유가 있다. Estimate가 목표 범위 상단 ¥4,500을 약 ¥15 초과하지만 hard ceiling 안이므로 숫자를 맞추기 위한 smaller instance나 security control 제거를 하지 않는다. 이 좁은 여유는 tax, 환율, CPU credit, backup, log burst, cache miss, data transfer와 잘못된 schedule로 소진될 수 있어 실제 구현 직전 재승인이 필요하다. CloudFront와 일부 service가 recurring free allowance 안에 들더라도 estimate를 낮추는 근거로 사용하지 않는다.
 
-같은 EC2/RDS를 730시간 실행하면 compute만 EC2 약 $31.54, RDS 약 $18.98이 된다. 나머지 가정을 유지한 24/7 total은 약 $61.77, 계획 환율로 약 ¥9,883이며 ¥5,000을 크게 초과한다. 따라서 hard ceiling은 scheduled Demo contract에 종속된다.
+같은 EC2/RDS를 730시간 실행하면 compute만 EC2 약 $35.77, RDS 약 $18.98이 된다. 나머지 가정을 유지한 24/7 total은 약 $66.00, 계획 환율로 약 ¥10,560이며 ¥5,000을 크게 초과한다. 따라서 hard ceiling은 scheduled Demo contract에 종속된다.
 
 단가는 시점, region, usage tier, 세금과 환율에 따라 변한다. 실제 생성 직전 AWS Pricing Calculator와 각 pricing page에서 다시 검증한다.
 
@@ -305,7 +356,7 @@ Primary pricing references:
 Resource implementation 전에 다음을 다시 review한다.
 
 - AWS Pricing Calculator estimate가 ¥5,000 미만인지
-- EC2 ARM64 image compatibility와 combined memory load test
+- EC2 x86_64 image compatibility와 combined memory load test
 - local Valkey TLS/ACL이 production profile과 호환되는지
 - RDS TLS hostname verification과 private security group path
 - CloudFront prefix list weight와 security group quota
