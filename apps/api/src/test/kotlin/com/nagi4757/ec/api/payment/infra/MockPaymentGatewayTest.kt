@@ -1,6 +1,7 @@
 package com.nagi4757.ec.api.payment.infra
 
 import com.nagi4757.ec.api.payment.application.ChargePaymentRequest
+import com.nagi4757.ec.api.payment.application.ChargePaymentResult
 import com.nagi4757.ec.api.payment.application.ChargePaymentStatus
 import com.nagi4757.ec.api.payment.application.RefundPaymentRequest
 import com.nagi4757.ec.api.payment.application.RefundPaymentStatus
@@ -8,10 +9,16 @@ import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertSame
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertThrows
 import org.junit.jupiter.params.ParameterizedTest
 import org.junit.jupiter.params.provider.Arguments
 import org.junit.jupiter.params.provider.MethodSource
+import org.junit.jupiter.params.provider.ValueSource
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.stream.Stream
 
 class MockPaymentGatewayTest {
@@ -100,6 +107,114 @@ class MockPaymentGatewayTest {
         assertEquals(RefundPaymentStatus.REFUNDED, gateway.refund(original).status)
         assertEquals(RefundPaymentStatus.REFUND_FAILED, gateway.refund(conflicting).status)
         assertEquals(RefundPaymentStatus.REFUNDED, gateway.refund(original).status)
+    }
+
+    @Test
+    fun `concurrent identical charges share one stored result`() {
+        val request = chargeRequest(MOCK_SUCCESS_PAYMENT_METHOD, "concurrent-same-key")
+        val workers = 8
+        val ready = CountDownLatch(workers)
+        val start = CountDownLatch(1)
+        val executor = Executors.newFixedThreadPool(workers)
+
+        try {
+            val futures = List(workers) {
+                executor.submit<ChargePaymentResult> {
+                    ready.countDown()
+                    start.await()
+                    gateway.charge(request)
+                }
+            }
+            assertTrue(ready.await(10, TimeUnit.SECONDS))
+            start.countDown()
+            val results = futures.map { it.get(10, TimeUnit.SECONDS) }
+
+            assertTrue(results.all { it === results.first() })
+            assertTrue(results.all { it.status == ChargePaymentStatus.SUCCESS })
+            assertEquals("mock-payment:concurrent-same-key", results.first().externalPaymentId)
+        } finally {
+            executor.shutdownNow()
+        }
+    }
+
+    @Test
+    fun `concurrent conflicting charges preserve the first stored request`() {
+        val successRequest = chargeRequest(MOCK_SUCCESS_PAYMENT_METHOD, "concurrent-conflict-key")
+        val declinedRequest = chargeRequest(MOCK_DECLINED_PAYMENT_METHOD, "concurrent-conflict-key")
+        val ready = CountDownLatch(2)
+        val start = CountDownLatch(1)
+        val executor = Executors.newFixedThreadPool(2)
+
+        try {
+            val requests = listOf(successRequest, declinedRequest)
+            val futures = requests.map { request ->
+                executor.submit<ChargePaymentResult> {
+                    ready.countDown()
+                    start.await()
+                    gateway.charge(request)
+                }
+            }
+            assertTrue(ready.await(10, TimeUnit.SECONDS))
+            start.countDown()
+            val results = futures.map { it.get(10, TimeUnit.SECONDS) }
+
+            assertEquals(1, results.count { it.status == ChargePaymentStatus.DUPLICATE })
+            val winningIndex = results.indexOfFirst { it.status != ChargePaymentStatus.DUPLICATE }
+            val losingIndex = 1 - winningIndex
+            assertTrue(winningIndex >= 0)
+            assertEquals(results[winningIndex], gateway.charge(requests[winningIndex]))
+            assertEquals(ChargePaymentStatus.DUPLICATE, gateway.charge(requests[losingIndex]).status)
+        } finally {
+            executor.shutdownNow()
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(longs = [0L, -1L])
+    fun `rejects non-positive charge amounts`(amountJpy: Long) {
+        assertThrows<IllegalArgumentException> {
+            chargeRequest(MOCK_SUCCESS_PAYMENT_METHOD, "invalid-charge-amount").copy(amountJpy = amountJpy)
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(longs = [0L, -1L])
+    fun `rejects non-positive refund amounts`(amountJpy: Long) {
+        assertThrows<IllegalArgumentException> {
+            refundRequest(MOCK_REFUNDED_PAYMENT_ID, "invalid-refund-amount").copy(amountJpy = amountJpy)
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = ["", " ", "\t"])
+    fun `rejects blank payment method identifiers`(paymentMethodId: String) {
+        assertThrows<IllegalArgumentException> {
+            chargeRequest(paymentMethodId, "blank-payment-method")
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = ["", " ", "\t"])
+    fun `rejects blank charge idempotency keys`(idempotencyKey: String) {
+        assertThrows<IllegalArgumentException> {
+            chargeRequest(MOCK_SUCCESS_PAYMENT_METHOD, idempotencyKey)
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = ["", " ", "\t"])
+    fun `rejects blank external payment identifiers`(externalPaymentId: String) {
+        assertThrows<IllegalArgumentException> {
+            refundRequest(externalPaymentId, "blank-external-payment")
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = ["", " ", "\t"])
+    fun `rejects blank refund idempotency keys`(idempotencyKey: String) {
+        assertThrows<IllegalArgumentException> {
+            refundRequest(MOCK_REFUNDED_PAYMENT_ID, idempotencyKey)
+        }
     }
 
     private fun chargeRequest(paymentMethodId: String, idempotencyKey: String) = ChargePaymentRequest(

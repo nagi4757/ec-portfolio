@@ -7,12 +7,8 @@ import com.nagi4757.ec.api.payment.application.PaymentGateway
 import com.nagi4757.ec.api.payment.application.RefundPaymentRequest
 import com.nagi4757.ec.api.payment.application.RefundPaymentResult
 import com.nagi4757.ec.api.payment.application.RefundPaymentStatus
-import org.springframework.context.annotation.Profile
-import org.springframework.stereotype.Component
 import java.util.concurrent.ConcurrentHashMap
 
-@Component
-@Profile("local")
 class MockPaymentGateway : PaymentGateway {
     private val chargesByIdempotencyKey = ConcurrentHashMap<String, StoredCharge>()
     private val refundsByIdempotencyKey = ConcurrentHashMap<String, StoredRefund>()
