@@ -2,11 +2,13 @@ package com.nagi4757.ec.api.product.presentation.shared
 
 import com.nagi4757.ec.api.product.application.ProductSearchPage
 import com.nagi4757.ec.api.product.domain.model.Product
+import io.swagger.v3.oas.annotations.media.Schema
 import jakarta.validation.constraints.Min
 import jakarta.validation.constraints.NotBlank
 import jakarta.validation.constraints.NotNull
 
 object ProductRequest {
+    @Schema(name = "CreateProductRequest")
     data class Create(
         @field:NotBlank val name: String,
         @field:Min(0) val price: Long,

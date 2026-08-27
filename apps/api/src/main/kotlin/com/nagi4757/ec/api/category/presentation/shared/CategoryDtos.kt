@@ -1,9 +1,11 @@
 package com.nagi4757.ec.api.category.presentation.shared
 
 import com.nagi4757.ec.api.category.domain.model.Category
+import io.swagger.v3.oas.annotations.media.Schema
 import jakarta.validation.constraints.NotBlank
 
 object CategoryRequest {
+    @Schema(name = "CreateCategoryRequest")
     data class Create(
         @field:NotBlank val name: String,
         val description: String? = null
@@ -26,4 +28,3 @@ fun Category.toResponse() = CategoryResponse(
     name = name,
     description = description
 )
-

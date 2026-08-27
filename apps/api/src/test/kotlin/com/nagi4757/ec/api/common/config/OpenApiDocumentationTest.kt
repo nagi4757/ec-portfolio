@@ -156,20 +156,41 @@ class OpenApiDocumentationTest(
     }
 
     @Test
+    fun `create operations reference distinct request schemas`() {
+        val schemas = document.path("components").path("schemas")
+        val orderCreateRef = requestSchemaRef("/api/user/orders", "post")
+        val productCreateRef = requestSchemaRef("/api/admin/products", "post")
+        val categoryCreateRef = requestSchemaRef("/api/admin/categories", "post")
+        assertEquals("#/components/schemas/CreateOrderRequest", orderCreateRef)
+        assertEquals("#/components/schemas/CreateProductRequest", productCreateRef)
+        assertEquals("#/components/schemas/CreateCategoryRequest", categoryCreateRef)
+        assertTrue(schemas.path(schemaName(orderCreateRef)).path("properties").has("shippingAddress"))
+        assertTrue(schemas.path(schemaName(productCreateRef)).path("properties").has("name"))
+        assertTrue(schemas.path(schemaName(productCreateRef)).path("properties").has("price"))
+        assertTrue(schemas.path(schemaName(productCreateRef)).path("properties").has("stockQuantity"))
+        assertTrue(schemas.path(schemaName(categoryCreateRef)).path("properties").has("name"))
+
+        val shippingRequest = schemas.path("ShippingAddressRequest").path("properties")
+        assertEquals("^\\d{3}-?\\d{4}$", shippingRequest.path("postalCode").path("pattern").asText())
+        assertEquals(100, shippingRequest.path("recipientName").path("maxLength").asInt())
+    }
+
+    @Test
+    fun `legacy shipping address is nullable only in order detail schema`() {
+        val schemas = document.path("components").path("schemas")
+        val shippingResponse = schemas.path("OrderResponse").path("properties").path("shippingAddress")
+
+        assertEquals("#/components/schemas/ShippingAddressResponse", shippingResponse.path("\$ref").asText())
+        assertEquals(listOf("object", "null"), shippingResponse.path("type").map { it.asText() })
+        assertTrue(schemas.path("OrderSummaryResponse").path("properties").path("shippingAddress").isMissingNode)
+    }
+
+    @Test
     fun `product cart and order schemas reflect the current API contract`() {
         val schemas = document.path("components").path("schemas")
         val expectedStatuses = listOf("PENDING", "PREPARING", "SHIPPED", "DELIVERED", "CANCELLED")
         assertEquals(expectedStatuses, schemas.path("OrderResponse").path("properties").path("status").path("enum").map { it.asText() })
         assertEquals(expectedStatuses, schemas.path("UpdateStatus").path("properties").path("status").path("enum").map { it.asText() })
-
-        val createOrder = schemas.path("Create")
-        assertTrue(createOrder.path("required").any { it.asText() == "shippingAddress" })
-        assertFalse(createOrder.path("properties").path("shippingAddress").isMissingNode)
-        val shippingRequest = schemas.path("ShippingAddressRequest").path("properties")
-        assertEquals("^\\d{3}-?\\d{4}$", shippingRequest.path("postalCode").path("pattern").asText())
-        assertEquals(100, shippingRequest.path("recipientName").path("maxLength").asInt())
-        assertFalse(schemas.path("OrderResponse").path("properties").path("shippingAddress").isMissingNode)
-        assertTrue(schemas.path("OrderSummaryResponse").path("properties").path("shippingAddress").isMissingNode)
 
         assertFalse(schemas.path("ProductResponse").path("properties").path("active").isMissingNode)
         assertFalse(schemas.path("ProductResponse").path("properties").path("stockQuantity").isMissingNode)
@@ -204,6 +225,17 @@ class OpenApiDocumentationTest(
 
     private fun operation(path: String, method: String): JsonNode =
         document.path("paths").path(path).path(method)
+
+    private fun requestSchemaRef(path: String, method: String): String =
+        operation(path, method)
+            .path("requestBody")
+            .path("content")
+            .path(MediaType.APPLICATION_JSON_VALUE)
+            .path("schema")
+            .path("\$ref")
+            .asText()
+
+    private fun schemaName(reference: String): String = reference.substringAfterLast('/')
 
     private fun operations(): List<JsonNode> =
         document.path("paths").properties().asSequence().flatMap { (_, pathItem) ->
