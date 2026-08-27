@@ -17,6 +17,7 @@ private val DT_FORMAT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
 
 /* ── Request ── */
 object OrderRequest {
+    @Schema(name = "CreateOrderRequest")
     data class Create(
         @field:Valid
         val shippingAddress: ShippingAddressRequest
@@ -78,6 +79,10 @@ data class OrderResponse(
     val status: String,
     val items: List<OrderItemResponse>,
     val totalAmount: Long,
+    @field:Schema(
+        types = ["object", "null"],
+        description = "Shipping address snapshot. Null for orders created before V8."
+    )
     val shippingAddress: ShippingAddressResponse?,
     @field:Schema(
         description = "Order creation time formatted as yyyy-MM-dd HH:mm:ss.",
