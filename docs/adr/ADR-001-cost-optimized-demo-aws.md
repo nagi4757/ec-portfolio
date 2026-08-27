@@ -25,9 +25,10 @@ Demo는 다음 architecture를 채택한다.
 
 - CloudFront를 viewer entry point로 사용하고 JP/KR allowlist 적용
 - Store/Admin static assets와 media는 private S3 + OAC
-- API와 Valkey는 단일 `t4g.medium` EC2에서 Docker로 실행
+- API와 Valkey는 현재 amd64 image와 일치하는 단일 x86_64 `t3a.medium` EC2에서 Docker로 실행
 - Database는 private Single-AZ RDS MariaDB `db.t4g.micro`
 - EC2와 RDS는 EventBridge Scheduler로 평일 운영 시간에 맞춰 start/stop
+- ARM64/Graviton은 multi-platform build, CI architecture validation과 runtime smoke test 이후의 future optimization으로 제한
 - EC2는 EIP를 사용하며 application ingress는 CloudFront origin-facing managed prefix list로 제한
 - CloudFront custom origin secret을 추가 검증해 direct origin bypass를 줄임
 - Standard-tier SSM Parameter Store와 instance role 사용
@@ -79,7 +80,7 @@ NAT Gateway가 없으므로 private compute isolation은 production보다 약하
 - short log retention과 low-cardinality metrics
 - Standard SSM과 monitoring-only AWS Budget
 
-2026-08-27 공식 Tokyo pricing snapshot과 ¥160/USD planning rate 기준 estimate는 약 ¥4,236/month다. ¥5,000 이하는 24/7 운영이 아니라 평일 제한 운영 Demo 기준이며, 같은 EC2/RDS의 24/7 estimate는 약 ¥9,883이다. 자세한 단가, 가정, buffer는 [Demo AWS Architecture](../architecture/aws-demo.md#monthly-cost-estimate)에 기록한다.
+2026-08-27 공식 Tokyo pricing snapshot과 ¥160/USD planning rate 기준 estimate는 약 ¥4,515/month다. ¥5,000 이하는 24/7 운영이 아니라 평일 제한 운영 Demo 기준이며, 같은 EC2/RDS의 24/7 estimate는 약 ¥10,560이다. 자세한 단가, schedule 산식과 buffer는 [Demo AWS Architecture](../architecture/aws-demo.md#monthly-cost-estimate)에 기록한다.
 
 ## Security consequences
 
@@ -99,6 +100,7 @@ Accepted risks:
 - public EC2에서 Nginx certificate lifecycle을 직접 운영해야 함
 - geo restriction은 identity control이 아님
 - paid WAF/rate protection 없음
+- Shield Standard만으로는 막기 어려운 bot, cache-busting과 정교한 L7 abuse
 - local Valkey lifecycle이 EC2와 결합
 
 이 위험은 public production service에는 허용되지 않는다.
@@ -133,13 +135,17 @@ Private compute outbound의 표준 선택이지만 시간당·data processing co
 
 | Severity / finding | Document | Resolution | Status |
 |---|---|---|---|
+| BLOCKER: EC2 image architecture | Demo: EC2 selection | Current `linux/amd64` image에 맞춰 x86_64 `t3a.medium` 선택, ARM64 전환 gate 명시 | RESOLVED |
+| BLOCKER: Scheduler/cost alignment | Demo: Runtime; Monthly cost | EC2 223 h 40 m, RDS 231 h를 schedule과 cost table에 동일 적용 | RESOLVED |
 | BLOCKER: Direct Origin Protection | Demo: Request and network boundaries | SG 443 prefix-list only, `0.0.0.0/0` 금지, HTTPS-only, `X-Origin-Verify` Nginx 403를 동시 필수화 | RESOLVED |
-| BLOCKER: ¥5,000 Cost Assumption | Demo: Monthly cost estimate; ADR: Cost impact | ¥160/USD, scheduled-only ¥4,236, 24/7 약 ¥9,883 비교 | RESOLVED |
+| BLOCKER: ¥5,000 Cost Assumption | Demo: Monthly cost estimate; ADR: Cost impact | ¥160/USD, actual schedule ¥4,515, 24/7 약 ¥10,560 비교 | RESOLVED |
 | MAJOR: RDS 7-day restart | Demo: RDS | 7-day auto-start, storage charge, ordering, DLQ/alarm/actual-state check | RESOLVED |
 | MAJOR: Local Valkey durability | Demo: EC2-local Valkey; ADR: Valkey decision | Internal-only 6379, memory policy, ephemeral cart loss를 선택하고 durable order와 분리 | ACCEPTED RISK |
 | MAJOR: OIDC Trust | Demo: GitHub OIDC/CD | `aud`, exact repository, main/protected environment, no wildcard와 role 분리 | RESOLVED |
 | MAJOR: Rollback contract | Demo: GitHub OIDC/CD | Full SHA/digest, readiness, stable/previous digest, no `latest`, Flyway non-rollback | RESOLVED |
 | MAJOR: Budget is not hard cap | Demo: Observability and cost controls | Actual/forecast alerts와 runtime schedule monitoring 역할 분리 | RESOLVED |
+| MAJOR: WAF 없는 L7/DDoS control | Demo: Minimum L7 and DDoS controls | CloudFront/Shield Standard/cache contract와 Nginx limit, application follow-up 및 risk 명시 | ACCEPTED RISK |
+| MAJOR: VPC Origin explanation | Demo: No NAT Gateway and no ALB | Private EC2 지원을 인정하고 NAT/endpoint fixed cost와 복잡도로 제외 이유 수정 | RESOLVED |
 | MINOR: Geo restriction limitation | Demo: CloudFront geo restriction | 인증/인가가 아닌 attack-surface 보조 통제, VPN/proxy 우회 명시 | RESOLVED |
 | MINOR: Prefix list quota | Demo: Origin bypass | Weight 55와 단순 origin SG 운영 명시 | RESOLVED |
 | MINOR: CloudWatch cost guardrail | Demo: Observability | 7-day retention, INFO, health suppression, expensive telemetry 제외 | RESOLVED |
