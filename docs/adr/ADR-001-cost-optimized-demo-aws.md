@@ -1,6 +1,6 @@
 # ADR-001: Cost-optimized Demo AWS Architecture
 
-<!-- markdownlint-disable MD013 -->
+<!-- markdownlint-disable MD013 MD060 -->
 
 - Status: Accepted
 - Date: 2026-08-27
@@ -79,7 +79,7 @@ NAT Gateway가 없으므로 private compute isolation은 production보다 약하
 - short log retention과 low-cardinality metrics
 - Standard SSM과 monitoring-only AWS Budget
 
-2026-08-27 기준 계획 estimate는 약 ¥3,973/month다. 자세한 단가, 가정, buffer는 [Demo AWS Architecture](../architecture/aws-demo.md#monthly-cost-estimate)에 기록한다.
+2026-08-27 공식 Tokyo pricing snapshot과 ¥160/USD planning rate 기준 estimate는 약 ¥4,236/month다. ¥5,000 이하는 24/7 운영이 아니라 평일 제한 운영 Demo 기준이며, 같은 EC2/RDS의 24/7 estimate는 약 ¥9,883이다. 자세한 단가, 가정, buffer는 [Demo AWS Architecture](../architecture/aws-demo.md#monthly-cost-estimate)에 기록한다.
 
 ## Security consequences
 
@@ -96,7 +96,7 @@ Accepted risks:
 
 - public EC2 custom origin
 - single instance/single AZ
-- demo origin 구간의 TLS 운영이 production보다 약할 수 있음
+- public EC2에서 Nginx certificate lifecycle을 직접 운영해야 함
 - geo restriction은 identity control이 아님
 - paid WAF/rate protection 없음
 - local Valkey lifecycle이 EC2와 결합
@@ -128,3 +128,20 @@ Private compute outbound의 표준 선택이지만 시간당·data processing co
 - 실제 resource 생성 전 Valkey TLS/RBAC compatibility와 ARM64 memory load를 검증해야 한다.
 - Monthly price review와 Budget alert response가 architecture 운영의 일부다.
 - Production 요구가 생기면 [Production AWS Architecture](../architecture/aws-production.md)의 단계적 upgrade path를 따른다.
+
+## Reviewer findings disposition
+
+| Severity / finding | Document | Resolution | Status |
+|---|---|---|---|
+| BLOCKER: Direct Origin Protection | Demo: Request and network boundaries | SG 443 prefix-list only, `0.0.0.0/0` 금지, HTTPS-only, `X-Origin-Verify` Nginx 403를 동시 필수화 | RESOLVED |
+| BLOCKER: ¥5,000 Cost Assumption | Demo: Monthly cost estimate; ADR: Cost impact | ¥160/USD, scheduled-only ¥4,236, 24/7 약 ¥9,883 비교 | RESOLVED |
+| MAJOR: RDS 7-day restart | Demo: RDS | 7-day auto-start, storage charge, ordering, DLQ/alarm/actual-state check | RESOLVED |
+| MAJOR: Local Valkey durability | Demo: EC2-local Valkey; ADR: Valkey decision | Internal-only 6379, memory policy, ephemeral cart loss를 선택하고 durable order와 분리 | ACCEPTED RISK |
+| MAJOR: OIDC Trust | Demo: GitHub OIDC/CD | `aud`, exact repository, main/protected environment, no wildcard와 role 분리 | RESOLVED |
+| MAJOR: Rollback contract | Demo: GitHub OIDC/CD | Full SHA/digest, readiness, stable/previous digest, no `latest`, Flyway non-rollback | RESOLVED |
+| MAJOR: Budget is not hard cap | Demo: Observability and cost controls | Actual/forecast alerts와 runtime schedule monitoring 역할 분리 | RESOLVED |
+| MINOR: Geo restriction limitation | Demo: CloudFront geo restriction | 인증/인가가 아닌 attack-surface 보조 통제, VPN/proxy 우회 명시 | RESOLVED |
+| MINOR: Prefix list quota | Demo: Origin bypass | Weight 55와 단순 origin SG 운영 명시 | RESOLVED |
+| MINOR: CloudWatch cost guardrail | Demo: Observability | 7-day retention, INFO, health suppression, expensive telemetry 제외 | RESOLVED |
+| NIT: Cost tags | Demo: Cost allocation tags | `Project`, `Environment`, `Owner`, `AutoStop` convention | RESOLVED |
+| NIT: Exchange rate documentation | Demo: Monthly cost estimate | ¥160/USD와 tax/rate variability 명시 | RESOLVED |
