@@ -131,6 +131,22 @@ export default function AdminOrderDetailPage() {
                 </div>
             </div>
 
+            <section style={shippingBox}>
+                <h2 style={{ marginTop: 0 }}>{t('admin.shipping.title')}</h2>
+                {order.shippingAddress ? (
+                    <address style={{ fontStyle: 'normal', lineHeight: 1.7 }}>
+                        <div>{order.shippingAddress.recipientName}</div>
+                        <div>〒{order.shippingAddress.postalCode}</div>
+                        <div>{order.shippingAddress.prefecture} {order.shippingAddress.city}</div>
+                        <div>{order.shippingAddress.addressLine1}</div>
+                        {order.shippingAddress.addressLine2 && <div>{order.shippingAddress.addressLine2}</div>}
+                        <div>{order.shippingAddress.phoneNumber}</div>
+                    </address>
+                ) : (
+                    <div style={{ color: '#777' }}>{t('admin.shipping.legacyUnavailable')}</div>
+                )}
+            </section>
+
             <h2 style={{ margin: '20px 0 10px' }}>주문 아이템</h2>
             <div style={{ overflowX: 'auto' }}>
                 <table style={{ ...tableStyle, minWidth: 680 }}>
@@ -168,6 +184,14 @@ const summaryBox: React.CSSProperties = {
     display: 'grid',
     gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))',
     gap: 12,
+}
+
+const shippingBox: React.CSSProperties = {
+    border: '1px solid #eee',
+    borderRadius: 10,
+    background: '#fff',
+    padding: 16,
+    marginTop: 20,
 }
 
 const label: React.CSSProperties = {

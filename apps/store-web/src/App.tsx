@@ -4,6 +4,7 @@ import ProductDetailPage from '@/features/products/pages/ProductDetailPage';
 import LoginPage from '@/features/auth/pages/LoginPage';
 import SignUpPage from '@/features/auth/pages/SignUpPage';
 import CartPage from '@/features/cart/pages/CartPage';
+import CheckoutPage from '@/features/orders/pages/CheckoutPage';
 import OrderListPage from '@/features/orders/pages/OrderListPage';
 import OrderDetailPage from '@/features/orders/pages/OrderDetailPage';
 import { CartAPI } from '@/features/cart/api';
@@ -30,7 +31,7 @@ function Header() {
             cartStore.setTotalQuantity(0);
             return;
         }
-        if (location.pathname === '/cart') return;
+        if (location.pathname === '/cart' || location.pathname === '/checkout') return;
 
         CartAPI.get()
             .then((data) => cartStore.setTotalQuantity(data.totalQuantity))
@@ -83,6 +84,7 @@ export default function App() {
                 <Route path="/" element={<ProductListPage />} />
                 <Route path="/products/:id" element={<ProductDetailPage />} />
                 <Route path="/cart" element={<CartPage />} />
+                <Route path="/checkout" element={<CheckoutPage />} />
                 <Route path="/orders" element={<OrderListPage />} />
                 <Route path="/orders/:id" element={<OrderDetailPage />} />
                 <Route path="/login" element={<LoginPage />} />

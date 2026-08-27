@@ -41,6 +41,10 @@ export const adminJa = {
             },
             loadFailed: '注文の取得に失敗しました。',
         },
+        shipping: {
+            title: '配送先',
+            legacyUnavailable: 'この注文には配送先情報が登録されていません。',
+        },
         errors: {
             api: {
                 invalidOrderTransition: '注文状態が変更されたため、処理できません。',

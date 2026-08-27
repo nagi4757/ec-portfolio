@@ -2,7 +2,6 @@ import { useCallback, useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Link, useNavigate } from 'react-router-dom'
 import { CartAPI } from '@/features/cart/api'
-import { OrderAPI } from '@/features/orders/api'
 import { authStore } from '@/lib/authStore'
 import { cartStore } from '@/lib/cartStore'
 import { isApiErrorCode } from '@/lib/api'
@@ -30,7 +29,6 @@ export default function CartPage() {
     const [loading, setLoading] = useState(true)
     const [error, setError] = useState<string | null>(null)
     const [actionError, setActionError] = useState<ActionError | null>(null)
-    const [ordering, setOrdering] = useState(false)
 
     const applyCart = useCallback((data: CartResponse) => {
         setCart(data)
@@ -83,27 +81,6 @@ export default function CartPage() {
             applyCart(data)
         } catch (e) {
             setActionError(toActionError(e, '상품 삭제에 실패했습니다.'))
-        }
-    }
-
-    async function placeOrder() {
-        setOrdering(true)
-        setActionError(null)
-        try {
-            await OrderAPI.place()
-            cartStore.setTotalQuantity(0)
-            navigate('/orders')
-        } catch (e) {
-            setActionError(toActionError(e, '주문에 실패했습니다.'))
-            if (isApiErrorCode(e, 'PRODUCT_NOT_AVAILABLE') || isApiErrorCode(e, 'INSUFFICIENT_STOCK')) {
-                try {
-                    applyCart(await CartAPI.get())
-                } catch {
-                    // Keep the translated order error when the refresh also fails.
-                }
-            }
-        } finally {
-            setOrdering(false)
         }
     }
 
@@ -202,11 +179,11 @@ export default function CartPage() {
                         <div style={{ marginTop: 10, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                             <button onClick={clearCart}>장바구니 비우기</button>
                             <button
-                                onClick={placeOrder}
-                                disabled={ordering || hasUnavailableItems}
-                                style={{ background: '#2b6cb0', color: '#fff', border: 'none', borderRadius: 6, padding: '6px 16px', cursor: ordering || hasUnavailableItems ? 'not-allowed' : 'pointer', fontWeight: 600 }}
+                                onClick={() => navigate('/checkout')}
+                                disabled={hasUnavailableItems}
+                                style={{ background: '#2b6cb0', color: '#fff', border: 'none', borderRadius: 6, padding: '6px 16px', cursor: hasUnavailableItems ? 'not-allowed' : 'pointer', fontWeight: 600 }}
                             >
-                                {ordering ? '주문 중...' : '주문하기'}
+                                {t('store.checkout.proceed')}
                             </button>
                         </div>
                     </div>

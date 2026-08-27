@@ -41,6 +41,10 @@ export const adminKo = {
             },
             loadFailed: '주문 조회에 실패했습니다.',
         },
+        shipping: {
+            title: '배송지',
+            legacyUnavailable: '이 주문에는 배송지 정보가 등록되어 있지 않습니다.',
+        },
         errors: {
             api: {
                 invalidOrderTransition: '주문 상태가 변경되어 처리할 수 없습니다.',
