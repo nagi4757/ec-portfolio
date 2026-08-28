@@ -80,7 +80,7 @@ NAT Gateway가 없으므로 private compute isolation은 production보다 약하
 - short log retention과 low-cardinality metrics
 - Standard SSM과 monitoring-only AWS Budget
 
-2026-08-27 공식 Tokyo pricing snapshot과 ¥160/USD planning rate 기준 estimate는 약 ¥4,515/month다. ¥5,000 이하는 24/7 운영이 아니라 평일 제한 운영 Demo 기준이며, 같은 EC2/RDS의 24/7 estimate는 약 ¥10,560이다. 자세한 단가, schedule 산식과 buffer는 [Demo AWS Architecture](../architecture/aws-demo.md#monthly-cost-estimate)에 기록한다.
+2026-08-28 공식 Tokyo pricing snapshot 기준 base는 $22.99, variable contingency 포함 subtotal은 $24.99다. ¥160/USD와 JCT 10%를 적용한 normal invoice는 약 ¥4,398, ¥165 stress invoice는 약 ¥4,536이며 각각 약 ¥602와 ¥464의 hard-ceiling buffer가 있다. ¥5,000 이하는 24/7 운영이 아니라 평일 제한 운영 Demo 기준이다. 자세한 단가, schedule 산식과 tax-aware cost contract는 [Demo AWS Architecture](../architecture/aws-demo.md#monthly-cost-estimate)에 기록한다.
 
 ## Security consequences
 
@@ -127,7 +127,8 @@ Private compute outbound의 표준 선택이지만 시간당·data processing co
 
 - Scheduled downtime과 single-node failure를 사용자에게 명확히 표시해야 한다.
 - RDS 7-day automatic restart, EC2/RDS scheduler 실패와 EIP 고정 비용을 감시해야 한다.
-- 실제 resource 생성 전 Valkey TLS/RBAC compatibility와 ARM64 memory load를 검증해야 한다.
+- 실제 resource 생성 전 x86_64에서 Spring Boot + Nginx + Valkey memory/load와 Valkey TLS/RBAC compatibility를 검증해야 한다.
+- ARM64 optimization은 buildx, `linux/arm64` ECR manifest, CI architecture validation, ARM runtime smoke와 compatibility/load validation을 모두 통과한 뒤 별도 결정한다.
 - Monthly price review와 Budget alert response가 architecture 운영의 일부다.
 - Production 요구가 생기면 [Production AWS Architecture](../architecture/aws-production.md)의 단계적 upgrade path를 따른다.
 
@@ -136,9 +137,9 @@ Private compute outbound의 표준 선택이지만 시간당·data processing co
 | Severity / finding | Document | Resolution | Status |
 |---|---|---|---|
 | BLOCKER: EC2 image architecture | Demo: EC2 selection | Current `linux/amd64` image에 맞춰 x86_64 `t3a.medium` 선택, ARM64 전환 gate 명시 | RESOLVED |
-| BLOCKER: Scheduler/cost alignment | Demo: Runtime; Monthly cost | EC2 223 h 40 m, RDS 231 h를 schedule과 cost table에 동일 적용 | RESOLVED |
+| BLOCKER: Scheduler/cost alignment | Demo: Runtime; Monthly cost | EC2 154 h, RDS 161 h 20 m를 schedule과 cost table에 동일 적용 | RESOLVED |
 | BLOCKER: Direct Origin Protection | Demo: Request and network boundaries | SG 443 prefix-list only, `0.0.0.0/0` 금지, HTTPS-only, `X-Origin-Verify` Nginx 403를 동시 필수화 | RESOLVED |
-| BLOCKER: ¥5,000 Cost Assumption | Demo: Monthly cost estimate; ADR: Cost impact | ¥160/USD, actual schedule ¥4,515, 24/7 약 ¥10,560 비교 | RESOLVED |
+| BLOCKER: ¥5,000 Cost Assumption | Demo: Monthly cost estimate; ADR: Cost impact | Actual schedule, $2 contingency, ¥160/USD, JCT 10% 적용 invoice 약 ¥4,398과 약 ¥602 buffer; ¥165 stress 약 ¥4,536 | RESOLVED |
 | MAJOR: RDS 7-day restart | Demo: RDS | 7-day auto-start, storage charge, ordering, DLQ/alarm/actual-state check | RESOLVED |
 | MAJOR: Local Valkey durability | Demo: EC2-local Valkey; ADR: Valkey decision | Internal-only 6379, memory policy, ephemeral cart loss를 선택하고 durable order와 분리 | ACCEPTED RISK |
 | MAJOR: OIDC Trust | Demo: GitHub OIDC/CD | `aud`, exact repository, main/protected environment, no wildcard와 role 분리 | RESOLVED |
