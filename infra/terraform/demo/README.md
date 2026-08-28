@@ -87,6 +87,6 @@ The current implicit local backend is validation-only. Before any AWS apply, sep
 - Least-privilege state access and auditability
 - State backup, retention, and break-glass access
 
-An S3 backend is a likely option, but this phase does not choose or create a bucket, lock mechanism, or bootstrap workflow. Remote State Bootstrap is a separate Infra task.
+Phase 2A defines the future S3 bucket and native lockfile strategy in the independent [bootstrap root](../bootstrap/README.md), but does not create the bucket or migrate this root. `backend.hcl.example` documents the future `demo/terraform.tfstate` key without activating an S3 backend or committing account-specific values. Backend activation and `terraform init -migrate-state` remain Phase 2B operations.
 
 Before plan/apply, also verify the target-account AZ availability, CloudFront managed prefix-list ID and quota weight, AWS identity/region, cost estimate, and the absence of unexpected paid resources.
