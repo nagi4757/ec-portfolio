@@ -7,13 +7,13 @@
 이 문서는 EC Portfolio의 면접·포트폴리오 데모 환경을 위한 목표 아키텍처다. AWS 리소스를 실제로 생성하는 실행 계획이나 Terraform 명세가 아니다.
 
 - Region: Asia Pacific (Tokyo), `ap-northeast-1`
-- 운영 시간: 평일 22일 기준, RDS 08:45~19:15과 EC2 08:55~19:05 JST
+- 운영 시간: 평일 22일 기준, RDS 09:50~17:10과 EC2 10:00~17:00 JST
 - 월 비용 목표: ¥3,500~¥4,500
 - 월 비용 상한: ¥5,000
 - Free Tier와 promotional credit은 비용 성립 조건으로 사용하지 않는다.
 - 단일 AZ와 예약된 downtime을 수용하는 demo 환경이다.
 
-**¥5,000 이하는 24/7 운영 기준이 아니라 평일 제한 운영 Demo 기준이다.** EC2와 RDS를 24/7로 실행하면 동일 단가에서도 약 ¥10,560/month로 증가해 hard ceiling을 초과한다.
+**¥5,000 이하는 24/7 운영 기준이 아니라 평일 제한 운영 Demo 기준이다.** EC2와 RDS를 24/7로 실행하면 contingency와 JCT를 포함해 약 ¥11,968/month로 증가해 hard ceiling을 초과한다.
 
 관련 결정은 [ADR-001](../adr/ADR-001-cost-optimized-demo-aws.md), production 목표는 [Production AWS Architecture](aws-production.md)를 참조한다.
 
@@ -130,7 +130,8 @@ Sources:
 ### EC2
 
 - `t3a.medium` Linux On-Demand, x86_64 AMD, 2 vCPU/4 GiB로 Spring Boot와 Valkey의 합산 memory headroom을 확보한다.
-- EventBridge Scheduler가 평일 08:55에 start, 19:05에 stop한다. 하루 10시간 10분, 22일 기준 월 223시간 40분이다.
+- EventBridge Scheduler가 평일 10:00에 start, 17:00에 stop한다. 하루 7시간, 22일 기준 월 154시간이다.
+- 인터뷰나 특별 demo를 위한 수동 start는 허용하지만, schedule tag를 유지하고 17:00 이후 별도 actual-state check와 AutoStop policy로 다음 허용 종료 시각에 반드시 중지한다. 연장 시간은 contingency와 Budget으로 추적한다.
 - stopped 상태에서는 compute가 과금되지 않지만 EBS와 Elastic IP는 계속 과금된다.
 - 고정 CloudFront origin을 위해 EIP를 유지한다. 일반 public IPv4는 stop/start 시 변경된다.
 - SSH `22/tcp`를 공개하지 않고 SSM Session Manager를 운영 경로로 사용한다.
@@ -155,7 +156,15 @@ Sources:
 | `t3a.medium` | x86_64, AMD EPYC | 2 / 4 GiB | $0.0490/h | Selected |
 | `t3.medium` | x86_64, Intel | 2 / 4 GiB | $0.0544/h | 약 10% 높아 제외 |
 
-`t3a.medium`은 동일 vCPU/memory의 x86_64 후보 중 비용이 낮고 현재 amd64 image를 재빌드 없이 실행할 수 있어 선택한다. T3/T3a의 burst credit charge 가능성은 budget buffer로 감시한다.
+`t3a.medium`은 동일 vCPU/memory의 x86_64 후보 중 비용이 낮고 현재 amd64 image를 재빌드 없이 실행할 수 있어 선택한다. 측정 전 `t3a.small`로 낮추지 않으며, x86_64에서 Spring Boot + Nginx + Valkey의 memory/load를 실측한 뒤 별도 cost optimization으로만 검토한다.
+
+Demo는 비용 예측성을 위해 명시적으로 `standard` CPU credit mode를 사용한다. T3a는 `standard`와 `unlimited`를 모두 지원하지만 기본값은 `unlimited`이므로 provisioning 단계에서 credit specification을 검증해야 한다. Standard는 accrued credit을 초과한 지속 부하에서 CPU가 baseline으로 점진적으로 제한되는 trade-off가 있다. `CPUCreditBalance`와 CPU utilization을 관찰하고 throttling이 demo 품질을 해치면 instance family/size와 runtime을 다시 산정한다. Unlimited 전환은 surplus credit 추가 비용을 산정해 contingency를 재승인한 뒤에만 허용한다.
+
+CPU credit sources:
+
+- [Configure burstable performance instances](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/burstable-performance-instances-how-to.html)
+- [Standard mode for burstable performance instances](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/burstable-performance-instances-standard-mode.html)
+- [Key concepts for burstable performance instances](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/burstable-credits-baseline-concepts.html)
 
 ARM64/Graviton은 future optimization으로만 남긴다. 다음 gate가 모두 완료된 후 별도 review로 전환할 수 있다.
 
@@ -168,7 +177,7 @@ ARM64/Graviton은 future optimization으로만 남긴다. 다음 gate가 모두 
 ### RDS
 
 - MariaDB `db.t4g.micro`, Single-AZ, gp3 20 GiB, public access disabled
-- 평일 08:45 start, 19:15 stop. 하루 10시간 30분, 22일 기준 월 231시간
+- 평일 09:50 start, 17:10 stop. 하루 7시간 20분, 22일 기준 월 161시간 20분
 - EC2보다 먼저 시작하고 나중에 멈춰 connection 실패와 비정상 종료를 줄인다.
 - stopped 상태에서도 provisioned storage와 backup storage는 과금된다.
 - RDS는 최대 7일 연속 정지만 허용하며 이후 자동 시작한다. 평일 스케줄은 주말 정지가 7일 미만이므로 정상 운영에서는 제한에 걸리지 않지만, 장기 휴일에는 재정지 schedule과 상태 alert가 필요하다.
@@ -176,6 +185,10 @@ ARM64/Graviton은 future optimization으로만 남긴다. 다음 gate가 모두 
 Scheduler invocation failure와 예상하지 않은 running 상태는 Budget이 아니라 runtime control로 감시한다. 각 start/stop schedule에 retry와 DLQ를 설정하고 failure metric/DLQ message에 CloudWatch alarm을 둔다. 종료 예정 시각 이후 별도 SSM Automation 상태 점검이 EC2/RDS actual state를 확인하며 `running` mismatch일 때만 alarm을 발생시킨다. Budget은 누적 비용의 후행 guardrail이며 schedule 성공 여부를 대신하지 않는다.
 
 Source: [Stopping an Amazon RDS DB instance temporarily](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_StopInstance.html)
+
+Automated backup은 retention 범위에서 사용하고, 실행 중인 DB instance의 provisioned storage와 같은 크기까지 제공되는 regional backup allowance 안에 머문다고 가정한다. Automated backup과 manual snapshot의 합계가 allowance를 초과하면 추가 backup storage 비용이 발생할 수 있다. Manual snapshot은 상시 유지하지 않으며, destructive migration 전에 snapshot이 필요하면 보존 기간과 초과 storage를 별도로 재평가한다. 이 변동 가능성은 아래 contingency에 포함한다.
+
+Source: [Amazon RDS backup storage costs](https://aws.amazon.com/blogs/database/demystifying-amazon-rds-backup-storage-costs/)
 
 ## Storage, images, and delivery
 
@@ -308,36 +321,46 @@ Sources:
 
 ### Assumptions
 
-- Price snapshot: 2026-08-27
+- Price snapshot: 2026-08-28
 - Region: Tokyo, Linux On-Demand, Single-AZ
-- EC2: 22 weekdays × 10 h 10 m = 223 h 40 m; RDS: 22 weekdays × 10 h 30 m = 231 h; month = 730 h
-- Planning exchange rate: USD 1 = JPY 160; 실제 AWS 청구 환율·세금과 다를 수 있음
+- EC2: 22 weekdays × 7 h = 154 h; RDS: 22 weekdays × 7 h 20 m = 161 h 20 m; month = 730 h
+- Planning exchange rate: USD 1 = JPY 160; stress rate = JPY 165
+- Japan Consumption Tax (JCT): 10%; AWS website prices are tax-exclusive
 - Traffic: CloudFront 5 GB out/100k requests, S3 5 GB, ECR 1 GB, SQS 100k requests, SES 500 recipients, CloudWatch Logs 0.5 GB ingestion
 - Free Tier와 promotional credit의 절감액은 계산에 반영하지 않음
 - Domain registration fee는 아직 domain을 구매하지 않으므로 제외; Route 53 hosted zone은 포함
 
-| Cost item | Usage/rate assumption | USD/month | JPY/month |
-|---|---:|---:|---:|
-| EC2 compute | `t3a.medium`, $0.0490/h × 223 h 40 m | $10.96 | ¥1,754 |
-| EBS | gp3 20 GiB × $0.096/GiB-month | $1.92 | ¥307 |
-| Public IPv4 | 1 EIP × $0.005/h × 730 h | $3.65 | ¥584 |
-| RDS compute | `db.t4g.micro`, $0.026/h × 231 h | $6.01 | ¥961 |
-| RDS storage | gp3 20 GiB × $0.138/GiB-month | $2.76 | ¥442 |
-| CloudFront | Low traffic planning allowance | $1.00 | ¥160 |
-| S3 | 5 GB plus low request volume | $0.14 | ¥22 |
-| ECR | 1 GB image storage | $0.10 | ¥16 |
-| SQS | 100k standard requests, no free allowance credited | $0.04 | ¥6 |
-| SES | 500 recipients at current low-volume rate allowance | $0.08 | ¥13 |
-| CloudWatch | 0.5 GB logs plus short retention allowance | $1.00 | ¥160 |
-| Route 53 | 1 hosted zone plus low query volume | $0.54 | ¥86 |
-| SSM Parameter Store | Standard tier plus low KMS request allowance | $0.01 | ¥2 |
-| EventBridge Scheduler | Four weekday schedules, conservative allowance | $0.01 | ¥2 |
-| AWS Budgets | Monitoring budget | $0.00 | ¥0 |
-| **Estimated total** | | **$28.22** | **¥4,515** |
+| Cost item | Usage/rate assumption | USD/month |
+|---|---:|---:|
+| EC2 compute | `t3a.medium` Standard, $0.0490/h × 154 h | $7.55 |
+| EBS | gp3 20 GiB × $0.096/GiB-month | $1.92 |
+| Public IPv4 | 1 EIP × $0.005/h × 730 h | $3.65 |
+| RDS compute | `db.t4g.micro`, $0.026/h × 161 h 20 m | $4.19 |
+| RDS storage | gp3 20 GiB × $0.138/GiB-month | $2.76 |
+| CloudFront | Low traffic planning allowance | $1.00 |
+| S3 | 5 GB plus low request volume | $0.14 |
+| ECR | 1 GB image storage | $0.10 |
+| SQS | 100k standard requests, no free allowance credited | $0.04 |
+| SES | 500 recipients at current low-volume rate allowance | $0.08 |
+| CloudWatch | 0.5 GB logs plus short retention allowance | $1.00 |
+| Route 53 | 1 hosted zone plus low query volume | $0.54 |
+| SSM Parameter Store | Standard tier plus low KMS request allowance | $0.01 |
+| EventBridge Scheduler | Four weekday schedules, conservative allowance | $0.01 |
+| AWS Budgets | Monitoring budget | $0.00 |
+| **Base AWS pre-tax cost** | Exact calculation before row rounding | **$22.99** |
+| **Variable contingency** | CloudWatch, CloudFront/S3, ECR, RDS backup, runtime and SES/SQS variance | **$2.00** |
+| **AWS pre-tax subtotal** | Base + contingency | **$24.99** |
 
-¥5,000은 계획 환율로 약 $31.25이며, 현재 estimate 대비 약 ¥485의 여유가 있다. Estimate가 목표 범위 상단 ¥4,500을 약 ¥15 초과하지만 hard ceiling 안이므로 숫자를 맞추기 위한 smaller instance나 security control 제거를 하지 않는다. 이 좁은 여유는 tax, 환율, CPU credit, backup, log burst, cache miss, data transfer와 잘못된 schedule로 소진될 수 있어 실제 구현 직전 재승인이 필요하다. CloudFront와 일부 service가 recurring free allowance 안에 들더라도 estimate를 낮추는 근거로 사용하지 않는다.
+Cost contract는 exact USD 산식 후 invoice 단위로 반올림한다.
 
-같은 EC2/RDS를 730시간 실행하면 compute만 EC2 약 $35.77, RDS 약 $18.98이 된다. 나머지 가정을 유지한 24/7 total은 약 $66.00, 계획 환율로 약 ¥10,560이며 ¥5,000을 크게 초과한다. 따라서 hard ceiling은 scheduled Demo contract에 종속된다.
+| Scenario | USD subtotal | FX | JPY pre-tax | JCT 10% | Estimated invoice | ¥5,000 buffer |
+|---|---:|---:|---:|---:|---:|---:|
+| Normal plan | $24.9907 | ¥160/USD | ¥3,998.51 | ¥399.85 | **¥4,398.36** | **¥601.64** |
+| FX stress | $24.9907 | ¥165/USD | ¥4,123.46 | ¥412.35 | **¥4,535.81** | **¥464.19** |
+
+$2.00 contingency는 CloudWatch log/metric 증가, CloudFront/S3 request·transfer, ECR image 증가, RDS backup/snapshot allowance 초과, 수동 runtime 연장, SES/SQS 증가를 흡수하는 conservative allowance다. Standard mode에서는 surplus CPU credit charge가 없으며, Unlimited 전환 시 예상 credit 비용을 이 allowance에 추가해 재계산한다. 이는 숫자를 맞추기 위한 할인 항목이 아니며 실제 비용 변동을 위해 base 위에 더한 금액이다. Normal planned invoice는 목표 ¥4,200~¥4,500 안이고 stress에서도 hard ceiling 아래다. Free Tier나 credit은 차감하지 않는다.
+
+같은 EC2/RDS를 730시간 실행하면 compute만 EC2 약 $35.77, RDS 약 $18.98이 된다. 나머지 base 가정을 유지하면 $66.00이고, $2 contingency, ¥160/USD와 JCT 10%를 적용한 24/7 invoice는 약 ¥11,968로 ¥5,000을 크게 초과한다. 따라서 hard ceiling은 scheduled Demo contract에 종속된다.
 
 단가는 시점, region, usage tier, 세금과 환율에 따라 변한다. 실제 생성 직전 AWS Pricing Calculator와 각 pricing page에서 다시 검증한다.
 
@@ -350,6 +373,7 @@ Primary pricing references:
 - [CloudFront pricing](https://aws.amazon.com/cloudfront/pricing/)
 - [Route 53 pricing](https://aws.amazon.com/route53/pricing/)
 - [EventBridge pricing](https://aws.amazon.com/eventbridge/pricing/)
+- [AWS Tax Help: Japan](https://aws.amazon.com/tax-help/japan/)
 
 ## Operational gates
 
