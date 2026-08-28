@@ -79,7 +79,9 @@ terraform validate
 
 ## State and deployment gates
 
-The current implicit local backend is validation-only. Before any AWS apply, separately approve and implement:
+The Demo root now declares the partial `backend "s3" {}` block in HCL, but the S3 backend has not been initialized. No remote `demo/terraform.tfstate` has been created, and no Demo AWS infrastructure apply has been executed.
+
+Before any AWS apply, separately approve and implement:
 
 - Remote state location and bootstrap ownership
 - Encryption at rest and in transit
@@ -87,6 +89,6 @@ The current implicit local backend is validation-only. Before any AWS apply, sep
 - Least-privilege state access and auditability
 - State backup, retention, and break-glass access
 
-Phase 2A defines the future S3 bucket and native lockfile strategy in the independent [bootstrap root](../bootstrap/README.md), but does not create the bucket or migrate this root. `backend.hcl.example` documents the future `demo/terraform.tfstate` key without activating an S3 backend or committing account-specific values. Backend activation and `terraform init -migrate-state` remain Phase 2B operations.
+The independent [bootstrap root](../bootstrap/README.md) defines the S3 bucket and native lockfile strategy. `backend.hcl.example` documents the future `demo/terraform.tfstate` runtime configuration without committing account-specific values. Initialize and verify the Bootstrap remote backend first; only then may a separately approved step initialize the Demo backend. Demo backend initialization and state creation have not been performed by this configuration-only change.
 
 Before plan/apply, also verify the target-account AZ availability, CloudFront managed prefix-list ID and quota weight, AWS identity/region, cost estimate, and the absence of unexpected paid resources.
