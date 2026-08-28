@@ -1,0 +1,7 @@
+owner = "repository-owner"
+
+availability_zones = {
+  public_app   = "ap-northeast-1a"
+  private_db_a = "ap-northeast-1a"
+  private_db_b = "ap-northeast-1c"
+}
