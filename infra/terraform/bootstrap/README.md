@@ -8,7 +8,9 @@ This independent root module defines the dedicated S3 bucket that will store EC 
 
 The state bucket cannot use itself as a backend before it exists. The bootstrap root therefore uses local state only for the first approved creation. This is a narrow exception, not the steady-state design. Local bootstrap state must be treated as sensitive, kept out of Git and logs, and migrated immediately after the bucket is created in Phase 2B.
 
-The bootstrap root does not declare an active `backend "s3"` block yet. Adding that partial backend declaration and performing `terraform init -migrate-state` are explicit Phase 2B changes after the bucket exists.
+The bootstrap root now declares the partial `backend "s3" {}` block in HCL. The remote S3 configuration has not been initialized, and `terraform init -migrate-state` has not been executed. The current authoritative Bootstrap state therefore remains the local `terraform.tfstate`.
+
+The next approved sequence is: create a protected backup of the local state, render the ignored `backend.hcl` from `backend.hcl.example`, run `terraform init -migrate-state -backend-config=backend.hcl`, and verify the remote state and native lock. None of those migration steps are performed by this configuration-only change.
 
 ## Bucket contract
 
@@ -76,7 +78,7 @@ Phase 2B requires a new approval. Its gate order is fixed:
 4. **Bootstrap apply:** Apply the Bootstrap root once, creating only the reviewed state bucket controls.
 5. **S3 protection verification:** Verify every bucket protection below. A failed check blocks migration.
 6. **Protected local-state backup:** Confirm the local state is readable, then create and record the recovery backup described below before changing the backend.
-7. **Remote backend migration:** Add the reviewed partial `backend "s3"` declaration, render `backend.hcl` from the example and run `terraform init -migrate-state -backend-config=backend.hcl`. Do not use `terraform state push` as the normal migration mechanism.
+7. **Remote backend migration:** Confirm the reviewed partial `backend "s3"` declaration, render `backend.hcl` from the example and run `terraform init -migrate-state -backend-config=backend.hcl`. Do not use `terraform state push` as the normal migration mechanism.
 8. **Remote state and lock verification:** Verify the S3 object/version, remote read, lineage, serial, resource identity and native lock acquire/release gates below. Do not delete any local artifact yet.
 9. **Architecture/PO confirmation:** Present metadata-only verification results and obtain confirmation that S3 is the authoritative recovery source.
 10. **Local working-state cleanup:** Only after confirmation, remove residual local working state according to the approved secure cleanup procedure.
