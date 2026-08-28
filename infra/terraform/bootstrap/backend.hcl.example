@@ -1,0 +1,5 @@
+bucket       = "ec-portfolio-terraform-state-ACCOUNT_ID-ap-northeast-1"
+key          = "bootstrap/terraform.tfstate"
+region       = "ap-northeast-1"
+use_lockfile = true
+encrypt      = true
