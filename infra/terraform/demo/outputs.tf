@@ -84,3 +84,35 @@ output "db_password_parameter_arn" {
   description = "ARN of the SecureString that stores the Demo database master password."
   value       = aws_ssm_parameter.db_master_password.arn
 }
+
+output "scheduler_group_name" {
+  description = "Name of the EventBridge Scheduler group for Demo runtime lifecycle control."
+  value       = aws_scheduler_schedule_group.runtime.name
+}
+
+output "scheduler_role_name" {
+  description = "Name of the least-privilege EventBridge Scheduler execution role."
+  value       = aws_iam_role.scheduler.name
+}
+
+output "schedule_names" {
+  description = "Names of the four Demo runtime schedules, keyed by lifecycle operation."
+  value = {
+    for key, schedule in aws_scheduler_schedule.runtime : key => schedule.name
+  }
+}
+
+output "scheduler_failure_alarm_name" {
+  description = "Name of the group-level Scheduler final-failure alarm."
+  value       = aws_cloudwatch_metric_alarm.scheduler_invocation_dropped.alarm_name
+}
+
+output "alert_topic_arn" {
+  description = "ARN of the shared Scheduler and Budget alert topic."
+  value       = aws_sns_topic.alerts.arn
+}
+
+output "budget_name" {
+  description = "Name of the account-wide monthly Demo cost budget."
+  value       = aws_budgets_budget.monthly_cost.name
+}

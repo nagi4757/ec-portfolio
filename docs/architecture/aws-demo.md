@@ -131,7 +131,7 @@ Sources:
 
 - `t3a.medium` Linux On-Demand, x86_64 AMD, 2 vCPU/4 GiB로 Spring Boot와 Valkey의 합산 memory headroom을 확보한다.
 - EventBridge Scheduler가 평일 10:00에 start, 17:00에 stop한다. 하루 7시간, 22일 기준 월 154시간이다.
-- 인터뷰나 특별 demo를 위한 수동 start는 허용하지만, schedule tag를 유지하고 17:00 이후 별도 actual-state check와 AutoStop policy로 다음 허용 종료 시각에 반드시 중지한다. 연장 시간은 contingency와 Budget으로 추적한다.
+- 인터뷰나 특별 demo를 위한 수동 start는 허용하지만 schedule과 `AutoStop` tag를 변경하지 않는다. 17:00 이전 수동 기동은 같은 날 stop schedule을 적용하고, stop schedule 이후 기동은 승인된 수동 stop 시각과 담당자가 없으면 금지한다. 연장 시간은 contingency와 Budget으로 추적한다.
 - stopped 상태에서는 compute가 과금되지 않지만 EBS와 Elastic IP는 계속 과금된다.
 - 고정 CloudFront origin을 위해 EIP를 유지한다. 일반 public IPv4는 stop/start 시 변경된다.
 - SSH `22/tcp`를 공개하지 않고 SSM Session Manager를 운영 경로로 사용한다.
@@ -182,7 +182,7 @@ ARM64/Graviton은 future optimization으로만 남긴다. 다음 gate가 모두 
 - stopped 상태에서도 provisioned storage와 backup storage는 과금된다.
 - RDS는 최대 7일 연속 정지만 허용하며 이후 자동 시작한다. 평일 스케줄은 주말 정지가 7일 미만이므로 정상 운영에서는 제한에 걸리지 않지만, 장기 휴일에는 재정지 schedule과 상태 alert가 필요하다.
 
-Scheduler invocation failure와 예상하지 않은 running 상태는 Budget이 아니라 runtime control로 감시한다. 각 start/stop schedule에 retry와 DLQ를 설정하고 failure metric/DLQ message에 CloudWatch alarm을 둔다. 종료 예정 시각 이후 별도 SSM Automation 상태 점검이 EC2/RDS actual state를 확인하며 `running` mismatch일 때만 alarm을 발생시킨다. Budget은 누적 비용의 후행 guardrail이며 schedule 성공 여부를 대신하지 않는다.
+Scheduler invocation failure는 Budget이 아니라 runtime control로 감시한다. 각 start/stop schedule은 15분 event age와 최대 3회 bounded retry를 사용하고, schedule group의 `InvocationDroppedCount >= 1`에 CloudWatch alarm을 둔다. 네 개의 단순 lifecycle API를 위한 SQS DLQ는 Demo 기본 구성에서 제외하며, 이로 인해 실패 payload forensic이 제한되는 risk를 수용한다. Budget은 누적 비용의 후행 guardrail이며 schedule 성공 여부를 대신하지 않는다. 종료 예정 시각 이후 actual-state mismatch 점검은 Phase 3B에 포함하지 않고 별도 operational enhancement로 재검토한다.
 
 Source: [Stopping an Amazon RDS DB instance temporarily](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_StopInstance.html)
 
@@ -287,17 +287,18 @@ Sources:
 
 이는 CloudWatch 자체가 demo의 큰 비용원이 되지 않도록 하는 의도적인 Architecture Decision이다. 장애 조사 기간에만 sampling/retention을 제한적으로 높이고 종료 조건을 둔다.
 
-AWS Budget은 하나의 monthly cost budget에 세 notification threshold를 둔다.
+AWS Budget은 account 전체를 감시하는 action 없는 `27.55 USD` monthly cost budget에 네 notification threshold를 둔다. `UnblendedCost`와 tax를 포함하되 credit/refund는 제외하여 promotional credit가 실제 resource burn을 숨기지 않게 한다.
 
 | Threshold | 의미 | 대응 |
 |---:|---|---|
-| ¥3,500 | Warning | Cost Explorer에서 service별 증가 확인 |
-| ¥4,500 | Critical | EC2/RDS schedule과 log ingestion 즉시 확인, 비필수 demo 중지 |
-| ¥5,000 | Strong alert | Hard budget 위반으로 간주, owner 확인 후 비용 발생 resource 중지/격리 |
+| Actual 70% (약 ¥3,500) | Warning | Cost Explorer에서 service별 증가 확인 |
+| Actual 90% (약 ¥4,500) | Critical | EC2/RDS schedule과 log ingestion 즉시 확인, 비필수 demo 중지 |
+| Forecasted 90% | Early critical | Forecast 근거와 runtime 연장 여부를 사전 확인 |
+| Actual 100% (약 ¥5,000) | Strong alert | Hard budget 위반으로 간주, owner 확인 후 비용 발생 resource 중지/격리 |
 
-Actual 알림에 더해 monthly forecast가 budget의 85%에 도달할 때 사전 경고를 보낸다. Planning exchange rate ¥160/USD 기준 threshold는 billing currency로 환산해 주기적으로 갱신한다.
+`27.55 USD`는 stress exchange rate ¥165/USD와 JCT 10%에서 약 ¥4,999.58이다. Forecast는 충분한 usage history가 없으면 생성되지 않을 수 있으므로 Actual 알림을 기본 guardrail로 사용한다. FX와 세금 가정은 정기적으로 재검토한다.
 
-AWS Budget alert는 지출을 자동으로 차단하는 hard cap이 아니다. Monitoring budget은 무료이며 action-enabled budget을 사용한다면 공식 가격과 quota를 다시 확인한다. Budget alert는 누적 actual/forecast cost를 감시하고, Scheduler DLQ/CloudWatch alarm/actual-state check는 runtime 상태를 감시한다. 두 통제는 서로 대체하지 않는다.
+AWS Budget alert는 지출을 자동으로 차단하는 hard cap이 아니다. Monitoring budget은 무료이며 action-enabled budget을 사용한다면 공식 가격과 quota를 다시 확인한다. Budget alert는 누적 actual/forecast cost를 감시하고, Scheduler bounded retry와 `InvocationDroppedCount` alarm은 runtime 호출 실패를 감시한다. 두 통제는 서로 대체하지 않는다.
 
 ## Cost allocation tags
 

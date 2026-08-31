@@ -140,7 +140,7 @@ Private compute outbound의 표준 선택이지만 시간당·data processing co
 | BLOCKER: Scheduler/cost alignment | Demo: Runtime; Monthly cost | EC2 154 h, RDS 161 h 20 m를 schedule과 cost table에 동일 적용 | RESOLVED |
 | BLOCKER: Direct Origin Protection | Demo: Request and network boundaries | SG 443 prefix-list only, `0.0.0.0/0` 금지, HTTPS-only, `X-Origin-Verify` Nginx 403를 동시 필수화 | RESOLVED |
 | BLOCKER: ¥5,000 Cost Assumption | Demo: Monthly cost estimate; ADR: Cost impact | Actual schedule, $2 contingency, ¥160/USD, JCT 10% 적용 invoice 약 ¥4,398과 약 ¥602 buffer; ¥165 stress 약 ¥4,536 | RESOLVED |
-| MAJOR: RDS 7-day restart | Demo: RDS | 7-day auto-start, storage charge, ordering, DLQ/alarm/actual-state check | RESOLVED |
+| MAJOR: RDS 7-day restart | Demo: RDS | 7-day auto-start와 storage charge 명시, weekday ordering, bounded retry와 group final-drop alarm | RESOLVED |
 | MAJOR: Local Valkey durability | Demo: EC2-local Valkey; ADR: Valkey decision | Internal-only 6379, memory policy, ephemeral cart loss를 선택하고 durable order와 분리 | ACCEPTED RISK |
 | MAJOR: OIDC Trust | Demo: GitHub OIDC/CD | `aud`, exact repository, main/protected environment, no wildcard와 role 분리 | RESOLVED |
 | MAJOR: Rollback contract | Demo: GitHub OIDC/CD | Full SHA/digest, readiness, stable/previous digest, no `latest`, Flyway non-rollback | RESOLVED |
