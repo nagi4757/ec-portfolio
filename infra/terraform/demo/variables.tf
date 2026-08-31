@@ -8,6 +8,17 @@ variable "owner" {
   }
 }
 
+variable "alert_email" {
+  description = "Email endpoint for Demo Scheduler and Budget alerts. The address is stored in Terraform state and requires SNS confirmation."
+  type        = string
+  sensitive   = true
+
+  validation {
+    condition     = can(regex("^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$", var.alert_email))
+    error_message = "alert_email must be a non-blank email address."
+  }
+}
+
 variable "availability_zones" {
   description = "Tokyo Availability Zones selected for the app and two distinct private DB subnets. Confirm availability in the target AWS account before apply."
   type = object({
