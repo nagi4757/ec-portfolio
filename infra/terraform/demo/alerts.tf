@@ -2,7 +2,7 @@ locals {
   alert_topic_name             = "${local.name_prefix}-alerts"
   scheduler_failure_alarm_name = "${local.name_prefix}-scheduler-invocation-dropped"
   monthly_budget_name          = "${local.name_prefix}-monthly-cost"
-  monthly_budget_limit_usd     = "27.55"
+  monthly_budget_limit_usd     = "30.30"
 
   scheduler_failure_alarm_arn = "arn:${data.aws_partition.current.partition}:cloudwatch:${local.aws_region}:${data.aws_caller_identity.current.account_id}:alarm:${local.scheduler_failure_alarm_name}"
   monthly_budget_arn          = "arn:${data.aws_partition.current.partition}:budgets::${data.aws_caller_identity.current.account_id}:budget/${local.monthly_budget_name}"

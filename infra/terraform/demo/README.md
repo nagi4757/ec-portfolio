@@ -137,13 +137,15 @@ Server-side topic encryption is intentionally not enabled. Alerts must never con
 
 The monthly account-wide COST Budget is alert-only and has no Budget Action or control role:
 
-- Limit: `27.55 USD`, derived from the ¥5,000 ceiling at ¥165/USD and 10% JCT (`27.55 × 165 × 1.10 = ¥4,999.58`).
-- Actual 70%: approximately ¥3,500 under the stress assumptions.
-- Actual 90%: approximately ¥4,500 under the stress assumptions.
-- Forecasted 90%: additional early critical warning.
-- Actual 100%: strong alert near the hard ceiling.
+- Limit: `30.30 USD` of tax-inclusive cost, equivalent to `30.30 × ¥165/USD = ¥4,999.50` under the stress FX assumption.
+- Actual 70% threshold exceeded: `21.21 USD × ¥165/USD = ¥3,499.65`, approximately ¥3,500 Warning.
+- Actual 90% threshold exceeded: `27.27 USD × ¥165/USD = ¥4,499.55`, approximately ¥4,500 Critical.
+- Forecasted 90% threshold exceeded: predicted tax-inclusive spend above `27.27 USD`, approximately ¥4,500 under stress FX.
+- Actual 100% threshold exceeded: tax-inclusive spend above `30.30 USD`, approximately ¥5,000 Strong alert.
 
 The Budget has no project/tag filter, so it watches the whole AWS account and does not miss global, untagged, or not-yet-activated cost-allocation-tag spend. Its `cost_types` selects unblended cost with both `use_blended` and `use_amortized` false, includes tax, recurring/upfront/subscription/support/discount costs, and excludes credits and refunds. AWS provider 6.62 treats the newer `metrics` argument as part of `filter_expression` and conflicts it with `cost_types`, so this account-wide budget uses the supported `cost_types` path. Promotional credits or refunds therefore cannot reduce the monitored spend and hide resource burn. Free Tier or credit is not a condition of the architecture cost model.
+
+Because `include_tax = true`, the cost compared with this Budget is already tax-inclusive. Interpret a Budget threshold as `tax-inclusive USD × FX = invoice-equivalent JPY`; do not multiply by JCT again. This differs from the architecture's infrastructure estimate, which starts with tax-exclusive AWS resource prices and correctly calculates `pre-tax resource estimate + 10% JCT = estimated invoice`.
 
 AWS Budget is not a hard spending cap and does not stop resources. Billing data is updated at least daily, so both cost data and notifications can lag. A forecast also needs about five weeks of usage history and may be absent for a new account. Actual 70/90/100 alerts remain the primary cost signals; the control stack is the EC2/RDS schedule, resource-only `AutoStop` tags, the Scheduler final-failure alarm, and delayed Budget alerts together.
 
