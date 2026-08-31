@@ -39,3 +39,48 @@ output "private_db_route_table_id" {
   description = "ID of the isolated private DB route table."
   value       = aws_route_table.private_db.id
 }
+
+output "ec2_instance_id" {
+  description = "ID of the Demo EC2 instance."
+  value       = aws_instance.demo.id
+}
+
+output "ec2_instance_profile_name" {
+  description = "Name of the Demo EC2 instance profile."
+  value       = aws_iam_instance_profile.ec2.name
+}
+
+output "ec2_eip_public_ip" {
+  description = "Elastic IP reserved for the future CloudFront custom origin."
+  value       = aws_eip.ec2_origin.public_ip
+}
+
+output "rds_identifier" {
+  description = "Identifier of the Demo MariaDB instance."
+  value       = aws_db_instance.demo.identifier
+}
+
+output "rds_address" {
+  description = "Private DNS address of the Demo MariaDB instance."
+  value       = aws_db_instance.demo.address
+}
+
+output "rds_port" {
+  description = "Port of the Demo MariaDB instance."
+  value       = aws_db_instance.demo.port
+}
+
+output "rds_db_name" {
+  description = "Initial database name of the Demo MariaDB instance."
+  value       = aws_db_instance.demo.db_name
+}
+
+output "db_password_parameter_name" {
+  description = "Name of the SecureString that stores the Demo database master password."
+  value       = aws_ssm_parameter.db_master_password.name
+}
+
+output "db_password_parameter_arn" {
+  description = "ARN of the SecureString that stores the Demo database master password."
+  value       = aws_ssm_parameter.db_master_password.arn
+}

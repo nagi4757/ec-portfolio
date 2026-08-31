@@ -34,3 +34,30 @@ variable "availability_zones" {
     error_message = "private_db_a and private_db_b must use different Availability Zones."
   }
 }
+
+variable "db_master_password" {
+  description = "Ephemeral MariaDB master password supplied only for an approved plan/apply operation. Never commit or output this value."
+  type        = string
+  sensitive   = true
+  ephemeral   = true
+
+  validation {
+    condition = (
+      length(var.db_master_password) >= 16 &&
+      length(var.db_master_password) <= 41 &&
+      !can(regex("[\\s/@\"]", var.db_master_password))
+    )
+    error_message = "db_master_password must be 16-41 characters and must not contain whitespace, slash, at sign, or double quotes."
+  }
+}
+
+variable "db_master_password_version" {
+  description = "Non-secret rotation version shared by the RDS and SSM write-only password arguments. Increment only with a new password."
+  type        = number
+  default     = 1
+
+  validation {
+    condition     = var.db_master_password_version >= 1 && floor(var.db_master_password_version) == var.db_master_password_version
+    error_message = "db_master_password_version must be a positive integer."
+  }
+}
