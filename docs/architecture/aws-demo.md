@@ -287,16 +287,16 @@ Sources:
 
 이는 CloudWatch 자체가 demo의 큰 비용원이 되지 않도록 하는 의도적인 Architecture Decision이다. 장애 조사 기간에만 sampling/retention을 제한적으로 높이고 종료 조건을 둔다.
 
-AWS Budget은 account 전체를 감시하는 action 없는 `27.55 USD` monthly cost budget에 네 notification threshold를 둔다. `UnblendedCost`와 tax를 포함하되 credit/refund는 제외하여 promotional credit가 실제 resource burn을 숨기지 않게 한다.
+AWS Budget은 account 전체를 감시하는 action 없는 `30.30 USD` monthly cost budget에 네 notification threshold를 둔다. `UnblendedCost`와 tax를 포함하되 credit/refund는 제외하여 promotional credit가 실제 resource burn을 숨기지 않게 한다.
 
 | Threshold | 의미 | 대응 |
 |---:|---|---|
-| Actual 70% (약 ¥3,500) | Warning | Cost Explorer에서 service별 증가 확인 |
-| Actual 90% (약 ¥4,500) | Critical | EC2/RDS schedule과 log ingestion 즉시 확인, 비필수 demo 중지 |
-| Forecasted 90% | Early critical | Forecast 근거와 runtime 연장 여부를 사전 확인 |
-| Actual 100% (약 ¥5,000) | Strong alert | Hard budget 위반으로 간주, owner 확인 후 비용 발생 resource 중지/격리 |
+| Actual 70% 초과 (`21.21 USD`, 약 ¥3,499.65) | Warning | Cost Explorer에서 service별 증가 확인 |
+| Actual 90% 초과 (`27.27 USD`, 약 ¥4,499.55) | Critical | EC2/RDS schedule과 log ingestion 즉시 확인, 비필수 demo 중지 |
+| Forecasted 90% 초과 (`27.27 USD`, 약 ¥4,499.55) | Early critical | Forecast 근거와 runtime 연장 여부를 사전 확인 |
+| Actual 100% 초과 (`30.30 USD`, 약 ¥4,999.50) | Strong alert | Hard budget 위반으로 간주, owner 확인 후 비용 발생 resource 중지/격리 |
 
-`27.55 USD`는 stress exchange rate ¥165/USD와 JCT 10%에서 약 ¥4,999.58이다. Forecast는 충분한 usage history가 없으면 생성되지 않을 수 있으므로 Actual 알림을 기본 guardrail로 사용한다. FX와 세금 가정은 정기적으로 재검토한다.
+Budget의 `include_tax = true`는 비교 대상 비용이 이미 tax-inclusive임을 뜻한다. 따라서 stress 환산은 `30.30 USD × ¥165/USD = 약 ¥4,999.50`이며 JCT 10%를 다시 곱하지 않는다. 반면 아래 인프라 비용표는 AWS의 tax-exclusive resource estimate에서 시작하므로 기존대로 pre-tax subtotal에 JCT 10%를 더해 invoice를 계산한다. 두 산식은 측정 시작점이 다르다. Forecast는 충분한 usage history가 없으면 생성되지 않을 수 있으므로 Actual 알림을 기본 guardrail로 사용하고, FX와 세금 가정은 정기적으로 재검토한다.
 
 AWS Budget alert는 지출을 자동으로 차단하는 hard cap이 아니다. Monitoring budget은 무료이며 action-enabled budget을 사용한다면 공식 가격과 quota를 다시 확인한다. Budget alert는 누적 actual/forecast cost를 감시하고, Scheduler bounded retry와 `InvocationDroppedCount` alarm은 runtime 호출 실패를 감시한다. 두 통제는 서로 대체하지 않는다.
 
