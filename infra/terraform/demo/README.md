@@ -98,6 +98,8 @@ Source: [RDS MariaDB version management](https://docs.aws.amazon.com/AmazonRDS/l
 
 `db_master_password` is a sensitive ephemeral Terraform input. Terraform 1.16 omits the value from plan and state artifacts, and AWS provider 6.62 marks both `aws_db_instance.password_wo` and `aws_ssm_parameter.value_wo` as sensitive write-only arguments. The same ephemeral value is sent to RDS and to the Standard-tier SecureString `/ec-portfolio/demo/db/master-password`; only the non-secret `db_master_password_version` is persisted.
 
+The input must contain 16-41 printable ASCII characters excluding space and all other whitespace. Slash (`/`), at sign (`@`), double quote (`"`), and single quote (`'`) are also rejected. Non-ASCII input, including Japanese, Korean, and emoji, fails Terraform variable validation before any provider operation.
+
 The SecureString uses the AWS-managed `alias/aws/ssm` key. No secret value is accepted through a committed tfvars file, backend configuration, resource tag, output, or ordinary `password`/`value` argument. Supply it only through an approved ephemeral execution channel that does not log the value. Rotation requires a new secret and an incremented version in the same reviewed operation. If either RDS or SSM update fails, retain the same secret/version securely and retry to convergence rather than incrementing again.
 
 The EC2 role cannot read this parameter yet. A future deployment design may add `ssm:GetParameter` and required decrypt access scoped to this single parameter/key; wildcard Parameter Store or KMS decrypt permissions are prohibited.

@@ -43,11 +43,10 @@ variable "db_master_password" {
 
   validation {
     condition = (
-      length(var.db_master_password) >= 16 &&
-      length(var.db_master_password) <= 41 &&
-      !can(regex("[\\s/@\"]", var.db_master_password))
+      can(regex("^[!-~]{16,41}$", var.db_master_password)) &&
+      !can(regex("[/@\"']", var.db_master_password))
     )
-    error_message = "db_master_password must be 16-41 characters and must not contain whitespace, slash, at sign, or double quotes."
+    error_message = "db_master_password must be 16-41 printable ASCII characters without whitespace, slash, at sign, double quotes, or single quotes."
   }
 }
 
