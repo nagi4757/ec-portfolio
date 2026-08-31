@@ -13,6 +13,5 @@ locals {
     Project     = "ec-portfolio"
     Environment = "demo"
     Owner       = var.owner
-    AutoStop    = "true"
   }
 }
