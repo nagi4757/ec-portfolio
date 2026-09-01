@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.nagi4757.ec.api.payment.infra.mapper.PaymentAttemptMapper">
+
+    <resultMap id="paymentAttemptResultMap" type="com.nagi4757.ec.api.payment.infra.mapper.PaymentAttemptRecord">
+        <id property="id" column="id"/>
+        <result property="idempotencyKey" column="idempotency_key"/>
+        <result property="requestFingerprint" column="request_fingerprint"/>
+        <result property="amountJpy" column="amount_jpy"/>
+        <result property="status" column="status"/>
+        <result property="externalPaymentId" column="external_payment_id"/>
+        <result property="createdAt" column="created_at"/>
+        <result property="updatedAt" column="updated_at"/>
+    </resultMap>
+
+    <insert id="insertPaymentAttempt" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO payment_attempts (
+            idempotency_key,
+            request_fingerprint,
+            amount_jpy,
+            status,
+            external_payment_id
+        )
+        VALUES (
+            #{idempotencyKey},
+            #{requestFingerprint},
+            #{amountJpy},
+            #{status},
+            #{externalPaymentId}
+        )
+    </insert>
+
+    <select id="selectByIdempotencyKey" resultMap="paymentAttemptResultMap">
+        SELECT
+            id,
+            idempotency_key,
+            request_fingerprint,
+            amount_jpy,
+            status,
+            external_payment_id,
+            created_at,
+            updated_at
+        FROM payment_attempts
+        WHERE idempotency_key = #{idempotencyKey}
+    </select>
+
+    <update id="updatePaymentAttemptResult">
+        UPDATE payment_attempts
+        SET status = #{status},
+            external_payment_id = #{externalPaymentId}
+        WHERE id = #{id}
+    </update>
+
+</mapper>

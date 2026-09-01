@@ -13,6 +13,10 @@ import com.nagi4757.ec.api.order.domain.model.OrderItem
 import com.nagi4757.ec.api.order.domain.model.OrderStatus
 import com.nagi4757.ec.api.order.domain.model.ShippingAddress
 import com.nagi4757.ec.api.order.domain.repository.OrderRepository
+import com.nagi4757.ec.api.payment.application.ChargePaymentRequest
+import com.nagi4757.ec.api.payment.application.PaymentRequestFingerprint
+import com.nagi4757.ec.api.payment.domain.model.PaymentAttemptStatus
+import com.nagi4757.ec.api.payment.domain.repository.PaymentAttemptRepository
 import com.nagi4757.ec.api.product.domain.model.Product
 import com.nagi4757.ec.api.product.domain.repository.ProductRepository
 import com.nagi4757.ec.api.product.domain.repository.ProductSearchCondition
@@ -54,6 +58,7 @@ class InfrastructureIntegrationTest @Autowired constructor(
     private val productRepository: ProductRepository,
     private val orderRepository: OrderRepository,
     private val orderQueryRepository: OrderQueryRepository,
+    private val paymentAttemptRepository: PaymentAttemptRepository,
     private val cartRepository: CartRepository,
     private val cartService: CartService,
     private val orderService: OrderService,
@@ -85,11 +90,11 @@ class InfrastructureIntegrationTest @Autowired constructor(
     }
 
     @Test
-    fun `applies Flyway migrations V1 through V8 and initializes existing products`() {
+    fun `applies Flyway migrations V1 through V9 and initializes existing products`() {
         val appliedVersions = flyway.info().applied()
             .mapNotNull { it.version?.version }
 
-        assertThat(appliedVersions).containsExactly("1", "2", "3", "4", "5", "6", "7", "8")
+        assertThat(appliedVersions).containsExactly("1", "2", "3", "4", "5", "6", "7", "8", "9")
         val existingStock = jdbcTemplate.queryForList(
             "SELECT stock_quantity FROM products WHERE id IN (1, 2, 3) ORDER BY id",
             Int::class.java
@@ -129,7 +134,7 @@ class InfrastructureIntegrationTest @Autowired constructor(
                 .load()
                 .migrate()
 
-            assertThat(migrationResult.migrationsExecuted).isEqualTo(3)
+            assertThat(migrationResult.migrationsExecuted).isEqualTo(4)
             assertThat(legacyJdbcTemplate.queryForObject(
                 "SELECT status FROM orders LIMIT 1",
                 String::class.java
@@ -147,6 +152,120 @@ class InfrastructureIntegrationTest @Autowired constructor(
             }
         } finally {
             legacyDatabase.stop()
+        }
+    }
+
+    @Test
+    @Transactional
+    fun `persists selects and updates payment attempts without storing payment method plaintext`() {
+        val idempotencyKey = "payment-attempt-${UUID.randomUUID()}"
+        val paymentMethodId = "private-payment-method-${UUID.randomUUID()}"
+        val request = ChargePaymentRequest(
+            amountJpy = 12_345L,
+            paymentMethodId = paymentMethodId,
+            idempotencyKey = idempotencyKey
+        )
+        val fingerprint = PaymentRequestFingerprint.from(request)
+
+        val created = paymentAttemptRepository.createPending(idempotencyKey, fingerprint, request.amountJpy)
+
+        assertThat(created.id).isPositive()
+        assertThat(created.idempotencyKey).isEqualTo(idempotencyKey)
+        assertThat(created.requestFingerprint).isEqualTo(fingerprint)
+        assertThat(created.amountJpy).isEqualTo(12_345L)
+        assertThat(created.status).isEqualTo(PaymentAttemptStatus.PENDING)
+        assertThat(created.externalPaymentId).isNull()
+        assertThat(created.createdAt).isNotNull()
+        assertThat(created.updatedAt).isNotNull()
+
+        val storedRow = jdbcTemplate.queryForMap(
+            "SELECT * FROM payment_attempts WHERE idempotency_key = ?",
+            idempotencyKey
+        )
+        assertThat(storedRow.keys.none { it.contains("payment_method", ignoreCase = true) }).isTrue()
+        assertThat(storedRow.values.filterNotNull().map(Any::toString))
+            .noneMatch { it.contains(paymentMethodId) }
+
+        val attemptId = requireNotNull(created.id)
+        assertThat(paymentAttemptRepository.updateResult(
+            attemptId,
+            PaymentAttemptStatus.SUCCESS,
+            "external-payment-${UUID.randomUUID()}"
+        )).isTrue()
+        val succeeded = requireNotNull(paymentAttemptRepository.findByIdempotencyKey(idempotencyKey))
+        assertThat(succeeded.status).isEqualTo(PaymentAttemptStatus.SUCCESS)
+        assertThat(succeeded.externalPaymentId).startsWith("external-payment-")
+
+        val timeoutKey = "payment-timeout-${UUID.randomUUID()}"
+        val timeout = paymentAttemptRepository.createPending(timeoutKey, fingerprint, request.amountJpy)
+        assertThat(paymentAttemptRepository.updateResult(
+            requireNotNull(timeout.id),
+            PaymentAttemptStatus.TIMEOUT,
+            null
+        )).isTrue()
+        assertThat(paymentAttemptRepository.findByIdempotencyKey(timeoutKey)?.status)
+            .isEqualTo(PaymentAttemptStatus.TIMEOUT)
+    }
+
+    @Test
+    @Transactional
+    fun `database enforces payment attempt idempotency and persisted status constraints`() {
+        val idempotencyKey = "payment-constraint-${UUID.randomUUID()}"
+        val fingerprint = "a".repeat(64)
+        paymentAttemptRepository.createPending(idempotencyKey, fingerprint, 10_000L)
+
+        org.junit.jupiter.api.assertThrows<DataIntegrityViolationException> {
+            paymentAttemptRepository.createPending(idempotencyKey, fingerprint, 10_000L)
+        }
+        org.junit.jupiter.api.assertThrows<DataIntegrityViolationException> {
+            jdbcTemplate.update(
+                """
+                INSERT INTO payment_attempts (
+                    idempotency_key, request_fingerprint, amount_jpy, status
+                ) VALUES (?, ?, ?, 'DUPLICATE')
+                """.trimIndent(),
+                "payment-duplicate-status-${UUID.randomUUID()}",
+                fingerprint,
+                10_000L
+            )
+        }
+    }
+
+    @Test
+    fun `database allows only one concurrent payment attempt per idempotency key`() {
+        val idempotencyKey = "payment-concurrent-${UUID.randomUUID()}"
+        val fingerprint = "b".repeat(64)
+        val ready = CountDownLatch(2)
+        val start = CountDownLatch(1)
+        val executor = Executors.newFixedThreadPool(2)
+
+        try {
+            val futures = List(2) {
+                executor.submit<Boolean> {
+                    ready.countDown()
+                    start.await()
+                    try {
+                        paymentAttemptRepository.createPending(idempotencyKey, fingerprint, 20_000L)
+                        true
+                    } catch (_: DataIntegrityViolationException) {
+                        false
+                    }
+                }
+            }
+            assertThat(ready.await(10, TimeUnit.SECONDS)).isTrue()
+            start.countDown()
+            val results = futures.map { it.get(10, TimeUnit.SECONDS) }
+
+            assertThat(results.count { it }).isEqualTo(1)
+            assertThat(results.count { !it }).isEqualTo(1)
+            assertThat(requireNotNull(jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM payment_attempts WHERE idempotency_key = ?",
+                Long::class.java,
+                idempotencyKey
+            ))).isEqualTo(1L)
+        } finally {
+            executor.shutdownNow()
+            jdbcTemplate.update("DELETE FROM payment_attempts WHERE idempotency_key = ?", idempotencyKey)
         }
     }
 
