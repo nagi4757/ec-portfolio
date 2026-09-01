@@ -85,6 +85,26 @@ output "db_password_parameter_arn" {
   value       = aws_ssm_parameter.db_master_password.arn
 }
 
+output "ecr_repository_name" {
+  description = "Name of the private Demo API image repository."
+  value       = aws_ecr_repository.demo_api.name
+}
+
+output "ecr_repository_url" {
+  description = "URL of the private Demo API image repository."
+  value       = aws_ecr_repository.demo_api.repository_url
+}
+
+output "jwt_secret_parameter_name" {
+  description = "Name of the SecureString that stores the Demo application JWT signing secret."
+  value       = aws_ssm_parameter.auth_jwt_secret.name
+}
+
+output "jwt_secret_parameter_arn" {
+  description = "ARN of the SecureString that stores the Demo application JWT signing secret."
+  value       = aws_ssm_parameter.auth_jwt_secret.arn
+}
+
 output "scheduler_group_name" {
   description = "Name of the EventBridge Scheduler group for Demo runtime lifecycle control."
   value       = aws_scheduler_schedule_group.runtime.name

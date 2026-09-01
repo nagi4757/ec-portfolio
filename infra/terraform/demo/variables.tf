@@ -71,3 +71,26 @@ variable "db_master_password_version" {
     error_message = "db_master_password_version must be a positive integer."
   }
 }
+
+variable "auth_jwt_secret" {
+  description = "Ephemeral JWT signing secret supplied only for an approved apply operation. Use at least 32 high-entropy characters and never commit or output this value."
+  type        = string
+  sensitive   = true
+  ephemeral   = true
+
+  validation {
+    condition     = length(var.auth_jwt_secret) >= 32
+    error_message = "auth_jwt_secret must contain at least 32 characters."
+  }
+}
+
+variable "auth_jwt_secret_version" {
+  description = "Non-secret rotation version for the JWT signing secret write-only argument. Increment only with a new secret."
+  type        = number
+  default     = 1
+
+  validation {
+    condition     = var.auth_jwt_secret_version >= 1 && floor(var.auth_jwt_secret_version) == var.auth_jwt_secret_version
+    error_message = "auth_jwt_secret_version must be a positive integer."
+  }
+}

@@ -2,9 +2,9 @@
 
 <!-- markdownlint-disable MD013 MD060 -->
 
-This root module defines the Tokyo network foundation, Phase 3A Demo runtime, and Phase 3B Scheduler/cost/failure guardrails. The remote backend and Phase 1 network are already applied to AWS; the EC2, Elastic IP, IAM runtime identity, RDS, DB subnet group, DB password parameter, four schedules, alert path, and monthly Budget added in Phases 3A/3B are code definitions only and have not been planned against or applied to AWS.
+This root module defines the Tokyo network foundation, Phase 3A Demo runtime, Phase 3B Scheduler/cost/failure guardrails, and the Phase 4A deployment foundation. Phases 3A/3B are applied to AWS and the latest credentialed Terraform convergence check reported `No changes`. All four schedules exist, the SNS subscription is confirmed, the Scheduler failure alarm is `OK`, alarm-to-SNS delivery is verified, and the tax-inclusive monthly Budget limit is `30.30 USD`. The first automatic EC2 and RDS stop invocations remain pending verification at 2026-09-01 17:00 and 17:10 JST respectively; do not describe automatic stop as verified before that evidence exists.
 
-Do not apply these resources when this change is merged. A credentialed combined Runtime/Scheduler/Budget plan, cost/security review, and explicit PO approval remain separate gates. This prevents an unscheduled or unreviewed EC2/RDS deployment.
+Phase 4A is code only and is not applied. Its private ECR repository, JWT SecureString, and EC2 runtime deployment policy require a separate credentialed plan, security/cost review, and explicit PO approval. Do not run that plan or apply as part of this change.
 
 Architecture sources:
 
@@ -63,7 +63,7 @@ The AWS provider applies these tags by default to supported resources:
 - `Environment = demo`
 - `Owner = var.owner`
 
-Each resource also receives an `ec-portfolio-demo-*` `Name` tag. `AutoStop = true` is set directly on the scheduled EC2 and RDS resources only. It is omitted from the VPC, subnets, Internet Gateway, route tables, routes, security groups, Elastic IP, DB subnet group, IAM resources, and SSM parameter because those resources cannot be safely stopped by the runtime schedule.
+Each resource also receives an `ec-portfolio-demo-*` `Name` tag. `AutoStop = true` is set directly on the scheduled EC2 and RDS resources only. It is omitted from the VPC, subnets, Internet Gateway, route tables, routes, security groups, Elastic IP, DB subnet group, IAM resources, ECR resources, and SSM parameters because those resources cannot be safely stopped by the runtime schedule.
 
 Removing `AutoStop` from provider default tags is expected to remove that tag from the existing foundation resources in place. Any future plan that proposes replacing the VPC, subnet, Internet Gateway, route, route table, or security group is a blocker and must not be applied. Never place credentials, secrets, personal data, or origin verification values in tags or variable files.
 
@@ -78,9 +78,11 @@ Removing `AutoStop` from provider default tags is expected to remove that tag fr
 
 AWS-provided AL2023 AMIs normally include SSM Agent, so Phase 3A does not add network-fetched installation user data. Verify the agent is installed and running during the future launch gate. The dedicated instance role trusts only `ec2.amazonaws.com`. Its custom inline policy permits managed-node registration and Session Manager message channels only.
 
-`AmazonSSMManagedInstanceCore` was reviewed but not attached: its current AWS-managed policy includes wildcard `ssm:GetParameter` and `ssm:GetParameters`, which would violate the explicit rule that this role cannot read the DB SecureString yet. The custom policy intentionally excludes Parameter Store, KMS, Run Command, ECR, SQS, SES, application CloudWatch publishing, and S3 permissions. Each capability must be added later with its own resource-scoped review.
+`AmazonSSMManagedInstanceCore` remains intentionally unattached because its wildcard Parameter Store reads are broader than this deployment contract. The existing custom Session Manager policy is unchanged. Phase 4A adds a separate inline runtime policy: only `ecr:GetAuthorizationToken` uses the API-required `Resource = "*"`; the three image-pull actions use the exact Demo API repository ARN, and `ssm:GetParameter` uses only the DB and JWT SecureString ARNs. It grants no ECR push, Parameter Store path/list, Run Command, KMS, S3, Secrets Manager, SQS, SES, or application CloudWatch permissions.
 
-Sources: [AWS public AMI parameters](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/finding-an-ami-parameter-store.html), [AL2023 SSM Agent installation](https://docs.aws.amazon.com/systems-manager/latest/userguide/agent-install-al2.html), [Systems Manager instance permissions](https://docs.aws.amazon.com/systems-manager/latest/userguide/setup-instance-permissions.html), [AmazonSSMManagedInstanceCore policy JSON](https://docs.aws.amazon.com/aws-managed-policy/latest/reference/AmazonSSMManagedInstanceCore.html), [Systems Manager security best practices](https://docs.aws.amazon.com/systems-manager/latest/userguide/security-best-practices.html)
+Both SecureStrings use the default AWS-managed `alias/aws/ssm` key. AWS documents that this key's `Decrypt` permission is available to all IAM principals in the account, so adding another broad `kms:Decrypt` statement would not narrow access and is omitted. Exact `ssm:GetParameter` resource permissions are the retrieval boundary for this role. A future customer-managed key would require a separately reviewed key policy and encryption-context-scoped decrypt permission.
+
+Sources: [AWS public AMI parameters](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/finding-an-ami-parameter-store.html), [AL2023 SSM Agent installation](https://docs.aws.amazon.com/systems-manager/latest/userguide/agent-install-al2.html), [Systems Manager instance permissions](https://docs.aws.amazon.com/systems-manager/latest/userguide/setup-instance-permissions.html), [AmazonSSMManagedInstanceCore policy JSON](https://docs.aws.amazon.com/aws-managed-policy/latest/reference/AmazonSSMManagedInstanceCore.html), [Parameter Store IAM and default-key permissions](https://docs.aws.amazon.com/systems-manager/latest/userguide/parameter-store-setting-up.html), [ECR IAM action/resource reference](https://docs.aws.amazon.com/service-authorization/latest/reference/list_ecr.html)
 
 ## RDS runtime contract
 
@@ -102,9 +104,21 @@ The input must contain 16-41 printable ASCII characters excluding space and all 
 
 The SecureString uses the AWS-managed `alias/aws/ssm` key. No secret value is accepted through a committed tfvars file, backend configuration, resource tag, output, or ordinary `password`/`value` argument. Supply it only through an approved ephemeral execution channel that does not log the value. Rotation requires a new secret and an incremented version in the same reviewed operation. If either RDS or SSM update fails, retain the same secret/version securely and retry to convergence rather than incrementing again.
 
-The EC2 role cannot read this parameter yet. A future deployment design may add `ssm:GetParameter` and required decrypt access scoped to this single parameter/key; wildcard Parameter Store or KMS decrypt permissions are prohibited.
+Phase 4A code grants the EC2 role `ssm:GetParameter` on this exact parameter and the JWT parameter only. Because Phase 4A is not applied, the live role is unchanged by this document state. `ssm:GetParameters`, `ssm:GetParametersByPath`, wildcard Parameter Store access, and explicit KMS permissions remain prohibited.
 
 Sources: [Terraform ephemeral variables](https://developer.hashicorp.com/terraform/language/block/variable#ephemeral), [Terraform write-only arguments](https://developer.hashicorp.com/terraform/language/manage-sensitive-data/write-only), [Terraform `aws_ssm_parameter`](https://registry.terraform.io/providers/hashicorp/aws/6.62.0/docs/resources/ssm_parameter)
+
+## Phase 4A deployment foundation
+
+The private `ec-portfolio-demo-api` repository uses immutable tags, AES256 encryption, basic scan-on-push, and `force_delete = false`. Deployment must select an immutable full Git SHA tag and record the resolved digest; it must never depend on `latest`. Enhanced Inspector scanning, cross-Region replication, signing, and deploy automation are outside this phase.
+
+The lifecycle policy retains the ten newest tagged images for rollback and only the newest untagged image. Image expiration is asynchronous and count-based: it limits repository growth but does not guarantee a byte-size ceiling. The existing cost model reserves 1 GB, or `$0.10/month` before tax, for ECR. At the stress assumptions, each additional GB is approximately `$0.10 × ¥165/USD × 1.10 = ¥18.15` invoice-equivalent. Same-Region transfer from ECR to EC2 is currently `$0.00/GB`; storage beyond 1 GB consumes the existing variable contingency and must be reviewed before it threatens the ¥5,000 hard ceiling. Free Tier and credits are not assumed.
+
+The Standard SecureString `/ec-portfolio/demo/app/auth-jwt-secret` follows the DB secret's write-only pattern: `auth_jwt_secret` is sensitive and ephemeral, `value_wo` prevents plaintext state storage, and `auth_jwt_secret_version` is the only persisted rotation input. A supplied secret must be at least 32 high-entropy characters. No secret value is committed, tagged, logged, or output; only the parameter name and ARN are non-secret outputs.
+
+The runtime policy is for host-side deployment only. The EC2 host may authenticate to ECR, pull from the exact repository, and fetch the exact DB/JWT parameters with decryption. It must write runtime material to a root-controlled ephemeral location, pass only application values to the container, and remove temporary files after use. The Spring container must not receive AWS credentials or access Instance Metadata/AWS SDK; the IMDS hop limit remains `1`. Phase 4A adds no `user_data`, Docker, Nginx, application install, image push, image pull, or service restart behavior.
+
+Sources: [ECR repository settings](https://registry.terraform.io/providers/hashicorp/aws/6.62.0/docs/resources/ecr_repository), [ECR lifecycle policy properties](https://docs.aws.amazon.com/AmazonECR/latest/userguide/lifecycle_policy_parameters.html), [ECR pricing](https://aws.amazon.com/ecr/pricing/), [Parameter Store SecureString encryption](https://docs.aws.amazon.com/systems-manager/latest/userguide/secure-string-parameter-kms-encryption.html)
 
 ## Runtime schedule contract
 
@@ -161,22 +175,24 @@ The added guardrails are therefore approximately $0.101/month without relying on
 
 Sources: [EventBridge Scheduler pricing](https://aws.amazon.com/eventbridge/pricing/), [CloudWatch pricing](https://aws.amazon.com/cloudwatch/pricing/), [SNS pricing](https://aws.amazon.com/sns/pricing/), [AWS Budgets pricing](https://aws.amazon.com/aws-cost-management/aws-budgets/pricing/)
 
-## First apply and post-apply gates
+## Phase 3 live verification and Phase 4A gates
 
-The first combined apply must occur on a weekday during the approved JST operating window. EC2 and RDS start in a running state at creation; the PO must choose a time that permits observing the same day's 17:00 EC2 stop and 17:10 RDS stop instead of leaving them running overnight or over a weekend.
+Phase 3A/3B resources are applied and Terraform has converged with `No changes`. The four schedules, confirmed SNS subscription, `OK` failure alarm, alarm-to-SNS path, and `30.30 USD` monthly Budget are verified. The first scheduled EC2 stop at 2026-09-01 17:00 JST and RDS stop at 17:10 JST are still pending and remain required operational evidence.
 
-After the future approved apply, verify all of the following before declaring the guardrails operational:
+Do not declare the schedule fully operational until the remaining invocation checks pass:
 
 - All four schedules are `ENABLED`, show `Asia/Tokyo`, have flexible windows off, and preview the expected next invocation.
 - The execution-role trust has the current account and exact schedule group ARN; its policy has only the exact EC2/RDS resource ARNs and four Start/Stop actions.
 - Universal target inputs use `InstanceIds` and `DbInstanceIdentifier` with the actual resource identifiers.
-- The SNS email subscription is `Confirmed`; confirmation is performed before relying on Scheduler or Budget delivery.
-- The group-level CloudWatch alarm is `OK`, and the Budget is active with all four SNS notifications connected.
+- The SNS email subscription remains `Confirmed` and the alarm-to-SNS path remains functional.
+- The group-level CloudWatch alarm remains `OK`, and the Budget remains active with all four SNS notifications connected.
 - The first same-day EC2 17:00 and RDS 17:10 stop invocations succeed and the actual resources reach `stopped`.
 - `AWS/Scheduler` `InvocationDroppedCount` remains zero for the runtime schedule group.
 - The next weekday start order is RDS 09:50 followed by EC2 10:00.
 
-An input-field typo can survive schedule creation, and an `OK` alarm before the first invocation does not prove the target works. Retain evidence of the first stop/start calls during the combined apply review. If a manual interview/demo start extends beyond the standard window, the same day's stop schedules remain the automatic stop policy; an extension after those times requires an explicit manual stop and cost review.
+An `OK` alarm before the first invocation does not prove that a target works. Retain evidence of the first stop/start calls during the operational review. If a manual interview/demo start extends beyond the standard window, the same day's stop schedules remain the automatic stop policy; an extension after those times requires an explicit manual stop and cost review.
+
+Phase 4A remains a separate code-only change. Its first credentialed plan must show no replacement of `aws_instance.demo`, no foundation destroy/replacement, no network/security/RDS/Scheduler/guardrail changes, and only the expected ECR, lifecycle policy, JWT parameter, and EC2 inline policy additions. Apply requires a separate Architecture/PO decision after that exact plan is reviewed.
 
 ## Local validation
 
@@ -189,17 +205,17 @@ terraform fmt -check
 terraform validate
 ```
 
-Static validation does not require a real DB password value. A future approved plan/apply must inject `db_master_password` through a non-logging ephemeral channel and must not write it to `terraform.tfvars`, a saved plan, shell history, or logs.
+Static validation does not require real DB or JWT secret values. A future approved plan/apply must inject `db_master_password` and `auth_jwt_secret` through a non-logging ephemeral channel and must not write them to `terraform.tfvars`, a saved plan, shell history, or logs.
 
 Static validation also does not require `alert_email`. A future approved plan/apply must supply it through an ignored runtime variable source or protected environment variable. Do not add a personal address to `terraform.tfvars.example` or commit it in any `.tfvars` file.
 
-`terraform plan` needs AWS credentials because it resolves AWS-managed data and the remote state. Do not force a credentialed plan as part of Phases 3A/3B static validation, and do not run `terraform apply` in this phase.
+`terraform plan` needs AWS credentials because it resolves AWS-managed data and the remote state. Do not run a credentialed plan or `terraform apply` as part of Phase 4A code validation.
 
 ## State and deployment gates
 
-The Demo partial S3 backend is initialized and remote state exists. The Phase 1 VPC, public app subnet, two private DB subnets, Internet Gateway, routing, and EC2/RDS security groups are already applied; the last approved live plan reported no changes before Phase 3A code was added.
+The Demo partial S3 backend is initialized and remote state exists. Phase 1 network and Phase 3 runtime/guardrail resources are applied; the latest approved live convergence check reported no changes. Phase 4A resources are not applied.
 
-Before any Runtime AWS apply, separately verify:
+Before any future state-changing AWS operation, separately verify:
 
 - Remote state location and bootstrap ownership
 - Encryption at rest and in transit
@@ -209,4 +225,4 @@ Before any Runtime AWS apply, separately verify:
 
 The independent [bootstrap root](../bootstrap/README.md) owns the S3 bucket and native lockfile strategy. `backend.hcl.example` documents the `demo/terraform.tfstate` runtime configuration without committing account-specific values.
 
-Before the future combined Runtime/Scheduler/Budget plan or apply, verify the target-account AZ availability, CloudFront managed prefix-list ID and quota weight, AWS identity/region, cost estimate, write-only credential path, alert email handling, and absence of unexpected paid resources or foundation replacements. Runtime apply remains prohibited until this code is merged and Architecture/PO approves that exact combined plan.
+Before a future Phase 4A plan or apply, verify AWS identity/Region, the ECR storage estimate, write-only DB/JWT secret paths, exact EC2 role policy resources, and the absence of unexpected paid resources, foundation changes, or EC2 replacement. Apply remains prohibited until this code is merged and Architecture/PO approves that exact plan.
