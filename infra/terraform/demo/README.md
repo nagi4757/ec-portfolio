@@ -2,7 +2,7 @@
 
 <!-- markdownlint-disable MD013 MD060 -->
 
-This root module defines the Tokyo network foundation, Phase 3A Demo runtime, Phase 3B Scheduler/cost/failure guardrails, and the Phase 4A deployment foundation. Phases 3A/3B are applied to AWS and the latest credentialed Terraform convergence check reported `No changes`. All four schedules exist, the SNS subscription is confirmed, the Scheduler failure alarm is `OK`, alarm-to-SNS delivery is verified, and the tax-inclusive monthly Budget limit is `30.30 USD`. The first automatic EC2 and RDS stop invocations remain pending verification at 2026-09-01 17:00 and 17:10 JST respectively; do not describe automatic stop as verified before that evidence exists.
+This root module defines the Tokyo network foundation, Phase 3A Demo runtime, Phase 3B Scheduler/cost/failure guardrails, and the Phase 4A deployment foundation. Phases 3A/3B are applied to AWS and the latest credentialed Terraform convergence check reported `No changes`. All four schedules exist, the SNS subscription is confirmed, the Scheduler failure alarm is `OK`, alarm-to-SNS delivery is verified, and the tax-inclusive monthly Budget limit is `30.30 USD`. On 2026-09-01, read-only verification after the scheduled invocations confirmed that EC2 was `stopped` after 17:00 JST and RDS was `stopped` after 17:10 JST. The 09:50 RDS and 10:00 EC2 automatic starts have not yet been observed and remain an operational follow-up.
 
 Phase 4A is code only and is not applied. Its private ECR repository, JWT SecureString, and EC2 runtime deployment policy require a separate credentialed plan, security/cost review, and explicit PO approval. Do not run that plan or apply as part of this change.
 
@@ -177,20 +177,20 @@ Sources: [EventBridge Scheduler pricing](https://aws.amazon.com/eventbridge/pric
 
 ## Phase 3 live verification and Phase 4A gates
 
-Phase 3A/3B resources are applied and Terraform has converged with `No changes`. The four schedules, confirmed SNS subscription, `OK` failure alarm, alarm-to-SNS path, and `30.30 USD` monthly Budget are verified. The first scheduled EC2 stop at 2026-09-01 17:00 JST and RDS stop at 17:10 JST are still pending and remain required operational evidence.
+Phase 3A/3B resources are applied and Terraform has converged with `No changes`. The four schedules, confirmed SNS subscription, `OK` failure alarm, alarm-to-SNS path, and `30.30 USD` monthly Budget are verified. On 2026-09-01, the first scheduled EC2 stop at 17:00 JST and RDS stop at 17:10 JST were verified by read-only status checks: EC2 reported `stopped` and RDS reported `stopped`.
 
-Do not declare the schedule fully operational until the remaining invocation checks pass:
+The stop path is verified. Keep the following contract checks and complete the unobserved automatic start verification as an operational follow-up:
 
 - All four schedules are `ENABLED`, show `Asia/Tokyo`, have flexible windows off, and preview the expected next invocation.
 - The execution-role trust has the current account and exact schedule group ARN; its policy has only the exact EC2/RDS resource ARNs and four Start/Stop actions.
 - Universal target inputs use `InstanceIds` and `DbInstanceIdentifier` with the actual resource identifiers.
 - The SNS email subscription remains `Confirmed` and the alarm-to-SNS path remains functional.
 - The group-level CloudWatch alarm remains `OK`, and the Budget remains active with all four SNS notifications connected.
-- The first same-day EC2 17:00 and RDS 17:10 stop invocations succeed and the actual resources reach `stopped`.
+- The verified EC2 17:00 and RDS 17:10 stop invocations continue to reach `stopped` without a final-failure alarm.
 - `AWS/Scheduler` `InvocationDroppedCount` remains zero for the runtime schedule group.
-- The next weekday start order is RDS 09:50 followed by EC2 10:00.
+- The next observed weekday start verifies RDS at 09:50 followed by EC2 at 10:00; neither automatic start is verified yet.
 
-An `OK` alarm before the first invocation does not prove that a target works. Retain evidence of the first stop/start calls during the operational review. If a manual interview/demo start extends beyond the standard window, the same day's stop schedules remain the automatic stop policy; an extension after those times requires an explicit manual stop and cost review.
+The verified stop states now prove the stop targets executed successfully; the existing `OK` alarm alone still does not prove the unobserved start targets. Retain evidence of the first stop and future start calls during the operational review. If a manual interview/demo start extends beyond the standard window, the same day's stop schedules remain the automatic stop policy; an extension after those times requires an explicit manual stop and cost review.
 
 Phase 4A remains a separate code-only change. Its first credentialed plan must show no replacement of `aws_instance.demo`, no foundation destroy/replacement, no network/security/RDS/Scheduler/guardrail changes, and only the expected ECR, lifecycle policy, JWT parameter, and EC2 inline policy additions. Apply requires a separate Architecture/PO decision after that exact plan is reviewed.
 
