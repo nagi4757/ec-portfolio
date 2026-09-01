@@ -33,7 +33,7 @@ Sources: [Terraform install](https://developer.hashicorp.com/terraform/install),
 
 The two DB AZ inputs must be distinct. The example uses `ap-northeast-1a` and `ap-northeast-1c`; confirm that the selected AZ names are available to the target account before plan/apply. Stable object keys avoid selecting AZs by a changing API list index.
 
-Automatic public IPv4 assignment is disabled. A future EC2 phase must explicitly attach the architecture-approved Elastic IP. The private DB route table has no Internet Gateway, NAT Gateway, or VPC endpoint route.
+Automatic public IPv4 assignment is disabled by `aws_subnet.public_app.map_public_ip_on_launch = false`, which is the source of truth. EC2 follows that subnet policy, while the explicit `aws_eip.ec2_origin` and `aws_eip_association.ec2_origin` resources provide the stable public origin address. The private DB route table has no Internet Gateway, NAT Gateway, or VPC endpoint route.
 
 ## Security-group contract
 
@@ -71,7 +71,7 @@ Removing `AutoStop` from provider default tags is expected to remove that tag fr
 
 - The host is x86_64 `t3a.medium` with Standard CPU credits. Do not reduce it to 2 GiB or switch to ARM64 before the architecture's memory/load and multi-platform image gates pass.
 - The AMI is discovered from AWS's public SSM parameter `/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64`. It resolves to the current AWS-maintained Amazon Linux 2023 x86_64 AMI in Tokyo. A newer parameter value can cause a future replacement plan; review that replacement instead of hiding it with `ignore_changes`.
-- The instance uses the existing public app subnet with automatic public IP assignment disabled and only the existing EC2 origin security group. A separately associated Elastic IP provides the stable future CloudFront origin address and continues to incur public IPv4 cost while EC2 is stopped.
+- The instance follows the existing public app subnet's no-auto-public-IP policy and uses only the existing EC2 origin security group. A separately associated Elastic IP provides the stable future CloudFront origin address and continues to incur public IPv4 cost while EC2 is stopped. Do not duplicate the subnet policy with instance-level `associate_public_ip_address = false`: during partial-apply recovery, provider refresh after the explicit EIP association conflicted with the duplicate setting and proposed perpetual instance replacement.
 - The encrypted root volume is 20 GiB gp3 with default IOPS/throughput and is deleted on instance termination. No additional data volume is defined.
 - IMDSv2 tokens are required, the metadata endpoint is enabled, metadata tags are disabled, and the hop limit is `1`. Phase 3A containers do not need instance metadata. A future container AWS SDK requirement must justify a separately reviewed hop-limit change to `2`.
 - No EC2 key pair, SSH ingress, runtime software, Docker, Nginx, Valkey, application container, origin TLS, origin secret, or ECR pull bootstrap is defined.

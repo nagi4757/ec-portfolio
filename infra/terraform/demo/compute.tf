@@ -3,12 +3,11 @@ data "aws_ssm_parameter" "al2023_x86_64_ami" {
 }
 
 resource "aws_instance" "demo" {
-  ami                         = data.aws_ssm_parameter.al2023_x86_64_ami.value
-  instance_type               = "t3a.medium"
-  subnet_id                   = aws_subnet.public_app.id
-  associate_public_ip_address = false
-  vpc_security_group_ids      = [aws_security_group.ec2_origin.id]
-  iam_instance_profile        = aws_iam_instance_profile.ec2.name
+  ami                    = data.aws_ssm_parameter.al2023_x86_64_ami.value
+  instance_type          = "t3a.medium"
+  subnet_id              = aws_subnet.public_app.id
+  vpc_security_group_ids = [aws_security_group.ec2_origin.id]
+  iam_instance_profile   = aws_iam_instance_profile.ec2.name
 
   credit_specification {
     cpu_credits = "standard"
