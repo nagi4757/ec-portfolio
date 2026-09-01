@@ -112,12 +112,12 @@ All four schedules belong to `ec-portfolio-demo-runtime`, use the `Asia/Tokyo` t
 
 | Operation | Scheduler expression | Universal target | Input shape |
 |---|---|---|---|
-| RDS start | `cron(50 9 ? * MON-FRI *)` | `arn:aws:scheduler:::aws-sdk:rds:startDBInstance` | `DBInstanceIdentifier = aws_db_instance.demo.identifier` |
+| RDS start | `cron(50 9 ? * MON-FRI *)` | `arn:aws:scheduler:::aws-sdk:rds:startDBInstance` | `DbInstanceIdentifier = aws_db_instance.demo.identifier` |
 | EC2 start | `cron(0 10 ? * MON-FRI *)` | `arn:aws:scheduler:::aws-sdk:ec2:startInstances` | `InstanceIds = [aws_instance.demo.id]` |
 | EC2 stop | `cron(0 17 ? * MON-FRI *)` | `arn:aws:scheduler:::aws-sdk:ec2:stopInstances` | `InstanceIds = [aws_instance.demo.id]` |
-| RDS stop | `cron(10 17 ? * MON-FRI *)` | `arn:aws:scheduler:::aws-sdk:rds:stopDBInstance` | `DBInstanceIdentifier = aws_db_instance.demo.identifier` |
+| RDS stop | `cron(10 17 ? * MON-FRI *)` | `arn:aws:scheduler:::aws-sdk:rds:stopDBInstance` | `DbInstanceIdentifier = aws_db_instance.demo.identifier` |
 
-The target inputs are generated with `jsonencode`. EventBridge Scheduler does not validate a universal target's input against the downstream AWS API model when the schedule is created, so exact field casing and an actual invocation are mandatory post-apply checks. Lambda is not used.
+The target inputs are generated with `jsonencode`. RDS Query/API documentation names the request field `DBInstanceIdentifier`, while EventBridge Scheduler Universal AWS SDK target validation requires the SDK request JSON casing `DbInstanceIdentifier`. Scheduler targets therefore use `DbInstanceIdentifier`; exact request-shape casing and an actual invocation remain mandatory post-apply checks. Lambda is not used.
 
 The dedicated execution role trusts only `scheduler.amazonaws.com`. `aws:SourceAccount` resolves from the current caller identity and `aws:SourceArn` equals the exact schedule group ARN, as required by the Scheduler confused-deputy contract. Its inline policy permits only EC2 Start/Stop on `aws_instance.demo.arn` and RDS Start/Stop on `aws_db_instance.demo.arn`; it has no terminate, delete, Lambda, SSM, S3, Organizations, or wildcard resource permission.
 
@@ -169,7 +169,7 @@ After the future approved apply, verify all of the following before declaring th
 
 - All four schedules are `ENABLED`, show `Asia/Tokyo`, have flexible windows off, and preview the expected next invocation.
 - The execution-role trust has the current account and exact schedule group ARN; its policy has only the exact EC2/RDS resource ARNs and four Start/Stop actions.
-- Universal target inputs use `InstanceIds` and `DBInstanceIdentifier` with the actual resource identifiers.
+- Universal target inputs use `InstanceIds` and `DbInstanceIdentifier` with the actual resource identifiers.
 - The SNS email subscription is `Confirmed`; confirmation is performed before relying on Scheduler or Budget delivery.
 - The group-level CloudWatch alarm is `OK`, and the Budget is active with all four SNS notifications connected.
 - The first same-day EC2 17:00 and RDS 17:10 stop invocations succeed and the actual resources reach `stopped`.

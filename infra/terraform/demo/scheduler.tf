@@ -8,7 +8,7 @@ locals {
       schedule_expression = "cron(50 9 ? * MON-FRI *)"
       target_arn          = "arn:aws:scheduler:::aws-sdk:rds:startDBInstance"
       input = jsonencode({
-        DBInstanceIdentifier = aws_db_instance.demo.identifier
+        DbInstanceIdentifier = aws_db_instance.demo.identifier
       })
     }
     ec2_start = {
@@ -32,7 +32,7 @@ locals {
       schedule_expression = "cron(10 17 ? * MON-FRI *)"
       target_arn          = "arn:aws:scheduler:::aws-sdk:rds:stopDBInstance"
       input = jsonencode({
-        DBInstanceIdentifier = aws_db_instance.demo.identifier
+        DbInstanceIdentifier = aws_db_instance.demo.identifier
       })
     }
   }
