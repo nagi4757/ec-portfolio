@@ -2,9 +2,11 @@
 
 <!-- markdownlint-disable MD013 MD060 -->
 
-This root module defines the Tokyo network foundation, Phase 3A Demo runtime, Phase 3B Scheduler/cost/failure guardrails, the Phase 4A deployment foundation, and the Phase 4C-2A origin foundation. Phases 3A/3B are applied to AWS and the latest credentialed Terraform convergence check reported `No changes`. All four schedules exist, the SNS subscription is confirmed, the Scheduler failure alarm is `OK`, alarm-to-SNS delivery is verified, and the tax-inclusive monthly Budget limit is `30.30 USD`. On 2026-09-01, read-only verification after the scheduled invocations confirmed that EC2 was `stopped` after 17:00 JST and RDS was `stopped` after 17:10 JST. The 09:50 RDS and 10:00 EC2 automatic starts have not yet been observed and remain an operational follow-up.
+This root module defines the Tokyo network foundation, Phase 3A Demo runtime, Phase 3B Scheduler/cost/failure guardrails, the Phase 4A deployment foundation, and the Phase 4C-2A origin foundation. Phases 1, 3A/3B, and 4A are applied to AWS, and the latest credentialed Terraform convergence check reported `No changes`. Phase 4A's ECR repository, JWT SecureString, and EC2 runtime deployment IAM policy are applied. All four schedules exist, the SNS subscription is confirmed, the Scheduler failure alarm is `OK`, alarm-to-SNS delivery is verified, and the tax-inclusive monthly Budget limit is `30.30 USD`.
 
-Phases 4A and 4C-2A are code only and are not applied. Their ECR/SSM/DNS/IAM resources require a separate credentialed plan, security/cost review, and explicit PO approval. Do not run that plan or apply as part of this change. Phase 4C-2A does not create CloudFront, issue a certificate, or configure Nginx.
+The Scheduler stop path was verified on 2026-09-01: EC2 was `stopped` after its 17:00 JST invocation and RDS was `stopped` after 17:10. The start path was verified on 2026-09-02: RDS was `available` after 09:50 and EC2 was `running` after 10:00.
+
+Phase 4C-2A is code only and is not applied. Its DNS/SSM/IAM resources require a separate credentialed plan, security/cost review, and explicit PO approval. Do not run that plan or apply as part of this change. Phase 4C-2A does not create CloudFront, issue a certificate, or configure Nginx.
 
 Architecture sources:
 
@@ -104,7 +106,7 @@ The input must contain 16-41 printable ASCII characters excluding space and all 
 
 The SecureString uses the AWS-managed `alias/aws/ssm` key. No secret value is accepted through a committed tfvars file, backend configuration, resource tag, output, or ordinary `password`/`value` argument. Supply it only through an approved ephemeral execution channel that does not log the value. Rotation requires a new secret and an incremented version in the same reviewed operation. If either RDS or SSM update fails, retain the same secret/version securely and retry to convergence rather than incrementing again.
 
-Phase 4A code grants the EC2 role `ssm:GetParameter` on this exact parameter and the JWT parameter only. Because Phase 4A is not applied, the live role is unchanged by this document state. `ssm:GetParameters`, `ssm:GetParametersByPath`, wildcard Parameter Store access, and explicit KMS permissions remain prohibited.
+The applied Phase 4A EC2 policy grants `ssm:GetParameter` on this exact parameter and the JWT parameter only. `ssm:GetParameters`, `ssm:GetParametersByPath`, wildcard Parameter Store access, and explicit KMS permissions remain prohibited.
 
 Sources: [Terraform ephemeral variables](https://developer.hashicorp.com/terraform/language/block/variable#ephemeral), [Terraform write-only arguments](https://developer.hashicorp.com/terraform/language/manage-sensitive-data/write-only), [Terraform `aws_ssm_parameter`](https://registry.terraform.io/providers/hashicorp/aws/6.62.0/docs/resources/ssm_parameter)
 
@@ -126,7 +128,7 @@ The approved origin hostname is `origin-demo.yoonec.dev` in the existing public 
 
 One TTL-60 `A` record maps the origin hostname to the existing `aws_eip.ec2_origin.public_ip`. No `AAAA` record, additional EIP, EC2 replacement, subnet change, or security-group change is defined. This prepares public DNS for the existing CloudFront-prefix-list-restricted origin; it does not make the EIP directly reachable from arbitrary Internet sources.
 
-The Standard SecureString `/ec-portfolio/demo/origin/verify-token` reserves the future `X-Origin-Verify` defense-in-depth token. `origin_verify_token` is sensitive, accepts exactly 32-128 URL-safe `[A-Za-z0-9_-]` characters, and has no default. It is intentionally non-ephemeral because a future CloudFront custom-origin header will need the same stable value and Terraform-managed CloudFront configuration may persist that value in state. The current SSM resource uses `value_wo`, so this phase does not persist the parameter plaintext as an SSM resource attribute; only `origin_verify_token_version` is persisted for rotation. No output exposes the value. Treat it as a defense-in-depth origin token layered on the managed prefix-list security-group restriction, not as a DB/JWT-equivalent credential or an authentication boundary.
+The Standard SecureString `/ec-portfolio/demo/origin/verify-token` reserves the future `X-Origin-Verify` defense-in-depth token. `origin_verify_token` is sensitive and ephemeral, accepts exactly 32-128 URL-safe `[A-Za-z0-9_-]` characters, and has no default. Together with the SSM resource's `value_wo`, this prevents the Phase 4C-2A root input and parameter plaintext from being persisted in saved plan or state artifacts; only `origin_verify_token_version` is persisted for rotation. No output exposes the value. Treat it as a defense-in-depth origin token layered on the managed prefix-list security-group restriction, not as a DB/JWT-equivalent credential or an authentication boundary. A future Phase 4C-2B CloudFront header binding and any resulting state exposure require a separate Architecture gate.
 
 Two separate EC2 inline policies preserve reviewable least-privilege boundaries:
 
@@ -196,9 +198,16 @@ Sources: [EventBridge Scheduler pricing](https://aws.amazon.com/eventbridge/pric
 
 ## Phase 3 live verification and code-only gates
 
-Phase 3A/3B resources are applied and Terraform has converged with `No changes`. The four schedules, confirmed SNS subscription, `OK` failure alarm, alarm-to-SNS path, and `30.30 USD` monthly Budget are verified. On 2026-09-01, the first scheduled EC2 stop at 17:00 JST and RDS stop at 17:10 JST were verified by read-only status checks: EC2 reported `stopped` and RDS reported `stopped`.
+Phases 1, 3A/3B, and 4A are applied and Terraform has converged with `No changes`. Phase 4A includes the ECR repository, JWT SecureString, and EC2 runtime deployment IAM policy. The four schedules, confirmed SNS subscription, `OK` failure alarm, alarm-to-SNS path, and `30.30 USD` monthly Budget are verified.
 
-The stop path is verified. Keep the following contract checks and complete the unobserved automatic start verification as an operational follow-up:
+The first complete weekday stop/start cycle is verified by read-only status checks:
+
+- 2026-09-01 17:00 JST: EC2 reported `stopped` after its scheduled stop.
+- 2026-09-01 17:10 JST: RDS reported `stopped` after its scheduled stop.
+- 2026-09-02 09:50 JST: RDS reported `available` after its scheduled start.
+- 2026-09-02 10:00 JST: EC2 reported `running` after its scheduled start.
+
+Keep the following contract checks as operational regression guards:
 
 - All four schedules are `ENABLED`, show `Asia/Tokyo`, have flexible windows off, and preview the expected next invocation.
 - The execution-role trust has the current account and exact schedule group ARN; its policy has only the exact EC2/RDS resource ARNs and four Start/Stop actions.
@@ -207,11 +216,11 @@ The stop path is verified. Keep the following contract checks and complete the u
 - The group-level CloudWatch alarm remains `OK`, and the Budget remains active with all four SNS notifications connected.
 - The verified EC2 17:00 and RDS 17:10 stop invocations continue to reach `stopped` without a final-failure alarm.
 - `AWS/Scheduler` `InvocationDroppedCount` remains zero for the runtime schedule group.
-- The next observed weekday start verifies RDS at 09:50 followed by EC2 at 10:00; neither automatic start is verified yet.
+- The RDS 09:50 start completes before the EC2 10:00 start, and both resources reach their verified ready states.
 
-The verified stop states now prove the stop targets executed successfully; the existing `OK` alarm alone still does not prove the unobserved start targets. Retain evidence of the first stop and future start calls during the operational review. If a manual interview/demo start extends beyond the standard window, the same day's stop schedules remain the automatic stop policy; an extension after those times requires an explicit manual stop and cost review.
+The observed resource states provide invocation evidence in addition to the `OK` failure alarm. Retain the stop/start evidence during operational review. If a manual interview/demo start extends beyond the standard window, the same day's stop schedules remain the automatic stop policy; an extension after those times requires an explicit manual stop and cost review.
 
-Phase 4A remains a separate code-only change. Its first credentialed plan must show no replacement of `aws_instance.demo`, no foundation destroy/replacement, no network/security/RDS/Scheduler/guardrail changes, and only the expected ECR, lifecycle policy, JWT parameter, and EC2 inline policy additions. Apply requires a separate Architecture/PO decision after that exact plan is reviewed.
+The future Phase 4C-2A credentialed plan must report exactly `4 add / 0 change / 0 destroy` for this phase: one Route 53 `A` record, one SSM SecureString, and two EC2 inline IAM policies. Phase 4A must have zero create/change/replacement delta. Any Phase 4A delta, existing-resource change, replacement, or destroy is a blocker: stop and investigate backend/state selection, AWS identity, and live drift instead of applying.
 
 ## Local validation
 
@@ -224,17 +233,17 @@ terraform fmt -check
 terraform validate
 ```
 
-Static validation does not require real DB, JWT, or origin verification values. A future approved plan/apply must inject `db_master_password`, `auth_jwt_secret`, and `origin_verify_token` through a non-logging runtime channel and must not write them to `terraform.tfvars`, shell history, or logs. The origin token is non-ephemeral by design; a saved future CloudFront plan/state may contain it and therefore requires the protected artifact and backend handling described below.
+Static validation does not require real DB, JWT, or origin verification values. A future approved plan/apply must inject `db_master_password`, `auth_jwt_secret`, and `origin_verify_token` through a non-logging ephemeral channel and must not write them to `terraform.tfvars`, a saved plan, shell history, or logs. All three inputs are ephemeral in Phase 4C-2A. Any future CloudFront header binding requires a separate Architecture decision before changing that contract.
 
 Static validation also does not require `alert_email`. A future approved plan/apply must supply it through an ignored runtime variable source or protected environment variable. Do not add a personal address to `terraform.tfvars.example` or commit it in any `.tfvars` file.
 
 The existing public hosted zone ID must likewise be supplied only at runtime as `route53_public_hosted_zone_id`. Do not add the real ID to `terraform.tfvars.example`, documentation, outputs, logs, or the PR description.
 
-`terraform plan` needs AWS credentials because it resolves AWS-managed data and the remote state. Do not run a credentialed plan or `terraform apply` as part of Phase 4A/4C-2A code validation.
+`terraform plan` needs AWS credentials because it resolves AWS-managed data and the remote state. Do not run a credentialed plan or `terraform apply` as part of Phase 4C-2A code validation.
 
 ## State and deployment gates
 
-The Demo partial S3 backend is initialized and remote state exists. Phase 1 network and Phase 3 runtime/guardrail resources are applied; the latest approved live convergence check reported no changes. Phase 4A and Phase 4C-2A resources are not applied.
+The Demo partial S3 backend is initialized and remote state exists. Phase 1 network, Phase 3 runtime/guardrail resources, and Phase 4A deployment-foundation resources are applied; the latest approved credentialed convergence check reported `No changes`. Phase 4C-2A resources are not applied.
 
 Before any future state-changing AWS operation, separately verify:
 
@@ -246,6 +255,4 @@ Before any future state-changing AWS operation, separately verify:
 
 The independent [bootstrap root](../bootstrap/README.md) owns the S3 bucket and native lockfile strategy. `backend.hcl.example` documents the `demo/terraform.tfstate` runtime configuration without committing account-specific values.
 
-Before a future Phase 4A plan or apply, verify AWS identity/Region, the ECR storage estimate, write-only DB/JWT secret paths, exact EC2 role policy resources, and the absence of unexpected paid resources, foundation changes, or EC2 replacement. Apply remains prohibited until this code is merged and Architecture/PO approves that exact plan.
-
-Before a future Phase 4C-2A plan or apply, verify the exact public `yoonec.dev` hosted zone identity, the single `A` record to the existing EIP, absence of `AAAA`, write-only origin-token path, exact SSM/Route 53 IAM scopes, and no CloudFront, certificate, Nginx, compute, network, security, database, schedule, alert, or Budget change. The plan must show no replacement or destroy. Apply remains prohibited until this code is merged and Architecture/PO approves that exact plan.
+Before a future Phase 4C-2A plan or apply, verify the exact public `yoonec.dev` hosted zone identity, the single `A` record to the existing EIP, absence of `AAAA`, ephemeral/write-only origin-token path, exact SSM/Route 53 IAM scopes, and no CloudFront, certificate, Nginx, compute, network, security, database, schedule, alert, or Budget change. The expected delta is exactly `4 add / 0 change / 0 destroy`. Phase 4A resources must have zero delta; otherwise stop and investigate backend/state selection, AWS identity, and drift. Apply remains prohibited until this code is merged and Architecture/PO approves that exact plan.

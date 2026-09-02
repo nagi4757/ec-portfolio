@@ -109,6 +109,7 @@ variable "origin_verify_token" {
   description = "High-entropy defense-in-depth token for the future CloudFront X-Origin-Verify header. Supply 32-128 URL-safe characters at runtime."
   type        = string
   sensitive   = true
+  ephemeral   = true
 
   validation {
     condition     = can(regex("^[A-Za-z0-9_-]{32,128}$", var.origin_verify_token))
