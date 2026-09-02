@@ -22,6 +22,7 @@ db_password_value=""
 jwt_secret_value=""
 ecr_registry=""
 ecr_region=""
+ecr_login_succeeded="false"
 replacement_started="false"
 rollback_pending="false"
 
@@ -67,6 +68,11 @@ cleanup() {
 
     if [[ -n "$runtime_directory" && "$runtime_directory" == /run/ec-portfolio-demo-deploy.* ]]; then
         rm -rf -- "$runtime_directory"
+    fi
+
+    if [[ "$ecr_login_succeeded" == "true" && -n "$ecr_registry" ]] &&
+        command -v docker >/dev/null 2>&1; then
+        docker logout "$ecr_registry" >/dev/null 2>&1 || true
     fi
 
     unset db_password_value jwt_secret_value
@@ -154,6 +160,7 @@ login_and_pull_api_image() {
         docker login --username AWS --password-stdin "$ecr_registry" >/dev/null; then
         fail "ECR login failed."
     fi
+    ecr_login_succeeded="true"
 
     log "Pulling the immutable API image."
     docker pull "$IMAGE_REF" >/dev/null
