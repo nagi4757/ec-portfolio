@@ -1,0 +1,14 @@
+[Unit]
+Description=Renew the EC Portfolio Demo origin certificate
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+UMask=0077
+ExecStart=/usr/local/sbin/ec-portfolio-renew-origin-cert
+TimeoutStartSec=20min
+PrivateTmp=true
+NoNewPrivileges=true
