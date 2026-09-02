@@ -269,7 +269,7 @@ Demo는 SSM Parameter Store Standard tier를 기본으로 한다.
 
 Parameter Store는 저비용·저빈도 demo configuration에 충분하지만 rotation engine, cross-account sharing, managed RDS rotation은 없다. Production에서 자동 rotation이나 별도 secret lifecycle이 필요하면 Secrets Manager로 승격한다.
 
-Phase 4C-2A는 `origin_verify_token`을 sensitive이지만 non-ephemeral runtime input으로 받고 SSM parameter에는 `value_wo`로 기록한다. 따라서 현재 Parameter resource attribute에는 plaintext를 보존하지 않는다. 후속 Phase 4C-2B가 같은 값을 CloudFront custom origin header argument에 사용하면 token이 Terraform plan/state에 존재할 수 있다는 risk는 수용한다. Saved plan과 remote state 접근을 제한하고 token을 output/log/tag에 노출하지 않으며 version을 올린 SSM/CloudFront 동시 변경으로 rotation한다. 이 token은 managed prefix-list SG에 더하는 defense in depth이고 DB/JWT credential이나 application authentication과 같은 보안 등급으로 간주하지 않는다. GitHub Deploy Role이 bootstrap된 application secret을 읽는 방식은 사용하지 않는다.
+Phase 4C-2A는 `origin_verify_token`을 sensitive·ephemeral runtime input으로 받고 SSM parameter에는 `value_wo`로 기록한다. 따라서 현재 root input과 Parameter plaintext는 saved plan/state artifact에 보존되지 않으며 token을 output/log/tag에도 노출하지 않는다. 후속 Phase 4C-2B가 같은 값을 CloudFront custom origin header argument에 연결할 때는 Terraform state exposure와 rotation 절차를 별도 Architecture gate에서 다시 결정한다. 이 token은 managed prefix-list SG에 더하는 defense in depth이고 DB/JWT credential이나 application authentication과 같은 보안 등급으로 간주하지 않는다. GitHub Deploy Role이 bootstrap된 application secret을 읽는 방식은 사용하지 않는다.
 
 Sources:
 
