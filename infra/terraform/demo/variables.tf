@@ -94,3 +94,35 @@ variable "auth_jwt_secret_version" {
     error_message = "auth_jwt_secret_version must be a positive integer."
   }
 }
+
+variable "route53_public_hosted_zone_id" {
+  description = "ID of the existing public Route 53 hosted zone for yoonec.dev. Supply this at runtime and never hardcode an account-specific value."
+  type        = string
+
+  validation {
+    condition     = can(regex("^Z[A-Z0-9]+$", var.route53_public_hosted_zone_id))
+    error_message = "route53_public_hosted_zone_id must be a non-blank Route 53 hosted zone ID beginning with Z."
+  }
+}
+
+variable "origin_verify_token" {
+  description = "High-entropy defense-in-depth token for the future CloudFront X-Origin-Verify header. Supply 32-128 URL-safe characters at runtime."
+  type        = string
+  sensitive   = true
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9_-]{32,128}$", var.origin_verify_token))
+    error_message = "origin_verify_token must contain 32-128 URL-safe characters using only letters, digits, underscore, and hyphen."
+  }
+}
+
+variable "origin_verify_token_version" {
+  description = "Non-secret rotation version for the origin verification token write-only argument. Increment only with a new token."
+  type        = number
+  default     = 1
+
+  validation {
+    condition     = var.origin_verify_token_version >= 1 && floor(var.origin_verify_token_version) == var.origin_verify_token_version
+    error_message = "origin_verify_token_version must be a positive integer."
+  }
+}

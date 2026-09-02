@@ -2,9 +2,9 @@
 
 <!-- markdownlint-disable MD013 MD060 -->
 
-This root module defines the Tokyo network foundation, Phase 3A Demo runtime, Phase 3B Scheduler/cost/failure guardrails, and the Phase 4A deployment foundation. Phases 3A/3B are applied to AWS and the latest credentialed Terraform convergence check reported `No changes`. All four schedules exist, the SNS subscription is confirmed, the Scheduler failure alarm is `OK`, alarm-to-SNS delivery is verified, and the tax-inclusive monthly Budget limit is `30.30 USD`. On 2026-09-01, read-only verification after the scheduled invocations confirmed that EC2 was `stopped` after 17:00 JST and RDS was `stopped` after 17:10 JST. The 09:50 RDS and 10:00 EC2 automatic starts have not yet been observed and remain an operational follow-up.
+This root module defines the Tokyo network foundation, Phase 3A Demo runtime, Phase 3B Scheduler/cost/failure guardrails, the Phase 4A deployment foundation, and the Phase 4C-2A origin foundation. Phases 3A/3B are applied to AWS and the latest credentialed Terraform convergence check reported `No changes`. All four schedules exist, the SNS subscription is confirmed, the Scheduler failure alarm is `OK`, alarm-to-SNS delivery is verified, and the tax-inclusive monthly Budget limit is `30.30 USD`. On 2026-09-01, read-only verification after the scheduled invocations confirmed that EC2 was `stopped` after 17:00 JST and RDS was `stopped` after 17:10 JST. The 09:50 RDS and 10:00 EC2 automatic starts have not yet been observed and remain an operational follow-up.
 
-Phase 4A is code only and is not applied. Its private ECR repository, JWT SecureString, and EC2 runtime deployment policy require a separate credentialed plan, security/cost review, and explicit PO approval. Do not run that plan or apply as part of this change.
+Phases 4A and 4C-2A are code only and are not applied. Their ECR/SSM/DNS/IAM resources require a separate credentialed plan, security/cost review, and explicit PO approval. Do not run that plan or apply as part of this change. Phase 4C-2A does not create CloudFront, issue a certificate, or configure Nginx.
 
 Architecture sources:
 
@@ -74,7 +74,7 @@ Removing `AutoStop` from provider default tags is expected to remove that tag fr
 - The instance follows the existing public app subnet's no-auto-public-IP policy and uses only the existing EC2 origin security group. A separately associated Elastic IP provides the stable future CloudFront origin address and continues to incur public IPv4 cost while EC2 is stopped. Do not duplicate the subnet policy with instance-level `associate_public_ip_address = false`: during partial-apply recovery, provider refresh after the explicit EIP association conflicted with the duplicate setting and proposed perpetual instance replacement.
 - The encrypted root volume is 20 GiB gp3 with default IOPS/throughput and is deleted on instance termination. No additional data volume is defined.
 - IMDSv2 tokens are required, the metadata endpoint is enabled, metadata tags are disabled, and the hop limit is `1`. Phase 3A containers do not need instance metadata. A future container AWS SDK requirement must justify a separately reviewed hop-limit change to `2`.
-- No EC2 key pair, SSH ingress, runtime software, Docker, Nginx, Valkey, application container, origin TLS, origin secret, or ECR pull bootstrap is defined.
+- No EC2 key pair, SSH ingress, runtime software, Docker, Nginx, Valkey, application container, origin TLS, origin-header enforcement, or ECR pull bootstrap is defined. Phase 4C-2A reserves the origin token in SSM and its exact read permission only; it does not consume the token on the host.
 
 AWS-provided AL2023 AMIs normally include SSM Agent, so Phase 3A does not add network-fetched installation user data. Verify the agent is installed and running during the future launch gate. The dedicated instance role trusts only `ec2.amazonaws.com`. Its custom inline policy permits managed-node registration and Session Manager message channels only.
 
@@ -119,6 +119,25 @@ The Standard SecureString `/ec-portfolio/demo/app/auth-jwt-secret` follows the D
 The runtime policy is for host-side deployment only. The EC2 host may authenticate to ECR, pull from the exact repository, and fetch the exact DB/JWT parameters with decryption. It must write runtime material to a root-controlled ephemeral location, pass only application values to the container, and remove temporary files after use. The Spring container must not receive AWS credentials or access Instance Metadata/AWS SDK; the IMDS hop limit remains `1`. Phase 4A adds no `user_data`, Docker, Nginx, application install, image push, image pull, or service restart behavior.
 
 Sources: [ECR repository settings](https://registry.terraform.io/providers/hashicorp/aws/6.62.0/docs/resources/ecr_repository), [ECR lifecycle policy properties](https://docs.aws.amazon.com/AmazonECR/latest/userguide/lifecycle_policy_parameters.html), [ECR pricing](https://aws.amazon.com/ecr/pricing/), [Parameter Store SecureString encryption](https://docs.aws.amazon.com/systems-manager/latest/userguide/secure-string-parameter-kms-encryption.html)
+
+## Phase 4C-2A origin foundation
+
+The approved origin hostname is `origin-demo.yoonec.dev` in the existing public Route 53 zone for `yoonec.dev`. Terraform discovers that zone by exact DNS name with `private_zone = false`; a data-source postcondition then requires its ID to equal the runtime-only `route53_public_hosted_zone_id`. A missing zone, duplicate matching public zone, private-only zone, or wrong supplied ID fails the plan rather than selecting a different zone. The hosted zone ID is not hardcoded or output.
+
+One TTL-60 `A` record maps the origin hostname to the existing `aws_eip.ec2_origin.public_ip`. No `AAAA` record, additional EIP, EC2 replacement, subnet change, or security-group change is defined. This prepares public DNS for the existing CloudFront-prefix-list-restricted origin; it does not make the EIP directly reachable from arbitrary Internet sources.
+
+The Standard SecureString `/ec-portfolio/demo/origin/verify-token` reserves the future `X-Origin-Verify` defense-in-depth token. `origin_verify_token` is sensitive, accepts exactly 32-128 URL-safe `[A-Za-z0-9_-]` characters, and has no default. It is intentionally non-ephemeral because a future CloudFront custom-origin header will need the same stable value and Terraform-managed CloudFront configuration may persist that value in state. The current SSM resource uses `value_wo`, so this phase does not persist the parameter plaintext as an SSM resource attribute; only `origin_verify_token_version` is persisted for rotation. No output exposes the value. Treat it as a defense-in-depth origin token layered on the managed prefix-list security-group restriction, not as a DB/JWT-equivalent credential or an authentication boundary.
+
+Two separate EC2 inline policies preserve reviewable least-privilege boundaries:
+
+- `origin-verification-read` grants only `ssm:GetParameter` on the exact origin-token parameter ARN. It grants no Parameter Store path/list access and no explicit KMS permission.
+- `acme-dns-route53` grants `route53:ChangeResourceRecordSets` only on the discovered public zone and only for `TXT`, normalized name `_acme-challenge.origin-demo.yoonec.dev`, and `UPSERT`/`DELETE`. Certbot's Route53 plugin uses `ListHostedZones` to discover the parent zone and `GetChange` to poll propagation; only `ListHostedZones` requires `Resource = "*"`, while `GetChange` is limited to the Route 53 change ARN pattern. The EC2 instance profile supplies short-lived role credentials; no access key or credential file is created.
+
+The current AL2023.12 package catalog lists `certbot` and `python3-certbot-dns-route53` in the `2.6.0-4.amzn2023.0.1` package group with Full Support. Certbot upstream documents the three Route 53 API permissions, and its implementation uses `UPSERT` for challenge creation/update, `DELETE` for cleanup, `ListHostedZones` for discovery, and `GetChange` for polling. Before the later certificate operation, verify the package version actually resolved by the running AL2023 repository, install through a separately approved runtime procedure, and run a renewal dry-run. Package installation, Let's Encrypt account registration, certificate/private-key creation, renewal scheduling, Nginx TLS configuration, and CloudFront remain outside this phase.
+
+The existing `yoonec.dev` Route 53 registrar charge is `$17/year`; it is an annual domain cost and is tracked separately from the steady monthly Demo resource subtotal. The existing hosted zone remains `$0.50/month` plus DNS query charges and is already represented by the `$0.54` monthly Route 53 allowance in the architecture cost table. This phase creates neither another hosted zone nor another fixed monthly service. Because the Budget is account-wide, the domain registration or renewal charge can trigger monthly thresholds in its billing month. That expected one-time/annual signal does not change the `30.30 USD` Budget contract.
+
+Sources: [AL2023.12 package list](https://docs.aws.amazon.com/linux/al2023/release-notes/all-packages-AL2023.12.html), [Certbot Route53 plugin](https://certbot-dns-route53.readthedocs.io/en/stable/), [Certbot 2.6.0 Route53 implementation](https://github.com/certbot/certbot/blob/v2.6.0/certbot-dns-route53/certbot_dns_route53/_internal/dns_route53.py), [Route 53 record-level IAM conditions](https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/specifying-conditions-route53.html), [Route 53 IAM actions and resources](https://docs.aws.amazon.com/service-authorization/latest/reference/list_route53.html), [Route 53 pricing](https://aws.amazon.com/route53/pricing/)
 
 ## Runtime schedule contract
 
@@ -175,7 +194,7 @@ The added guardrails are therefore approximately $0.101/month without relying on
 
 Sources: [EventBridge Scheduler pricing](https://aws.amazon.com/eventbridge/pricing/), [CloudWatch pricing](https://aws.amazon.com/cloudwatch/pricing/), [SNS pricing](https://aws.amazon.com/sns/pricing/), [AWS Budgets pricing](https://aws.amazon.com/aws-cost-management/aws-budgets/pricing/)
 
-## Phase 3 live verification and Phase 4A gates
+## Phase 3 live verification and code-only gates
 
 Phase 3A/3B resources are applied and Terraform has converged with `No changes`. The four schedules, confirmed SNS subscription, `OK` failure alarm, alarm-to-SNS path, and `30.30 USD` monthly Budget are verified. On 2026-09-01, the first scheduled EC2 stop at 17:00 JST and RDS stop at 17:10 JST were verified by read-only status checks: EC2 reported `stopped` and RDS reported `stopped`.
 
@@ -205,15 +224,17 @@ terraform fmt -check
 terraform validate
 ```
 
-Static validation does not require real DB or JWT secret values. A future approved plan/apply must inject `db_master_password` and `auth_jwt_secret` through a non-logging ephemeral channel and must not write them to `terraform.tfvars`, a saved plan, shell history, or logs.
+Static validation does not require real DB, JWT, or origin verification values. A future approved plan/apply must inject `db_master_password`, `auth_jwt_secret`, and `origin_verify_token` through a non-logging runtime channel and must not write them to `terraform.tfvars`, shell history, or logs. The origin token is non-ephemeral by design; a saved future CloudFront plan/state may contain it and therefore requires the protected artifact and backend handling described below.
 
 Static validation also does not require `alert_email`. A future approved plan/apply must supply it through an ignored runtime variable source or protected environment variable. Do not add a personal address to `terraform.tfvars.example` or commit it in any `.tfvars` file.
 
-`terraform plan` needs AWS credentials because it resolves AWS-managed data and the remote state. Do not run a credentialed plan or `terraform apply` as part of Phase 4A code validation.
+The existing public hosted zone ID must likewise be supplied only at runtime as `route53_public_hosted_zone_id`. Do not add the real ID to `terraform.tfvars.example`, documentation, outputs, logs, or the PR description.
+
+`terraform plan` needs AWS credentials because it resolves AWS-managed data and the remote state. Do not run a credentialed plan or `terraform apply` as part of Phase 4A/4C-2A code validation.
 
 ## State and deployment gates
 
-The Demo partial S3 backend is initialized and remote state exists. Phase 1 network and Phase 3 runtime/guardrail resources are applied; the latest approved live convergence check reported no changes. Phase 4A resources are not applied.
+The Demo partial S3 backend is initialized and remote state exists. Phase 1 network and Phase 3 runtime/guardrail resources are applied; the latest approved live convergence check reported no changes. Phase 4A and Phase 4C-2A resources are not applied.
 
 Before any future state-changing AWS operation, separately verify:
 
@@ -226,3 +247,5 @@ Before any future state-changing AWS operation, separately verify:
 The independent [bootstrap root](../bootstrap/README.md) owns the S3 bucket and native lockfile strategy. `backend.hcl.example` documents the `demo/terraform.tfstate` runtime configuration without committing account-specific values.
 
 Before a future Phase 4A plan or apply, verify AWS identity/Region, the ECR storage estimate, write-only DB/JWT secret paths, exact EC2 role policy resources, and the absence of unexpected paid resources, foundation changes, or EC2 replacement. Apply remains prohibited until this code is merged and Architecture/PO approves that exact plan.
+
+Before a future Phase 4C-2A plan or apply, verify the exact public `yoonec.dev` hosted zone identity, the single `A` record to the existing EIP, absence of `AAAA`, write-only origin-token path, exact SSM/Route 53 IAM scopes, and no CloudFront, certificate, Nginx, compute, network, security, database, schedule, alert, or Budget change. The plan must show no replacement or destroy. Apply remains prohibited until this code is merged and Architecture/PO approves that exact plan.

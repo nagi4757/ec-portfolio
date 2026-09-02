@@ -105,6 +105,21 @@ output "jwt_secret_parameter_arn" {
   value       = aws_ssm_parameter.auth_jwt_secret.arn
 }
 
+output "origin_hostname" {
+  description = "Public DNS hostname reserved for the Demo EC2 HTTPS origin."
+  value       = local.origin_hostname
+}
+
+output "origin_verify_parameter_name" {
+  description = "Name of the SecureString reserved for the future CloudFront origin verification token."
+  value       = aws_ssm_parameter.origin_verify_token.name
+}
+
+output "origin_verify_parameter_arn" {
+  description = "ARN of the SecureString reserved for the future CloudFront origin verification token."
+  value       = aws_ssm_parameter.origin_verify_token.arn
+}
+
 output "scheduler_group_name" {
   description = "Name of the EventBridge Scheduler group for Demo runtime lifecycle control."
   value       = aws_scheduler_schedule_group.runtime.name
