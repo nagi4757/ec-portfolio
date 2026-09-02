@@ -6,9 +6,12 @@ readonly API_CONTAINER="ec-portfolio-demo-api"
 readonly VALKEY_CONTAINER="ec-portfolio-demo-valkey"
 readonly ORIGIN_VERIFY_PARAMETER="/ec-portfolio/demo/origin/verify-token"
 readonly READINESS_PATH="/actuator/health/readiness"
+readonly AWS_TIMEOUT_SECONDS="30s"
+readonly TIMEOUT_KILL_AFTER_SECONDS="5s"
 
 runtime_directory=""
 origin_verify_token=""
+export -n origin_verify_token
 curl_secret_config=""
 
 log() {
@@ -24,12 +27,18 @@ require_command() {
     command -v "$1" >/dev/null 2>&1 || fail "Required command is not available: $1"
 }
 
+run_with_timeout() {
+    local duration="$1"
+    shift
+    timeout --signal=TERM --kill-after="$TIMEOUT_KILL_AFTER_SECONDS" "$duration" "$@"
+}
+
 cleanup() {
     local exit_code=$?
     trap - EXIT
 
     if [[ -n "$runtime_directory" && "$runtime_directory" == /run/ec-portfolio-demo-origin-smoke.* ]]; then
-        rm -rf -- "$runtime_directory"
+        rm -rf -- "$runtime_directory" || true
     fi
 
     unset origin_verify_token
@@ -49,20 +58,23 @@ container_is_running() {
 
 read_origin_verify_token() {
     local aws_region="${AWS_REGION:-${AWS_DEFAULT_REGION:-}}"
-    local -a region_arguments=()
+    local -a aws_arguments=(
+        ssm get-parameter
+        --name "$ORIGIN_VERIFY_PARAMETER"
+        --with-decryption
+        --query 'Parameter.Value'
+        --output text
+        --cli-connect-timeout 10
+        --cli-read-timeout 20
+    )
 
     if [[ -n "$aws_region" ]]; then
         [[ "$aws_region" =~ ^[a-z0-9-]{5,32}$ ]] || fail "The configured AWS Region is invalid."
-        region_arguments=(--region "$aws_region")
+        aws_arguments+=(--region "$aws_region")
     fi
 
     origin_verify_token="$(
-        AWS_PAGER="" aws ssm get-parameter \
-            "${region_arguments[@]}" \
-            --name "$ORIGIN_VERIFY_PARAMETER" \
-            --with-decryption \
-            --query 'Parameter.Value' \
-            --output text
+        AWS_PAGER="" run_with_timeout "$AWS_TIMEOUT_SECONDS" aws "${aws_arguments[@]}"
     )"
 
     [[ "$origin_verify_token" != "None" && ${#origin_verify_token} -ge 32 && ${#origin_verify_token} -le 128 &&
@@ -80,24 +92,23 @@ write_curl_secret_config() {
 request_readiness() {
     local request_mode="$1"
     local response_file="$2"
-    local -a authentication_arguments=()
+    local -a curl_arguments=(--disable)
 
     case "$request_mode" in
         none)
             ;;
         invalid)
-            authentication_arguments=(--header 'X-Origin-Verify: invalid')
+            curl_arguments+=(--header 'X-Origin-Verify: invalid')
             ;;
         valid)
-            authentication_arguments=(--config "$curl_secret_config")
+            curl_arguments+=(--config "$curl_secret_config")
             ;;
         *)
             fail "Unknown readiness request mode."
             ;;
     esac
 
-    curl --disable \
-        "${authentication_arguments[@]}" \
+    curl "${curl_arguments[@]}" \
         --silent \
         --show-error \
         --output "$response_file" \
@@ -122,6 +133,8 @@ main() {
     fi
 
     (( $# == 0 )) || fail "This script does not accept arguments."
+    [[ -z "${ORIGIN_VERIFY_TOKEN:-}" ]] ||
+        fail "The origin verification token must not be supplied through the environment."
     [[ -n "${ORIGIN_SERVER_NAME:-}" ]] || fail "Required environment variable is missing: ORIGIN_SERVER_NAME"
     case "$ORIGIN_SERVER_NAME" in
         *$'\n'* | *$'\r'*) fail "ORIGIN_SERVER_NAME must not contain line breaks." ;;
@@ -130,7 +143,7 @@ main() {
         "$ORIGIN_SERVER_NAME" == *.* && "$ORIGIN_SERVER_NAME" != *..* ]] ||
         fail "ORIGIN_SERVER_NAME must be a valid DNS hostname."
 
-    for command_name in aws curl docker grep mktemp rm ss systemctl; do
+    for command_name in aws curl docker grep mktemp rm ss systemctl timeout; do
         require_command "$command_name"
     done
 

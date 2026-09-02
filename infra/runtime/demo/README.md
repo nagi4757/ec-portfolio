@@ -130,7 +130,9 @@ sudo ./smoke-check.sh
 
 ## HTTPS origin configuration
 
-`configure-origin.sh`はAmazon Linux 2023専用です。rootでNginx packageをidempotentにinstallし、既存設定を退避してから管理対象設定を検証・反映します。`nginx -t`、service activation、listener検証のいずれかに失敗した場合は以前の設定とservice状態をbest-effortで復元します。
+`configure-origin.sh`はAmazon Linux 2023専用です。rootでNginx packageをidempotentにinstallし、既存設定を退避してから管理対象設定を検証・反映します。`nginx -t`、service activation、listener検証に加え、bundle内の`origin-smoke-check.sh`によるTLS/hostname/header/readiness検証がすべて成功した場合だけ設定をcommitします。途中で失敗した場合は以前の設定とservice状態をbest-effortで復元し、元の検証failure exit codeを維持します。
+
+AWS SSM APIは30秒、systemd操作は30秒、origin smokeは120秒、Nginx package installは10分を上限とし、外部依存やpackage managerを無期限に待機しません。AWS CLI自身にもconnect 10秒/read 20秒のtimeoutを設定します。
 
 次の値だけをnon-secret inputとして渡します。
 
@@ -175,6 +177,15 @@ tokenは32〜128文字のURL-safe文字（`A-Z`、`a-z`、`0-9`、`_`、`-`）�
 ```
 
 Nginx master configurationもroot-onlyです。`nginx -T`はsecret mapの内容まで標準出力へ展開するため、実行結果をterminal共有、ticket、CI artifact、ログ収集へ載せてはいけません。syntax確認にはscript内の`nginx -t`だけを使用します。
+
+## Phase 4C-2 Terraform prerequisites
+
+現在のrepository/mainには、次のAWS resource/policyがまだ実装されていません。
+
+- SSM SecureString `/ec-portfolio/demo/origin/verify-token`
+- EC2 instance roleから上記parameterのexact ARNだけに許可する`ssm:GetParameter`
+
+そのため、承認済みPhase 4C-2 Terraform変更がapplyされる前に`configure-origin.sh`または`origin-smoke-check.sh`を実際のAWS hostで実行することはできません。このruntime PRはTerraformを追加・変更せず、必要なruntime/IAM境界の文書化だけを行います。
 
 ## Origin smoke check
 
