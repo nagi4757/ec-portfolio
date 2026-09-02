@@ -2,7 +2,7 @@
 
 ## 目的
 
-このディレクトリは、Amazon Linux 2023のEC2ホストにDemo API Runtimeを構築するためのhost-side deployment bundleです。Phase 4Bで構築したAPI/Valkey runtimeに加え、Phase 4C-1ではCloudFront origin向けのNginx HTTPS reverse proxy foundationを提供します。コードと運用契約だけを扱い、このPRではAWSへの接続、EC2操作、証明書発行、ECR push、Terraform操作を行いません。
+このディレクトリは、Amazon Linux 2023のEC2ホストにDemo API Runtimeを構築するためのhost-side deployment bundleです。Phase 4Bで構築したAPI/Valkey runtime、Phase 4C-1のCloudFront origin向けNginx HTTPS reverse proxyに加え、Phase 4C-3ではLet's Encrypt DNS-01 certificate lifecycleを提供します。コードと運用契約だけを扱い、このPRではAWSへの接続、EC2操作、DNS変更、証明書発行、ECR push、Terraform操作を行いません。
 
 Runtimeの構成は次のとおりです。
 
@@ -28,6 +28,10 @@ CloudFrontからEC2 originへの通信はHTTPS `443`だけを使用します。N
 | `smoke-check.sh` | secret不要のcontainer、port、readiness検証 |
 | `configure-origin.sh` | Nginx install、TLS origin設定、SSM origin verification設定 |
 | `origin-smoke-check.sh` | HTTPS、証明書、origin verification、非公開portの検証 |
+| `configure-acme.sh` | Certbot/Route 53 DNS-01によるorigin certificate発行とrenewal timer設定 |
+| `renew-origin-cert.sh` | 対象certificateだけを更新し、変更時にNginxを安全にreload |
+| `ec-portfolio-certbot-renew.service` | bounded certificate renewalを実行するsystemd oneshot unit |
+| `ec-portfolio-certbot-renew.timer` | missed runを補完する永続systemd timer |
 
 bootstrapとdeployを分離することで、ホストの一度だけ必要な変更と、immutable image単位で繰り返すアプリケーションdeployを明確に分けます。Terraform `user_data`には接続せず、EC2 replacementを伴う構成変更も行いません。
 
@@ -128,6 +132,33 @@ sudo ./smoke-check.sh
 - API bindingが正確に`127.0.0.1:8080`
 - `GET /actuator/health/readiness`がHTTP 200かつ`UP`
 
+## Let's Encrypt DNS-01 certificate lifecycle
+
+Demo origin hostnameは`origin-demo.yoonec.dev`に固定し、Let's Encrypt production endpointとRoute 53 DNS-01 challengeだけを使用します。HTTP-01、wildcard certificate、TCP `80` listenerは使用しません。CertbotはEC2 instance profileだけでRoute 53へアクセスし、AWS access key、profile、credential/config file、web identity、container credential endpointは受け付けません。
+
+Phase 4C-2AのTerraformがapplyされ、EC2 instance roleに承認済みRoute 53 ACME permissionが付与された後、連絡可能なACME emailだけを渡して実行します。
+
+```bash
+export ACME_EMAIL="operator@example.com"
+sudo --preserve-env=ACME_EMAIL ./configure-acme.sh
+```
+
+scriptはAmazon Linux 2023とroot実行をfail-closedで検証し、AL2023 package repositoryから`certbot`と`python3-certbot-dns-route53`をinstallします。package installは10分、certificate発行は15分、systemd操作は30秒を上限とします。発行requestはnon-interactiveで、SANが正確に`origin-demo.yoonec.dev`だけであることを確認します。
+
+発行後に次のstandard Certbot live pathを検証します。private keyはEC2 localのroot所有かつroot-only permissionであり、repository、environment、argument、logには保存・出力しません。
+
+```text
+/etc/letsencrypt/live/origin-demo.yoonec.dev/fullchain.pem
+/etc/letsencrypt/live/origin-demo.yoonec.dev/privkey.pem
+```
+
+`ec-portfolio-certbot-renew.timer`は毎日2回のbase scheduleに最大1時間のrandom delayを加えます。`Persistent=true`のため、平日夜間や週末にEC2が停止していても次回起動後にmissed runを処理できます。managed renewalとNginx reloadの順序を一元化するため、AL2023 packageの`certbot-renew.timer`が存在する場合は停止・無効化します。renewal自体は15分でboundedされ、失敗時に既存certificateを削除しません。certificate chainが実際に変更された場合だけ、次の順序でNginxへ反映します。
+
+1. `nginx -t`
+2. `systemctl reload nginx`
+
+NginxまたはDemo origin設定がまだ存在しない場合、certificate renewalは完了させたうえでreloadを安全にskipします。Nginx設定検証に失敗した場合はreloadせずnon-zeroで終了するため、実行中のNginxは既存の読み込み済みcertificateを継続利用します。
+
 ## HTTPS origin configuration
 
 `configure-origin.sh`はAmazon Linux 2023専用です。rootでNginx packageをidempotentにinstallし、既存設定を退避してから管理対象設定を検証・反映します。`nginx -t`、service activation、listener検証に加え、bundle内の`origin-smoke-check.sh`によるTLS/hostname/header/readiness検証がすべて成功した場合だけ設定をcommitします。途中で失敗した場合は以前の設定とservice状態をbest-effortで復元し、元の検証failure exit codeを維持します。
@@ -142,12 +173,12 @@ AWS SSM APIは30秒、systemd操作は30秒、origin smokeは120秒、Nginx pack
 | `ORIGIN_CERT_FILE` | OS trust storeで検証可能なorigin certificate chainの絶対path |
 | `ORIGIN_KEY_FILE` | 対応するunencrypted private keyの絶対path |
 
-private keyはroot所有かつownerだけがread可能でなければなりません。certificate/keyが存在しない、読めない、形式が不正、またはpermissionが広すぎる場合はNginx設定を変更する前に失敗します。self-signed certificateは使用しません。certificateの発行、配置、renewal方式はPhase 4C TLS Architecture Decisionの責務であり、このbundleはsourceに依存しません。
+private keyはroot所有かつownerだけがread可能でなければなりません。certificate/keyが存在しない、読めない、形式が不正、またはpermissionが広すぎる場合はNginx設定を変更する前に失敗します。self-signed certificateは使用しません。Phase 4C-3の`configure-acme.sh`が作成するstandard Certbot live pathは、この入力contractと互換です。
 
 ```bash
-export ORIGIN_SERVER_NAME="origin.demo.example.com"
-export ORIGIN_CERT_FILE="/etc/pki/tls/certs/origin-fullchain.pem"
-export ORIGIN_KEY_FILE="/etc/pki/tls/private/origin.key"
+export ORIGIN_SERVER_NAME="origin-demo.yoonec.dev"
+export ORIGIN_CERT_FILE="/etc/letsencrypt/live/origin-demo.yoonec.dev/fullchain.pem"
+export ORIGIN_KEY_FILE="/etc/letsencrypt/live/origin-demo.yoonec.dev/privkey.pem"
 
 sudo --preserve-env=ORIGIN_SERVER_NAME,ORIGIN_CERT_FILE,ORIGIN_KEY_FILE \
   ./configure-origin.sh
@@ -178,21 +209,31 @@ tokenは32〜128文字のURL-safe文字（`A-Z`、`a-z`、`0-9`、`_`、`-`）�
 
 Nginx master configurationもroot-onlyです。`nginx -T`はsecret mapの内容まで標準出力へ展開するため、実行結果をterminal共有、ticket、CI artifact、ログ収集へ載せてはいけません。syntax確認にはscript内の`nginx -t`だけを使用します。
 
-## Phase 4C-2 Terraform prerequisites
+## Phase 4C execution order and Terraform prerequisites
 
-現在のrepository/mainには、次のAWS resource/policyがまだ実装されていません。
+実環境では次の順序を変更しません。
+
+1. Phase 4C-2A Terraform apply
+2. EC2 instance roleのACME用Route 53 permission利用可能化
+3. `configure-acme.sh`によるcertificate発行
+4. `configure-origin.sh`によるHTTPS origin設定
+5. `origin-smoke-check.sh`によるend-to-end検証
+6. CloudFront Phase 4C-2B
+
+Phase 4C-2Aには、少なくとも次のAWS resource/policyが事前に必要です。
 
 - SSM SecureString `/ec-portfolio/demo/origin/verify-token`
 - EC2 instance roleから上記parameterのexact ARNだけに許可する`ssm:GetParameter`
+- `origin-demo.yoonec.dev`のDNS-01 challengeを更新・確認するために承認されたRoute 53 permission
 
-そのため、承認済みPhase 4C-2 Terraform変更がapplyされる前に`configure-origin.sh`または`origin-smoke-check.sh`を実際のAWS hostで実行することはできません。このruntime PRはTerraformを追加・変更せず、必要なruntime/IAM境界の文書化だけを行います。
+そのため、承認済みPhase 4C-2A Terraform変更がapplyされる前に`configure-acme.sh`、`configure-origin.sh`、`origin-smoke-check.sh`を実際のAWS hostで実行することはできません。このruntime PRはTerraformを追加・変更せず、必要なruntime/IAM境界の文書化だけを行います。
 
 ## Origin smoke check
 
 origin設定後、実際のcertificate hostname verificationとorigin contractを確認します。
 
 ```bash
-export ORIGIN_SERVER_NAME="origin.demo.example.com"
+export ORIGIN_SERVER_NAME="origin-demo.yoonec.dev"
 sudo --preserve-env=ORIGIN_SERVER_NAME ./origin-smoke-check.sh
 ```
 
@@ -212,10 +253,11 @@ scriptは`curl --resolve`でhostnameを`127.0.0.1`へ向けますが、OS trust 
 
 - public `8080` / `6379`は禁止
 - public `80`は禁止し、CloudFront originはHTTPS `443`のみ
+- ACME challengeはRoute 53 DNS-01だけを使用し、HTTP-01は禁止
 - privileged、host network、Docker socket mountは禁止
 - `latest` tagは禁止
-- secret file、certificate private key、`.env`、AWS account IDのcommitは禁止
+- AWS static credential、Route 53 token file、secret file、certificate/private key、`.env`、AWS account IDのcommitは禁止
 - Terraform、`user_data`、Security Group、Docker imageは変更しない
-- AWS credential/SSO、AWS CLI mutation、Terraform plan/apply/state、EC2接続、証明書発行、ECR pushはこのPhase 4C-1では実行しない
+- AWS credential/SSO、AWS CLI mutation、Terraform plan/apply/state、EC2接続、DNS変更、証明書発行、ECR pushはこのPhase 4C-3では実行しない
 
-Phase 4Bの実環境deployment contractは維持します。Nginx設定、certificate配置、CloudFront custom header、Security Group連携を実際のAWS環境へ適用する作業は、Phase 4CのTLS Architecture DecisionとArchitecture/PO gateの後にのみ実施します。
+Phase 4Bの実環境deployment contractは維持します。Nginx設定、certificate発行、CloudFront custom header、Security Group連携を実際のAWS環境へ適用する作業は、承認済みPhase 4C順序とArchitecture/PO gateに従ってのみ実施します。

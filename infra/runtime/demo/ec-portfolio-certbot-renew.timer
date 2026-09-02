@@ -1,0 +1,11 @@
+[Unit]
+Description=Schedule EC Portfolio Demo origin certificate renewal
+
+[Timer]
+OnCalendar=*-*-* 02,14:00:00
+Persistent=true
+RandomizedDelaySec=1h
+Unit=ec-portfolio-certbot-renew.service
+
+[Install]
+WantedBy=timers.target
