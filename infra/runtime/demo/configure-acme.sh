@@ -74,6 +74,7 @@ validate_inputs() {
         AWS_SECURITY_TOKEN \
         AWS_PROFILE \
         AWS_DEFAULT_PROFILE \
+        AWS_CREDENTIAL_FILE \
         AWS_SHARED_CREDENTIALS_FILE \
         AWS_CONFIG_FILE \
         AWS_WEB_IDENTITY_TOKEN_FILE \
@@ -81,6 +82,8 @@ validate_inputs() {
         AWS_CONTAINER_CREDENTIALS_FULL_URI \
         AWS_CONTAINER_CREDENTIALS_RELATIVE_URI \
         AWS_EC2_METADATA_DISABLED \
+        AWS_EC2_METADATA_SERVICE_ENDPOINT \
+        AWS_EC2_METADATA_SERVICE_ENDPOINT_MODE \
         AWS_ENDPOINT_URL \
         AWS_ENDPOINT_URL_ROUTE53 \
         AWS_CA_BUNDLE \
@@ -120,20 +123,23 @@ run_certbot() {
         -u AWS_SECURITY_TOKEN \
         -u AWS_PROFILE \
         -u AWS_DEFAULT_PROFILE \
+        -u AWS_CREDENTIAL_FILE \
         -u AWS_WEB_IDENTITY_TOKEN_FILE \
         -u AWS_ROLE_ARN \
         -u AWS_CONTAINER_CREDENTIALS_FULL_URI \
         -u AWS_CONTAINER_CREDENTIALS_RELATIVE_URI \
         -u AWS_EC2_METADATA_DISABLED \
+        -u AWS_EC2_METADATA_SERVICE_ENDPOINT \
+        -u AWS_EC2_METADATA_SERVICE_ENDPOINT_MODE \
         -u AWS_ENDPOINT_URL \
         -u AWS_ENDPOINT_URL_ROUTE53 \
         -u AWS_CA_BUNDLE \
         -u REQUESTS_CA_BUNDLE \
         -u SSL_CERT_FILE \
         -u SSL_CERT_DIR \
-        -u BOTO_CONFIG \
         AWS_SHARED_CREDENTIALS_FILE=/dev/null \
         AWS_CONFIG_FILE=/dev/null \
+        BOTO_CONFIG=/dev/null \
         "$@"
 }
 

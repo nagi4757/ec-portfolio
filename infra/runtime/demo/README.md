@@ -134,7 +134,7 @@ sudo ./smoke-check.sh
 
 ## Let's Encrypt DNS-01 certificate lifecycle
 
-Demo origin hostnameは`origin-demo.yoonec.dev`に固定し、Let's Encrypt production endpointとRoute 53 DNS-01 challengeだけを使用します。HTTP-01、wildcard certificate、TCP `80` listenerは使用しません。CertbotはEC2 instance profileだけでRoute 53へアクセスし、AWS access key、profile、credential/config file、web identity、container credential endpointは受け付けません。
+Demo origin hostnameは`origin-demo.yoonec.dev`に固定し、Let's Encrypt production endpointとRoute 53 DNS-01 challengeだけを使用します。HTTP-01、wildcard certificate、TCP `80` listenerは使用しません。CertbotはEC2 instance profileだけでRoute 53へアクセスし、AWS access key、profile、Boto2/legacy credential path、web identity、container credential endpoint、IMDS endpoint overrideは受け付けません。
 
 Phase 4C-2AのTerraformがapplyされ、EC2 instance roleに承認済みRoute 53 ACME permissionが付与された後、連絡可能なACME emailだけを渡して実行します。
 
