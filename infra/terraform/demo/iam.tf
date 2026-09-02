@@ -84,6 +84,59 @@ resource "aws_iam_role_policy" "ec2_runtime_deployment" {
   })
 }
 
+resource "aws_iam_role_policy" "ec2_origin_verification" {
+  name = "origin-verification-read"
+  role = aws_iam_role.ec2.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "ReadOriginVerificationToken"
+        Effect   = "Allow"
+        Action   = "ssm:GetParameter"
+        Resource = aws_ssm_parameter.origin_verify_token.arn
+      },
+    ]
+  })
+}
+
+resource "aws_iam_role_policy" "ec2_acme_dns_route53" {
+  name = "acme-dns-route53"
+  role = aws_iam_role.ec2.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "DiscoverHostedZones"
+        Effect   = "Allow"
+        Action   = "route53:ListHostedZones"
+        Resource = "*"
+      },
+      {
+        Sid      = "PollDnsChange"
+        Effect   = "Allow"
+        Action   = "route53:GetChange"
+        Resource = "arn:${data.aws_partition.current.partition}:route53:::change/*"
+      },
+      {
+        Sid      = "ManageExactAcmeChallenge"
+        Effect   = "Allow"
+        Action   = "route53:ChangeResourceRecordSets"
+        Resource = "arn:${data.aws_partition.current.partition}:route53:::hostedzone/${data.aws_route53_zone.demo_public.zone_id}"
+        Condition = {
+          "ForAllValues:StringEquals" = {
+            "route53:ChangeResourceRecordSetsActions"               = ["UPSERT", "DELETE"]
+            "route53:ChangeResourceRecordSetsNormalizedRecordNames" = [local.origin_acme_challenge_record]
+            "route53:ChangeResourceRecordSetsRecordTypes"           = ["TXT"]
+          }
+        }
+      },
+    ]
+  })
+}
+
 resource "aws_iam_instance_profile" "ec2" {
   name = "${local.name_prefix}-ec2"
   role = aws_iam_role.ec2.name

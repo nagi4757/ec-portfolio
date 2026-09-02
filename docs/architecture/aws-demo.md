@@ -84,6 +84,21 @@ Sources:
 
 Viewer-to-CloudFront와 CloudFront-to-EC2 모두 HTTPS를 강제한다. 직접 EIP 요청은 source가 CloudFront origin-facing prefix list에 속하지 않아 security group에서 차단된다. 다른 CloudFront distribution을 통한 접근 가능성은 `X-Origin-Verify` 검증으로 차단한다. Prefix list 또는 origin header 하나만으로 충분하다고 간주하지 않는다.
 
+### Origin DNS and certificate lifecycle
+
+Origin DNS는 기존 Route 53 public hosted zone `yoonec.dev` 아래 `origin-demo.yoonec.dev`를 사용한다. TTL 60의 `A` record가 기존 EC2 origin EIP를 가리키며 `AAAA`는 만들지 않는다. Terraform은 public zone을 이름으로 조회하고 별도 runtime input으로 제공된 hosted zone ID와 exact match를 강제한다. 실제 hosted zone ID는 code, output, log 또는 PR에 남기지 않는다.
+
+Origin TLS는 Let's Encrypt DNS-01을 사용한다. EC2 instance profile의 별도 최소권한 policy가 `_acme-challenge.origin-demo.yoonec.dev`의 TXT `UPSERT`/`DELETE`, zone discovery와 change polling만 허용한다. 장기 access key는 사용하지 않는다. AL2023의 Certbot/Route53 plugin 설치, 최초 certificate 발급, `/etc/letsencrypt` private-key 권한·backup, renewal timer와 Nginx reload 검증은 후속 runtime 작업이며 이 foundation에는 포함되지 않는다. 만료 전 renewal dry-run과 실제 certificate의 SAN `origin-demo.yoonec.dev` 일치를 운영 gate로 둔다.
+
+CloudFront custom origin은 publicly resolvable hostname과 그 hostname에 일치하는 publicly trusted certificate를 사용해 HTTPS-only로 연결해야 한다. Self-signed certificate와 CloudFront-to-origin HTTP downgrade는 금지한다. Viewer는 초기에는 CloudFront default domain/certificate를 사용한다. CloudFront distribution과 Nginx TLS listener는 후속 단계이며 현재 Terraform foundation에 포함되지 않는다.
+
+Sources:
+
+- [CloudFront custom-origin DNS and protocol settings](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/DownloadDistValuesOrigin.html)
+- [CloudFront origin certificate requirements](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/cnames-and-https-requirements.html)
+- [Certbot Route53 plugin](https://certbot-dns-route53.readthedocs.io/en/stable/)
+- [Route 53 record-level IAM conditions](https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/specifying-conditions-route53.html)
+
 ### No NAT Gateway and no ALB
 
 EC2는 NAT Gateway 비용을 제거하기 위해 public subnet에서 EIP를 사용하고, RDS는 public access를 끈 private subnet에 둔다. Public subnet 선택은 unrestricted public server를 의미하지 않는다. EC2의 ECR/SSM/SQS/SES outbound와 package/image pull은 Internet Gateway를 통하지만 inbound는 아래 contract로 제한한다.
@@ -254,7 +269,7 @@ Demo는 SSM Parameter Store Standard tier를 기본으로 한다.
 
 Parameter Store는 저비용·저빈도 demo configuration에 충분하지만 rotation engine, cross-account sharing, managed RDS rotation은 없다. Production에서 자동 rotation이나 별도 secret lifecycle이 필요하면 Secrets Manager로 승격한다.
 
-CloudFront custom origin header 값을 향후 Terraform resource argument로 직접 넣으면 secret이 Terraform state에 존재할 수 있다. 이 문서는 Terraform을 구현하지 않으며, 구현 단계에서 state backend 접근 통제만으로 수용할지 out-of-band secret bootstrap/rotation을 사용할지 별도 ADR로 결정한다. GitHub Deploy Role이 bootstrap된 application secret을 읽는 방식은 사용하지 않는다.
+Phase 4C-2A는 `origin_verify_token`을 sensitive이지만 non-ephemeral runtime input으로 받고 SSM parameter에는 `value_wo`로 기록한다. 따라서 현재 Parameter resource attribute에는 plaintext를 보존하지 않는다. 후속 Phase 4C-2B가 같은 값을 CloudFront custom origin header argument에 사용하면 token이 Terraform plan/state에 존재할 수 있다는 risk는 수용한다. Saved plan과 remote state 접근을 제한하고 token을 output/log/tag에 노출하지 않으며 version을 올린 SSM/CloudFront 동시 변경으로 rotation한다. 이 token은 managed prefix-list SG에 더하는 defense in depth이고 DB/JWT credential이나 application authentication과 같은 보안 등급으로 간주하지 않는다. GitHub Deploy Role이 bootstrap된 application secret을 읽는 방식은 사용하지 않는다.
 
 Sources:
 
@@ -329,7 +344,7 @@ Sources:
 - Japan Consumption Tax (JCT): 10%; AWS website prices are tax-exclusive
 - Traffic: CloudFront 5 GB out/100k requests, S3 5 GB, ECR 1 GB, SQS 100k requests, SES 500 recipients, CloudWatch Logs 0.5 GB ingestion
 - Free Tier와 promotional credit의 절감액은 계산에 반영하지 않음
-- Domain registration fee는 아직 domain을 구매하지 않으므로 제외; Route 53 hosted zone은 포함
+- `yoonec.dev` Route 53 registrar 비용 `$17/year`는 annual domain cost로 별도 추적; monthly resource subtotal에는 hosted zone/query만 포함
 
 | Cost item | Usage/rate assumption | USD/month |
 |---|---:|---:|
@@ -351,6 +366,8 @@ Sources:
 | **Base AWS pre-tax cost** | Exact calculation before row rounding | **$22.99** |
 | **Variable contingency** | CloudWatch, CloudFront/S3, ECR, RDS backup, runtime and SES/SQS variance | **$2.00** |
 | **AWS pre-tax subtotal** | Base + contingency | **$24.99** |
+
+`yoonec.dev`의 Route 53 registrar 비용은 `$17/year`이며 steady monthly resource subtotal과 구분한다. Hosted zone `$0.50/month`와 낮은 query allowance는 위 Route 53 `$0.54/month` 행에 이미 포함되어 중복 계산하지 않는다. Domain registration/renewal이 청구되는 달에는 account-wide Budget이 annual charge까지 감시하므로 70/90/100% alert가 정상적으로 발생할 수 있다. 이 일시적 신호는 원인을 확인할 운영 event이며 Budget `30.30 USD`나 runtime hard-ceiling contract를 올리는 근거가 아니다. Domain과 DNS 가격은 2026-09-02 기준이며 renewal 전에 다시 확인한다.
 
 Cost contract는 exact USD 산식 후 invoice 단위로 반올림한다.
 

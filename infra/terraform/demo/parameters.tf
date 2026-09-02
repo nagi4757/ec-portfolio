@@ -27,3 +27,18 @@ resource "aws_ssm_parameter" "auth_jwt_secret" {
     Name = "${local.name_prefix}-auth-jwt-secret"
   }
 }
+
+resource "aws_ssm_parameter" "origin_verify_token" {
+  name        = "/ec-portfolio/demo/origin/verify-token"
+  description = "Defense-in-depth token for the future CloudFront origin verification header"
+  type        = "SecureString"
+  tier        = "Standard"
+  key_id      = "alias/aws/ssm"
+
+  value_wo         = var.origin_verify_token
+  value_wo_version = var.origin_verify_token_version
+
+  tags = {
+    Name = "${local.name_prefix}-origin-verify-token"
+  }
+}
