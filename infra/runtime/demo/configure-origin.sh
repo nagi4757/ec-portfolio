@@ -7,9 +7,17 @@ readonly NGINX_MAIN_CONFIG="/etc/nginx/nginx.conf"
 readonly NGINX_RUNTIME_CONFIG_DIRECTORY="/etc/nginx/ec-portfolio-demo"
 readonly NGINX_SECRET_CONFIG="$NGINX_RUNTIME_CONFIG_DIRECTORY/origin-secret.conf"
 readonly NGINX_SERVER_CONFIG="$NGINX_RUNTIME_CONFIG_DIRECTORY/origin-server.conf"
+readonly AWS_TIMEOUT_SECONDS="30s"
+readonly DNF_TIMEOUT_SECONDS="10m"
+readonly SYSTEMCTL_TIMEOUT_SECONDS="30s"
+readonly ORIGIN_SMOKE_TIMEOUT_SECONDS="120s"
+readonly TIMEOUT_KILL_AFTER_SECONDS="5s"
 
 runtime_directory=""
 origin_verify_token=""
+export -n origin_verify_token
+script_directory=""
+origin_smoke_script=""
 configuration_installed="false"
 configuration_committed="false"
 main_config_existed="false"
@@ -30,6 +38,16 @@ fail() {
 
 require_command() {
     command -v "$1" >/dev/null 2>&1 || fail "Required command is not available: $1"
+}
+
+run_with_timeout() {
+    local duration="$1"
+    shift
+    timeout --signal=TERM --kill-after="$TIMEOUT_KILL_AFTER_SECONDS" "$duration" "$@"
+}
+
+run_systemctl() {
+    run_with_timeout "$SYSTEMCTL_TIMEOUT_SECONDS" systemctl "$@"
 }
 
 restore_file() {
@@ -54,15 +72,15 @@ restore_nginx_configuration() {
     fi
 
     if [[ "$nginx_was_active" == "true" ]]; then
-        if nginx -t >/dev/null 2>&1; then
-            systemctl reload nginx >/dev/null 2>&1 || true
+        if run_with_timeout "$SYSTEMCTL_TIMEOUT_SECONDS" nginx -t >/dev/null 2>&1; then
+            run_systemctl reload nginx >/dev/null 2>&1 || true
         fi
     else
-        systemctl stop nginx >/dev/null 2>&1 || true
+        run_systemctl stop nginx >/dev/null 2>&1 || true
     fi
 
     if [[ "$nginx_was_enabled" != "true" ]]; then
-        systemctl disable nginx >/dev/null 2>&1 || true
+        run_systemctl disable nginx >/dev/null 2>&1 || true
     fi
 }
 
@@ -75,7 +93,7 @@ cleanup() {
     fi
 
     if [[ -n "$runtime_directory" && "$runtime_directory" == /run/ec-portfolio-demo-origin.* ]]; then
-        rm -rf -- "$runtime_directory"
+        rm -rf -- "$runtime_directory" || true
     fi
 
     unset origin_verify_token
@@ -120,6 +138,8 @@ validate_inputs() {
     local variable_name
 
     (( $# == 0 )) || fail "This script does not accept arguments."
+    [[ -z "${ORIGIN_VERIFY_TOKEN:-}" ]] ||
+        fail "The origin verification token must not be supplied through the environment."
 
     for variable_name in ORIGIN_SERVER_NAME ORIGIN_CERT_FILE ORIGIN_KEY_FILE; do
         require_environment "$variable_name"
@@ -165,27 +185,42 @@ validate_platform() {
     [[ "${ID:-}" == "amzn" && "${VERSION_ID:-}" == 2023* ]] ||
         fail "Amazon Linux 2023 is required."
 
-    for command_name in aws cp dnf grep install mktemp openssl rm rmdir ss stat systemctl; do
+    for command_name in aws cp dirname dnf grep install mktemp openssl rm rmdir ss stat systemctl timeout; do
         require_command "$command_name"
     done
 }
 
+resolve_bundle_paths() {
+    local source_directory
+
+    source_directory="$(dirname -- "${BASH_SOURCE[0]}")"
+    if ! script_directory="$(cd -- "$source_directory" && pwd -P)"; then
+        fail "Cannot resolve the runtime bundle directory."
+    fi
+    origin_smoke_script="$script_directory/origin-smoke-check.sh"
+    [[ -f "$origin_smoke_script" && -x "$origin_smoke_script" ]] ||
+        fail "The bundled origin smoke check is missing or not executable."
+}
+
 read_origin_verify_token() {
     local aws_region="${AWS_REGION:-${AWS_DEFAULT_REGION:-}}"
-    local -a region_arguments=()
+    local -a aws_arguments=(
+        ssm get-parameter
+        --name "$ORIGIN_VERIFY_PARAMETER"
+        --with-decryption
+        --query 'Parameter.Value'
+        --output text
+        --cli-connect-timeout 10
+        --cli-read-timeout 20
+    )
 
     if [[ -n "$aws_region" ]]; then
         [[ "$aws_region" =~ ^[a-z0-9-]{5,32}$ ]] || fail "The configured AWS Region is invalid."
-        region_arguments=(--region "$aws_region")
+        aws_arguments+=(--region "$aws_region")
     fi
 
     origin_verify_token="$(
-        AWS_PAGER="" aws ssm get-parameter \
-            "${region_arguments[@]}" \
-            --name "$ORIGIN_VERIFY_PARAMETER" \
-            --with-decryption \
-            --query 'Parameter.Value' \
-            --output text
+        AWS_PAGER="" run_with_timeout "$AWS_TIMEOUT_SECONDS" aws "${aws_arguments[@]}"
     )"
 
     [[ "$origin_verify_token" != "None" && ${#origin_verify_token} -ge 32 && ${#origin_verify_token} -le 128 &&
@@ -291,22 +326,36 @@ listener_exists() {
 }
 
 activate_nginx() {
-    nginx -t >/dev/null
+    run_with_timeout "$SYSTEMCTL_TIMEOUT_SECONDS" nginx -t >/dev/null
 
     if [[ "$nginx_was_active" == "true" ]]; then
-        systemctl reload nginx
+        run_systemctl reload nginx
     else
-        systemctl start nginx
+        run_systemctl start nginx
     fi
 
-    systemctl enable nginx >/dev/null
+    run_systemctl enable nginx >/dev/null
     systemctl is-active --quiet nginx || fail "Nginx is not active."
     listener_exists 443 || fail "Nginx is not listening on TCP 443."
     if listener_exists 80; then
         fail "A TCP 80 listener is prohibited by the Demo origin contract."
     fi
+}
 
-    configuration_committed="true"
+validate_active_origin() {
+    local smoke_exit_code
+
+    [[ -f "$origin_smoke_script" && -x "$origin_smoke_script" ]] ||
+        fail "The bundled origin smoke check is missing or not executable."
+
+    log "Validating the active HTTPS origin before committing the configuration."
+    if run_with_timeout "$ORIGIN_SMOKE_TIMEOUT_SECONDS" "$origin_smoke_script"; then
+        configuration_committed="true"
+    else
+        smoke_exit_code=$?
+        printf '[origin-configure] ERROR: End-to-end origin validation failed.\n' >&2
+        return "$smoke_exit_code"
+    fi
 }
 
 main() {
@@ -318,8 +367,10 @@ main() {
 
     validate_platform
     validate_inputs "$@"
+    resolve_bundle_paths
     log "Installing the Nginx package when necessary."
-    dnf install -y nginx
+    run_with_timeout "$DNF_TIMEOUT_SECONDS" dnf install -y nginx ||
+        fail "Nginx package installation failed or timed out."
     require_command nginx
 
     if systemctl is-active --quiet nginx; then
@@ -335,6 +386,7 @@ main() {
     write_staged_configuration
     install_configuration
     activate_nginx
+    validate_active_origin
 
     log "Demo HTTPS origin configuration completed successfully."
 }
