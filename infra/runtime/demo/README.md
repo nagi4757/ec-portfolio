@@ -1,13 +1,15 @@
-# AWS Demo Runtime Deployment Bundle
+# AWS Demo Runtime Deployment / HTTPS Origin Bundle
 
 ## 目的
 
-このディレクトリは、Phase 4B-1でAmazon Linux 2023のEC2ホストにDemo API Runtimeを構築するためのhost-side deployment bundleです。コードと運用契約だけを提供し、このPRではAWSへの接続、EC2操作、ECR push、Terraform操作を行いません。実環境への適用はPhase 4B-2のArchitecture/PO承認後に限定します。
+このディレクトリは、Amazon Linux 2023のEC2ホストにDemo API Runtimeを構築するためのhost-side deployment bundleです。Phase 4Bで構築したAPI/Valkey runtimeに加え、Phase 4C-1ではCloudFront origin向けのNginx HTTPS reverse proxy foundationを提供します。コードと運用契約だけを扱い、このPRではAWSへの接続、EC2操作、証明書発行、ECR push、Terraform操作を行いません。
 
 Runtimeの構成は次のとおりです。
 
 ```text
 EC2 host
+├── Nginx
+│   └── HTTPS :443 -> http://127.0.0.1:8080
 ├── API container
 │   ├── SPRING_PROFILES_ACTIVE=demo
 │   └── 127.0.0.1:8080 -> container:8080
@@ -15,7 +17,7 @@ EC2 host
     └── ec-portfolio-demo private Docker network only
 ```
 
-APIをpublic `8080`で公開せず、Valkeyもhost portを一切publishしません。Nginx、origin TLS、CloudFrontはPhase 4Cの対象です。そのためPhase 4B時点のAPIはEC2 hostのloopbackからのみ到達できます。
+CloudFrontからEC2 originへの通信はHTTPS `443`だけを使用します。Nginxは同一hostのloopback APIへHTTPでproxyし、Docker networkには参加しません。APIをpublic `8080`で公開せず、Valkeyもhost portを一切publishしません。TCP `80` listenerも作成しません。
 
 ## ファイル
 
@@ -24,6 +26,8 @@ APIをpublic `8080`で公開せず、Valkeyもhost portを一切publishしませ
 | `bootstrap-host.sh` | Dockerのinstall/startと専用network作成 |
 | `deploy-api.sh` | ECR pull、SSM secret取得、Valkey/APIの安全な起動・交換 |
 | `smoke-check.sh` | secret不要のcontainer、port、readiness検証 |
+| `configure-origin.sh` | Nginx install、TLS origin設定、SSM origin verification設定 |
+| `origin-smoke-check.sh` | HTTPS、証明書、origin verification、非公開portの検証 |
 
 bootstrapとdeployを分離することで、ホストの一度だけ必要な変更と、immutable image単位で繰り返すアプリケーションdeployを明確に分けます。Terraform `user_data`には接続せず、EC2 replacementを伴う構成変更も行いません。
 
@@ -124,13 +128,83 @@ sudo ./smoke-check.sh
 - API bindingが正確に`127.0.0.1:8080`
 - `GET /actuator/health/readiness`がHTTP 200かつ`UP`
 
+## HTTPS origin configuration
+
+`configure-origin.sh`はAmazon Linux 2023専用です。rootでNginx packageをidempotentにinstallし、既存設定を退避してから管理対象設定を検証・反映します。`nginx -t`、service activation、listener検証のいずれかに失敗した場合は以前の設定とservice状態をbest-effortで復元します。
+
+次の値だけをnon-secret inputとして渡します。
+
+| 変数 | 内容 |
+| --- | --- |
+| `ORIGIN_SERVER_NAME` | CloudFrontが接続するorigin DNS hostname |
+| `ORIGIN_CERT_FILE` | OS trust storeで検証可能なorigin certificate chainの絶対path |
+| `ORIGIN_KEY_FILE` | 対応するunencrypted private keyの絶対path |
+
+private keyはroot所有かつownerだけがread可能でなければなりません。certificate/keyが存在しない、読めない、形式が不正、またはpermissionが広すぎる場合はNginx設定を変更する前に失敗します。self-signed certificateは使用しません。certificateの発行、配置、renewal方式はPhase 4C TLS Architecture Decisionの責務であり、このbundleはsourceに依存しません。
+
+```bash
+export ORIGIN_SERVER_NAME="origin.demo.example.com"
+export ORIGIN_CERT_FILE="/etc/pki/tls/certs/origin-fullchain.pem"
+export ORIGIN_KEY_FILE="/etc/pki/tls/private/origin.key"
+
+sudo --preserve-env=ORIGIN_SERVER_NAME,ORIGIN_CERT_FILE,ORIGIN_KEY_FILE \
+  ./configure-origin.sh
+```
+
+AWS CLIのRegionがhostで設定されていない場合のみ、non-secretの`AWS_REGION`または`AWS_DEFAULT_REGION`もsudoで引き継ぎます。AWS credentialはEC2 instance roleから取得し、caller環境やcontainerには渡しません。
+
+生成されるNginx contractは次のとおりです。
+
+- `listen 443 ssl`のみを使用し、TCP `80` listenerを作成しない
+- TLS 1.2/1.3を許可する
+- `server_name`とcertificate/key pathを明示する
+- `server_tokens off`を使用する
+- `Host`、`X-Forwarded-For`、`X-Forwarded-Proto`をupstreamへ渡す
+- `X-Origin-Verify`自体はSpring Bootへ転送しない
+- upstreamは常に`http://127.0.0.1:8080`
+
+## Origin verification secret
+
+CloudFront origin requestには`X-Origin-Verify` headerを設定し、NginxはSSM SecureString `/ec-portfolio/demo/origin/verify-token`と完全一致するrequestだけをproxyします。headerがない、または一致しないrequestはHTTP 403です。この制御は、Security Groupでinbound `443`のsourceをAWS-managed CloudFront origin-facing prefix listに限定するnetwork境界と組み合わせるdefense-in-depthです。
+
+tokenは32〜128文字のURL-safe文字（`A-Z`、`a-z`、`0-9`、`_`、`-`）を使用します。command argument、caller environment、repository、stdout/stderrには渡しません。hostのAWS CLIがEC2 instance roleで`--with-decryption`取得し、root-onlyの一時ファイルと次の分離されたruntime configだけに保存します。
+
+```text
+/etc/nginx/ec-portfolio-demo/origin-secret.conf  # token照合map、root:root 0600
+/etc/nginx/ec-portfolio-demo/origin-server.conf  # server/proxy設定、tokenなし
+```
+
+Nginx master configurationもroot-onlyです。`nginx -T`はsecret mapの内容まで標準出力へ展開するため、実行結果をterminal共有、ticket、CI artifact、ログ収集へ載せてはいけません。syntax確認にはscript内の`nginx -t`だけを使用します。
+
+## Origin smoke check
+
+origin設定後、実際のcertificate hostname verificationとorigin contractを確認します。
+
+```bash
+export ORIGIN_SERVER_NAME="origin.demo.example.com"
+sudo --preserve-env=ORIGIN_SERVER_NAME ./origin-smoke-check.sh
+```
+
+scriptは`curl --resolve`でhostnameを`127.0.0.1`へ向けますが、OS trust storeによるcertificate chain/SAN検証を迂回しません。正しいtokenはcommand argumentではなくroot-onlyの一時curl configで渡し、終了時に削除します。
+
+検証項目:
+
+- Nginx serviceがactiveでTCP `443` listenerが存在する
+- TCP `80` listenerが存在しない
+- certificate chainと`ORIGIN_SERVER_NAME`が検証できる
+- headerなし/不正headerはHTTP 403
+- 正しいheaderのreadinessはHTTP 200かつ`UP`
+- API containerのhost bindingは正確に`127.0.0.1:8080`
+- Valkey containerにhost publishがない
+
 ## Security and approval gate
 
 - public `8080` / `6379`は禁止
+- public `80`は禁止し、CloudFront originはHTTPS `443`のみ
 - privileged、host network、Docker socket mountは禁止
 - `latest` tagは禁止
-- secret file、`.env`、AWS account IDのcommitは禁止
+- secret file、certificate private key、`.env`、AWS account IDのcommitは禁止
 - Terraform、`user_data`、Security Group、Docker imageは変更しない
-- AWS credential/SSO、AWS CLI mutation、Terraform plan/apply/state、EC2接続、ECR pushはこのPhase 4B-1では実行しない
+- AWS credential/SSO、AWS CLI mutation、Terraform plan/apply/state、EC2接続、証明書発行、ECR pushはこのPhase 4C-1では実行しない
 
-実際のhost bootstrapとdeploymentは、対象commit、image SHA、AWS identity/Region、RDS endpoint、CORS origin、maintenance windowをArchitecture/POが確認したPhase 4B-2 gateの後にのみ実施します。
+Phase 4Bの実環境deployment contractは維持します。Nginx設定、certificate配置、CloudFront custom header、Security Group連携を実際のAWS環境へ適用する作業は、Phase 4CのTLS Architecture DecisionとArchitecture/PO gateの後にのみ実施します。
