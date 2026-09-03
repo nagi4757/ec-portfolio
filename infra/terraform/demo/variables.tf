@@ -127,3 +127,14 @@ variable "origin_verify_token_version" {
     error_message = "origin_verify_token_version must be a positive integer."
   }
 }
+
+variable "cloudfront_origin_verify_token" {
+  description = "Existing origin verification token supplied for the CloudFront header. Unlike the SSM write-only input, this sensitive value is persisted in saved plans and encrypted remote state."
+  type        = string
+  sensitive   = true
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9_-]{32,128}$", var.cloudfront_origin_verify_token))
+    error_message = "cloudfront_origin_verify_token must contain 32-128 URL-safe characters using only letters, digits, underscore, and hyphen."
+  }
+}

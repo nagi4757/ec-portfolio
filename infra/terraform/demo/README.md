@@ -2,11 +2,11 @@
 
 <!-- markdownlint-disable MD013 MD060 -->
 
-This root module defines the Tokyo network foundation, Phase 3A Demo runtime, Phase 3B Scheduler/cost/failure guardrails, the Phase 4A deployment foundation, and the Phase 4C-2A origin foundation. Phases 1, 3A/3B, and 4A are applied to AWS, and the latest credentialed Terraform convergence check reported `No changes`. Phase 4A's ECR repository, JWT SecureString, and EC2 runtime deployment IAM policy are applied. All four schedules exist, the SNS subscription is confirmed, the Scheduler failure alarm is `OK`, alarm-to-SNS delivery is verified, and the tax-inclusive monthly Budget limit is `30.30 USD`.
+This root module defines the Tokyo network foundation, Phase 3A Demo runtime, Phase 3B Scheduler/cost/failure guardrails, the Phase 4A deployment foundation, the Phase 4C-2A origin foundation, and the Phase 4C-2B CloudFront API distribution. Phases 1, 3A/3B, 4A, and 4C-2A are applied to AWS, and the latest approved credentialed Terraform convergence check before Phase 4C-2B reported `No changes`. Phase 4A's ECR repository, JWT SecureString, and EC2 runtime deployment IAM policy are applied. All four schedules exist, the SNS subscription is confirmed, the Scheduler failure alarm is `OK`, alarm-to-SNS delivery is verified, and the tax-inclusive monthly Budget limit is `30.30 USD`.
 
 The Scheduler stop path was verified on 2026-09-01: EC2 was `stopped` after its 17:00 JST invocation and RDS was `stopped` after 17:10. The start path was verified on 2026-09-02: RDS was `available` after 09:50 and EC2 was `running` after 10:00.
 
-Phase 4C-2A is code only and is not applied. Its DNS/SSM/IAM resources require a separate credentialed plan, security/cost review, and explicit PO approval. Do not run that plan or apply as part of this change. Phase 4C-2A does not create CloudFront, issue a certificate, or configure Nginx.
+Current approved project status: Phase 4C-2A is `APPLIED / CONVERGED`; Phase 4C-3 is `COMPLETE`; Phase 4C-2B is `CODE PENDING` (this code-only change, not applied). The origin `A` record points to the existing EC2 EIP and has no `AAAA` record. The Let's Encrypt certificate and Nginx HTTPS origin are verified: missing/invalid `X-Origin-Verify` returns `403`, and the valid token returns `200 / UP`; the renewal timer is enabled and active. These are prior operational results, not AWS checks performed by this code-only PR. CloudFront creation requires a separate credentialed plan, security/cost review, and explicit PO approval. Do not run a plan, apply, certificate operation, or runtime deployment as part of this change.
 
 Architecture sources:
 
@@ -45,7 +45,7 @@ The EC2 origin security group allows only:
 - Egress TCP 443 to IPv4 destinations for ECR, SSM, CloudWatch, AWS APIs, and approved HTTPS package repositories.
 - Egress TCP 3306 to the RDS security group.
 
-There is no SSH ingress and no public CIDR ingress to TCP 443. The CloudFront origin secret remains a later CloudFront/Nginx concern and is not represented by a security-group rule.
+There is no SSH ingress and no public CIDR ingress to TCP 443. Nginx already enforces the origin token; Phase 4C-2B defines its CloudFront header binding without changing any security-group rule.
 
 The RDS security group allows only TCP 3306 ingress from the EC2 origin security group. It has no public ingress and no explicit egress rule because security groups are stateful and response traffic for an allowed inbound connection is automatically permitted.
 
@@ -76,7 +76,7 @@ Removing `AutoStop` from provider default tags is expected to remove that tag fr
 - The instance follows the existing public app subnet's no-auto-public-IP policy and uses only the existing EC2 origin security group. A separately associated Elastic IP provides the stable future CloudFront origin address and continues to incur public IPv4 cost while EC2 is stopped. Do not duplicate the subnet policy with instance-level `associate_public_ip_address = false`: during partial-apply recovery, provider refresh after the explicit EIP association conflicted with the duplicate setting and proposed perpetual instance replacement.
 - The encrypted root volume is 20 GiB gp3 with default IOPS/throughput and is deleted on instance termination. No additional data volume is defined.
 - IMDSv2 tokens are required, the metadata endpoint is enabled, metadata tags are disabled, and the hop limit is `1`. Phase 3A containers do not need instance metadata. A future container AWS SDK requirement must justify a separately reviewed hop-limit change to `2`.
-- No EC2 key pair, SSH ingress, runtime software, Docker, Nginx, Valkey, application container, origin TLS, origin-header enforcement, or ECR pull bootstrap is defined. Phase 4C-2A reserves the origin token in SSM and its exact read permission only; it does not consume the token on the host.
+- This Terraform root defines no EC2 key pair, SSH ingress, or runtime installation/bootstrap. Phase 4C-2A provides the origin token in SSM and its exact read permission. The separate, completed Phase 4C-3 runtime procedure consumes it on the host and configures origin TLS/header enforcement; Phase 4C-2B does not modify that runtime.
 
 AWS-provided AL2023 AMIs normally include SSM Agent, so Phase 3A does not add network-fetched installation user data. Verify the agent is installed and running during the future launch gate. The dedicated instance role trusts only `ec2.amazonaws.com`. Its custom inline policy permits managed-node registration and Session Manager message channels only.
 
@@ -128,18 +128,48 @@ The approved origin hostname is `origin-demo.yoonec.dev` in the existing public 
 
 One TTL-60 `A` record maps the origin hostname to the existing `aws_eip.ec2_origin.public_ip`. No `AAAA` record, additional EIP, EC2 replacement, subnet change, or security-group change is defined. This prepares public DNS for the existing CloudFront-prefix-list-restricted origin; it does not make the EIP directly reachable from arbitrary Internet sources.
 
-The Standard SecureString `/ec-portfolio/demo/origin/verify-token` reserves the future `X-Origin-Verify` defense-in-depth token. `origin_verify_token` is sensitive and ephemeral, accepts exactly 32-128 URL-safe `[A-Za-z0-9_-]` characters, and has no default. Together with the SSM resource's `value_wo`, this prevents the Phase 4C-2A root input and parameter plaintext from being persisted in saved plan or state artifacts; only `origin_verify_token_version` is persisted for rotation. No output exposes the value. Treat it as a defense-in-depth origin token layered on the managed prefix-list security-group restriction, not as a DB/JWT-equivalent credential or an authentication boundary. A future Phase 4C-2B CloudFront header binding and any resulting state exposure require a separate Architecture gate.
+The applied Standard SecureString `/ec-portfolio/demo/origin/verify-token` holds the `X-Origin-Verify` defense-in-depth token. `origin_verify_token` remains sensitive and ephemeral, accepts exactly 32-128 URL-safe `[A-Za-z0-9_-]` characters, and has no default. Together with the unchanged SSM `value_wo`/`value_wo_version` path, this keeps that input and write-only argument out of saved plans and state; only `origin_verify_token_version` is persisted for rotation. No output exposes the value. Phase 4C-2B deliberately introduces a separate non-ephemeral input for the same logical token; the CloudFront copy has the different state boundary documented below. Treat this token as defense in depth layered on the managed prefix-list restriction, not as a DB/JWT-equivalent credential or an application authentication boundary.
 
 Two separate EC2 inline policies preserve reviewable least-privilege boundaries:
 
 - `origin-verification-read` grants only `ssm:GetParameter` on the exact origin-token parameter ARN. It grants no Parameter Store path/list access and no explicit KMS permission.
 - `acme-dns-route53` grants `route53:ChangeResourceRecordSets` only on the discovered public zone and only for `TXT`, normalized name `_acme-challenge.origin-demo.yoonec.dev`, and `UPSERT`/`DELETE`. Certbot's Route53 plugin uses `ListHostedZones` to discover the parent zone and `GetChange` to poll propagation; only `ListHostedZones` requires `Resource = "*"`, while `GetChange` is limited to the Route 53 change ARN pattern. The EC2 instance profile supplies short-lived role credentials; no access key or credential file is created.
 
-The current AL2023.12 package catalog lists `certbot` and `python3-certbot-dns-route53` in the `2.6.0-4.amzn2023.0.1` package group with Full Support. Certbot upstream documents the three Route 53 API permissions, and its implementation uses `UPSERT` for challenge creation/update, `DELETE` for cleanup, `ListHostedZones` for discovery, and `GetChange` for polling. Before the later certificate operation, verify the package version actually resolved by the running AL2023 repository, install through a separately approved runtime procedure, and run a renewal dry-run. Package installation, Let's Encrypt account registration, certificate/private-key creation, renewal scheduling, Nginx TLS configuration, and CloudFront remain outside this phase.
+The AL2023.12 package catalog lists `certbot` and `python3-certbot-dns-route53` in the `2.6.0-4.amzn2023.0.1` package group with Full Support. Certbot upstream documents the three Route 53 API permissions, and its implementation uses `UPSERT` for challenge creation/update, `DELETE` for cleanup, `ListHostedZones` for discovery, and `GetChange` for polling. The separately approved Phase 4C-3 certificate/Nginx setup is complete, with a valid Let's Encrypt certificate and an enabled/active renewal timer. Future maintenance still requires package compatibility and renewal verification under the [runtime runbook](../../runtime/demo/README.md); no package, certificate, private key, timer, or Nginx change is included here.
 
 The existing `yoonec.dev` Route 53 registrar charge is `$17/year`; it is an annual domain cost and is tracked separately from the steady monthly Demo resource subtotal. The existing hosted zone remains `$0.50/month` plus DNS query charges and is already represented by the `$0.54` monthly Route 53 allowance in the architecture cost table. This phase creates neither another hosted zone nor another fixed monthly service. Because the Budget is account-wide, the domain registration or renewal charge can trigger monthly thresholds in its billing month. That expected one-time/annual signal does not change the `30.30 USD` Budget contract.
 
 Sources: [AL2023.12 package list](https://docs.aws.amazon.com/linux/al2023/release-notes/all-packages-AL2023.12.html), [Certbot Route53 plugin](https://certbot-dns-route53.readthedocs.io/en/stable/), [Certbot 2.6.0 Route53 implementation](https://github.com/certbot/certbot/blob/v2.6.0/certbot-dns-route53/certbot_dns_route53/_internal/dns_route53.py), [Route 53 record-level IAM conditions](https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/specifying-conditions-route53.html), [Route 53 IAM actions and resources](https://docs.aws.amazon.com/service-authorization/latest/reference/list_route53.html), [Route 53 pricing](https://aws.amazon.com/route53/pricing/)
+
+## Phase 4C-2B CloudFront API distribution
+
+One distribution fronts `origin-demo.yoonec.dev`, never the EIP literal. The custom origin uses HTTPS port 443 and only `TLSv1.2`; the required `http_port = 80` schema field does not enable HTTP origin traffic because `origin_protocol_policy = "https-only"`. The existing origin certificate, DNS, EIP, and CloudFront-prefix-list security group remain unchanged.
+
+The viewer uses the default CloudFront domain/certificate with no alternate domain, ACM viewer certificate, or Route 53 viewer alias. HTTP requests redirect to HTTPS. Viewer IPv6 is enabled without adding an origin `AAAA` record. `PriceClass_200` and the `JP`/`KR` geo allowlist are explicit. Geo restriction is IP-based, is not authentication, and cannot reliably identify a user's physical location or prevent VPN/proxy use. Paid WAF, Shield Advanced, ALB, access-log S3 storage, and frontend hosting are not included. The existing Shield Standard/Nginx guardrails remain important; the prefix list covers CloudFront origin-facing traffic, not exclusively this distribution.
+
+### API cache and forwarding contract
+
+- `CachingDisabled` is referenced by its public AWS-managed policy ID through `data.aws_cloudfront_cache_policy.caching_disabled`; its minimum/default/maximum TTLs are all zero. The required `cached_methods = ["GET", "HEAD"]` field does not enable caching under this policy.
+- All seven API methods are allowed: `GET`, `HEAD`, `OPTIONS`, `PUT`, `POST`, `PATCH`, `DELETE`. There is one default behavior and no separately cached API path.
+- The explicit `api` origin request policy uses `allExcept` for headers, excluding only viewer `Host` and viewer `X-Origin-Verify`. It therefore forwards `Authorization` and viewer CORS headers such as `Origin`, `Access-Control-Request-Method`, and `Access-Control-Request-Headers`. All cookies and query strings are forwarded.
+- CloudFront supplies the origin-domain `Host` and its configured `X-Origin-Verify` custom header. A viewer-supplied verification header is excluded and cannot select the origin token; CloudFront also documents that custom origin headers overwrite matching viewer values.
+- Error-response minimum TTLs are explicitly zero for configurable cacheable error codes, without rewriting status codes or bodies. CloudFront does not cache `416` responses. This avoids the separate default error cache even while normal API caching is disabled.
+
+No application CORS or response-header policy is introduced. Forwarding CORS inputs does not itself permit a browser origin; that remains the application's separately reviewed contract. Post-apply verification must cover authenticated/unauthenticated requests, cookies/query strings, CORS preflight, spoofed verification headers, HTTPS redirection, and JP/KR versus blocked locations. These runtime checks are not claimed by static validation.
+
+Sources: [CloudFront header selection](https://docs.aws.amazon.com/cloudfront/latest/APIReference/API_OriginRequestPolicyHeadersConfig.html), [Custom origin headers and Authorization](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/add-origin-custom-headers.html), [Managed origin request policies and Host](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/using-managed-origin-request-policies.html), [CachingDisabled](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/using-managed-cache-policies.html), [Error cache TTL](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/custom-error-pages-expiration.html)
+
+### Accepted CloudFront token state boundary
+
+`cloudfront_origin_verify_token` is a new required string: sensitive, **non-ephemeral**, no default, with the same 32-128 URL-safe validation as the existing token. Only `custom_header.value` consumes it. The existing `origin_verify_token` variable and SSM write-only/version arguments are unchanged. No SSM secret data source, generated replacement token, rotation, or secret output is introduced.
+
+Architecture explicitly accepts that the **CloudFront header value is included in encrypted Terraform remote state**. It is also retained in saved plans and readable by appropriately authorized CloudFront configuration readers. `sensitive = true` redacts normal CLI presentation; it does not encrypt a local saved plan or hide plaintext from state readers, `terraform show -json`, or equivalent exports. Protect plan/state files, their backups, and access permissions; never print, upload to PR/CI artifacts, or commit their contents. This is a distinct boundary from the still-ephemeral DB/JWT inputs.
+
+For initial rollout, the operator must supply the same existing Keychain token used by SSM/Nginx to both origin-token inputs through a protected, non-logging channel. Matching these values is an explicit rollout gate; Terraform does not fetch the SSM plaintext to compare them. A mismatch causes Nginx to reject origin requests. No actual value belongs in locals, documentation, examples, tfvars, tags, outputs, or logs. Token rotation remains a separate Architecture/PO operation.
+
+Only `cloudfront_distribution_id` and `cloudfront_distribution_domain_name` are added as non-secret outputs. The code-only resource expectation is two creates (distribution and origin request policy), plus a managed-policy read; a real plan is still required under separate approval. All previously applied resources, including Phase 4C-2A and Phase 4A, must remain unchanged.
+
+Sources: [Terraform sensitive data boundaries](https://developer.hashicorp.com/terraform/language/manage-sensitive-data), [CloudFront distribution](https://registry.terraform.io/providers/hashicorp/aws/6.62.0/docs/resources/cloudfront_distribution), [CloudFront origin request policy](https://registry.terraform.io/providers/hashicorp/aws/6.62.0/docs/resources/cloudfront_origin_request_policy)
 
 ## Runtime schedule contract
 
@@ -198,7 +228,7 @@ Sources: [EventBridge Scheduler pricing](https://aws.amazon.com/eventbridge/pric
 
 ## Phase 3 live verification and code-only gates
 
-Phases 1, 3A/3B, and 4A are applied and Terraform has converged with `No changes`. Phase 4A includes the ECR repository, JWT SecureString, and EC2 runtime deployment IAM policy. The four schedules, confirmed SNS subscription, `OK` failure alarm, alarm-to-SNS path, and `30.30 USD` monthly Budget are verified.
+Phases 1, 3A/3B, 4A, and 4C-2A are applied, and the approved pre-4C-2B convergence check reported `No changes`. Phase 4A includes the ECR repository, JWT SecureString, and EC2 runtime deployment IAM policy. The four schedules, confirmed SNS subscription, `OK` failure alarm, alarm-to-SNS path, and `30.30 USD` monthly Budget are verified.
 
 The first complete weekday stop/start cycle is verified by read-only status checks:
 
@@ -220,30 +250,29 @@ Keep the following contract checks as operational regression guards:
 
 The observed resource states provide invocation evidence in addition to the `OK` failure alarm. Retain the stop/start evidence during operational review. If a manual interview/demo start extends beyond the standard window, the same day's stop schedules remain the automatic stop policy; an extension after those times requires an explicit manual stop and cost review.
 
-The future Phase 4C-2A credentialed plan must report exactly `4 add / 0 change / 0 destroy` for this phase: one Route 53 `A` record, one SSM SecureString, and two EC2 inline IAM policies. Phase 4A must have zero create/change/replacement delta. Any Phase 4A delta, existing-resource change, replacement, or destroy is a blocker: stop and investigate backend/state selection, AWS identity, and live drift instead of applying.
+The applied Phase 4C-2A Route 53 `A` record, origin SecureString, and two EC2 inline IAM policies must all remain `no-op` in the future Phase 4C-2B plan. Phase 4A must also have zero delta. Any previously applied resource create/change/replacement/destroy is a blocker: stop and investigate backend/state selection, AWS identity, and live drift instead of applying.
 
 ## Local validation
 
-Copy the example only when preparing a reviewed environment:
+Run static checks in the isolated code worktree without AWS credentials or runtime input files:
 
 ```shell
-cp terraform.tfvars.example terraform.tfvars
-terraform init -backend=false
-terraform fmt -check
+terraform init -backend=false -input=false -lockfile=readonly
+terraform fmt -check -recursive
 terraform validate
 ```
 
-Static validation does not require real DB, JWT, or origin verification values. A future approved plan/apply must inject `db_master_password`, `auth_jwt_secret`, and `origin_verify_token` through a non-logging ephemeral channel and must not write them to `terraform.tfvars`, a saved plan, shell history, or logs. All three inputs are ephemeral in Phase 4C-2A. Any future CloudFront header binding requires a separate Architecture decision before changing that contract.
+Static validation does not require real DB, JWT, or either origin verification input. `db_master_password`, `auth_jwt_secret`, and `origin_verify_token` remain ephemeral and must use a protected non-logging input channel during a future approved operation. `cloudfront_origin_verify_token` uses the same existing token but is non-ephemeral: its retention in a saved plan and encrypted remote state is the accepted Phase 4C-2B boundary above. Never supply any of these values through committed tfvars, shell history, or logs; do not load Keychain secrets for static validation.
 
 Static validation also does not require `alert_email`. A future approved plan/apply must supply it through an ignored runtime variable source or protected environment variable. Do not add a personal address to `terraform.tfvars.example` or commit it in any `.tfvars` file.
 
 The existing public hosted zone ID must likewise be supplied only at runtime as `route53_public_hosted_zone_id`. Do not add the real ID to `terraform.tfvars.example`, documentation, outputs, logs, or the PR description.
 
-`terraform plan` needs AWS credentials because it resolves AWS-managed data and the remote state. Do not run a credentialed plan or `terraform apply` as part of Phase 4C-2A code validation.
+`terraform plan` needs AWS credentials because it resolves AWS-managed data and the remote state. Neither a Terraform plan (including a local/mock plan) nor `terraform apply` is part of Phase 4C-2B code validation. AWS login, permission changes, and resource mutation are prohibited in this PR.
 
 ## State and deployment gates
 
-The Demo partial S3 backend is initialized and remote state exists. Phase 1 network, Phase 3 runtime/guardrail resources, and Phase 4A deployment-foundation resources are applied; the latest approved credentialed convergence check reported `No changes`. Phase 4C-2A resources are not applied.
+The main worktree's Demo partial S3 backend is initialized and remote state exists. Phase 1 network, Phase 3 runtime/guardrail resources, Phase 4A deployment-foundation resources, and Phase 4C-2A origin-foundation resources are applied; the latest approved pre-4C-2B credentialed convergence check reported `No changes`. Phase 4C-3 runtime TLS/header enforcement is complete. Phase 4C-2B is not applied. Code-only worktrees must not copy or modify main's backend configuration, runtime metadata, or recovery artifacts.
 
 Before any future state-changing AWS operation, separately verify:
 
@@ -255,4 +284,4 @@ Before any future state-changing AWS operation, separately verify:
 
 The independent [bootstrap root](../bootstrap/README.md) owns the S3 bucket and native lockfile strategy. `backend.hcl.example` documents the `demo/terraform.tfstate` runtime configuration without committing account-specific values.
 
-Before a future Phase 4C-2A plan or apply, verify the exact public `yoonec.dev` hosted zone identity, the single `A` record to the existing EIP, absence of `AAAA`, ephemeral/write-only origin-token path, exact SSM/Route 53 IAM scopes, and no CloudFront, certificate, Nginx, compute, network, security, database, schedule, alert, or Budget change. The expected delta is exactly `4 add / 0 change / 0 destroy`. Phase 4A resources must have zero delta; otherwise stop and investigate backend/state selection, AWS identity, and drift. Apply remains prohibited until this code is merged and Architecture/PO approves that exact plan.
+Before a future Phase 4C-2B plan or apply, review the two new CloudFront resources, managed CachingDisabled reference, exact origin hostname/HTTPS/TLS, viewer-header exclusions, secret state boundary, same-token rollout input, and JP/KR restriction. The code expectation is `2 add / 0 change / 0 destroy`, not an executed or approved plan result. Existing DNS/SSM/IAM, compute, EIP, network, security, database, schedule, alert, Budget, and Phase 4A resources must have zero delta. Any replacement, destroy, unexpected resource, or token rotation requires stopping for Architecture review. Certificate/Nginx changes, S3 frontend, custom viewer domain/certificate/alias, application CORS, WAF, and ALB remain out of scope. Apply remains prohibited until this code is merged and Architecture/PO approves the exact credentialed plan.
