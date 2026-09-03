@@ -5,17 +5,25 @@ data "aws_cloudfront_cache_policy" "caching_disabled" {
 
 resource "aws_cloudfront_origin_request_policy" "api" {
   name    = "${local.name_prefix}-api-origin"
-  comment = "Forward API viewer inputs except Host and the origin verification header"
+  comment = "Forward only approved API viewer headers, plus all cookies and query strings"
 
   cookies_config {
     cookie_behavior = "all"
   }
 
   headers_config {
-    header_behavior = "allExcept"
+    header_behavior = "whitelist"
 
     headers {
-      items = ["Host", "X-Origin-Verify"]
+      items = [
+        "Accept",
+        "Access-Control-Request-Headers",
+        "Access-Control-Request-Method",
+        "Authorization",
+        "Content-Type",
+        "Origin",
+        "X-Correlation-ID",
+      ]
     }
   }
 

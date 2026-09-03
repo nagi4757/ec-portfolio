@@ -6,7 +6,7 @@ This root module defines the Tokyo network foundation, Phase 3A Demo runtime, Ph
 
 The Scheduler stop path was verified on 2026-09-01: EC2 was `stopped` after its 17:00 JST invocation and RDS was `stopped` after 17:10. The start path was verified on 2026-09-02: RDS was `available` after 09:50 and EC2 was `running` after 10:00.
 
-Current approved project status: Phase 4C-2A is `APPLIED / CONVERGED`; Phase 4C-3 is `COMPLETE`; Phase 4C-2B is `CODE PENDING` (this code-only change, not applied). The origin `A` record points to the existing EC2 EIP and has no `AAAA` record. The Let's Encrypt certificate and Nginx HTTPS origin are verified: missing/invalid `X-Origin-Verify` returns `403`, and the valid token returns `200 / UP`; the renewal timer is enabled and active. These are prior operational results, not AWS checks performed by this code-only PR. CloudFront creation requires a separate credentialed plan, security/cost review, and explicit PO approval. Do not run a plan, apply, certificate operation, or runtime deployment as part of this change.
+Current approved project status: Phase 4C-2A is `APPLIED / CONVERGED`; Phase 4C-3 is `COMPLETE`; Phase 4C-2B is `PARTIAL APPLY`. The origin request policy is created and tracked in Terraform state; distribution creation failed and remains pending. The origin `A` record points to the existing EC2 EIP and has no `AAAA` record. The Let's Encrypt certificate and Nginx HTTPS origin are verified: missing/invalid `X-Origin-Verify` returns `403`, and the valid token returns `200 / UP`; the renewal timer is enabled and active. These are prior operational results, not AWS checks performed by this code-only remediation. Recovery requires a separately approved credentialed plan, security/cost review, and explicit PO apply approval. Do not run a plan, apply, certificate operation, or runtime deployment as part of this change.
 
 Architecture sources:
 
@@ -143,6 +143,8 @@ Sources: [AL2023.12 package list](https://docs.aws.amazon.com/linux/al2023/relea
 
 ## Phase 4C-2B CloudFront API distribution
 
+The initial apply created `aws_cloudfront_origin_request_policy.api`, but `CreateDistributionWithTags` returned `InvalidArgument` (HTTP 400): `X-Origin-Verify` was not allowed in both the origin custom header and the origin request policy header configuration. The existing policy must be preserved and updated in place; do not delete it, manually edit AWS resources, or use state removal/import/move to recover. This code-only remediation replaces its header selection with an explicit whitelist before a separately approved distribution creation.
+
 One distribution fronts `origin-demo.yoonec.dev`, never the EIP literal. The custom origin uses HTTPS port 443 and only `TLSv1.2`; the required `http_port = 80` schema field does not enable HTTP origin traffic because `origin_protocol_policy = "https-only"`. The existing origin certificate, DNS, EIP, and CloudFront-prefix-list security group remain unchanged.
 
 The viewer uses the default CloudFront domain/certificate with no alternate domain, ACM viewer certificate, or Route 53 viewer alias. HTTP requests redirect to HTTPS. Viewer IPv6 is enabled without adding an origin `AAAA` record. `PriceClass_200` and the `JP`/`KR` geo allowlist are explicit. Geo restriction is IP-based, is not authentication, and cannot reliably identify a user's physical location or prevent VPN/proxy use. Paid WAF, Shield Advanced, ALB, access-log S3 storage, and frontend hosting are not included. The existing Shield Standard/Nginx guardrails remain important; the prefix list covers CloudFront origin-facing traffic, not exclusively this distribution.
@@ -151,8 +153,9 @@ The viewer uses the default CloudFront domain/certificate with no alternate doma
 
 - `CachingDisabled` is referenced by its public AWS-managed policy ID through `data.aws_cloudfront_cache_policy.caching_disabled`; its minimum/default/maximum TTLs are all zero. The required `cached_methods = ["GET", "HEAD"]` field does not enable caching under this policy.
 - All seven API methods are allowed: `GET`, `HEAD`, `OPTIONS`, `PUT`, `POST`, `PATCH`, `DELETE`. There is one default behavior and no separately cached API path.
-- The explicit `api` origin request policy uses `allExcept` for headers, excluding only viewer `Host` and viewer `X-Origin-Verify`. It therefore forwards `Authorization` and viewer CORS headers such as `Origin`, `Access-Control-Request-Method`, and `Access-Control-Request-Headers`. All cookies and query strings are forwarded.
-- CloudFront supplies the origin-domain `Host` and its configured `X-Origin-Verify` custom header. A viewer-supplied verification header is excluded and cannot select the origin token; CloudFront also documents that custom origin headers overwrite matching viewer values.
+- The explicit `api` origin request policy uses `whitelist`: `Accept`, `Access-Control-Request-Headers`, `Access-Control-Request-Method`, `Authorization`, `Content-Type`, `Origin`, and `X-Correlation-ID`. This preserves bearer authentication, JSON requests, and CORS/preflight inputs. All cookies and query strings are forwarded.
+- `X-Correlation-ID` is the only application-specific addition: [CorrelationIdFilter](../../../apps/api/src/main/kotlin/com/nagi4757/ec/api/common/logging/CorrelationIdFilter.kt) validates and reuses a supplied UUID, and [OpenApiConfig](../../../apps/api/src/main/kotlin/com/nagi4757/ec/api/common/config/OpenApiConfig.kt) documents it as an optional request header. Forwarding it preserves existing client-to-server request correlation; no speculative headers are included.
+- Viewer `Host` and `X-Origin-Verify` do not appear in the policy header list and are not forwarded. CloudFront generates `Host` from the origin hostname, and only the unchanged origin custom header supplies `X-Origin-Verify` to the origin. A viewer-supplied verification value cannot select the origin token. Do not revert to an all-headers policy or an exclusion list.
 - `CachingDisabled` already disables normal and error response caching. The explicit `custom_error_response` settings with `error_caching_min_ttl = 0` are retained as an additional safeguard to pin the API error-cache contract and avoid relying on implicit/default behavior, without rewriting status codes or bodies. CloudFront does not cache `416` responses, so no override is defined for that status.
 
 No application CORS or response-header policy is introduced. Forwarding CORS inputs does not itself permit a browser origin; that remains the application's separately reviewed contract. Post-apply verification must cover authenticated/unauthenticated requests, cookies/query strings, CORS preflight, spoofed verification headers, HTTPS redirection, and JP/KR versus blocked locations. These runtime checks are not claimed by static validation.
@@ -167,7 +170,7 @@ Architecture explicitly accepts that the **CloudFront header value is included i
 
 For initial rollout, the operator must supply the same existing Keychain token used by SSM/Nginx to both origin-token inputs through a protected, non-logging channel. Matching these values is an explicit rollout gate; Terraform does not fetch the SSM plaintext to compare them. A mismatch causes Nginx to reject origin requests. No actual value belongs in locals, documentation, examples, tfvars, tags, outputs, or logs. Token rotation remains a separate Architecture/PO operation.
 
-Only `cloudfront_distribution_id` and `cloudfront_distribution_domain_name` are added as non-secret outputs. The code-only resource expectation is two creates (distribution and origin request policy), plus a managed-policy read; a real plan is still required under separate approval. All previously applied resources, including Phase 4C-2A and Phase 4A, must remain unchanged.
+Only `cloudfront_distribution_id` and `cloudfront_distribution_domain_name` remain as non-secret CloudFront outputs; their definitions are unchanged. Recovery expects one distribution create and one in-place origin request policy update, plus the unchanged managed-policy read; a real plan is still required under separate approval. All other previously applied resources, including Phase 4C-2A and Phase 4A, must remain unchanged.
 
 Sources: [Terraform sensitive data boundaries](https://developer.hashicorp.com/terraform/language/manage-sensitive-data), [CloudFront distribution](https://registry.terraform.io/providers/hashicorp/aws/6.62.0/docs/resources/cloudfront_distribution), [CloudFront origin request policy](https://registry.terraform.io/providers/hashicorp/aws/6.62.0/docs/resources/cloudfront_origin_request_policy)
 
@@ -250,7 +253,7 @@ Keep the following contract checks as operational regression guards:
 
 The observed resource states provide invocation evidence in addition to the `OK` failure alarm. Retain the stop/start evidence during operational review. If a manual interview/demo start extends beyond the standard window, the same day's stop schedules remain the automatic stop policy; an extension after those times requires an explicit manual stop and cost review.
 
-The applied Phase 4C-2A Route 53 `A` record, origin SecureString, and two EC2 inline IAM policies must all remain `no-op` in the future Phase 4C-2B plan. Phase 4A must also have zero delta. Any previously applied resource create/change/replacement/destroy is a blocker: stop and investigate backend/state selection, AWS identity, and live drift instead of applying.
+The applied Phase 4C-2A Route 53 `A` record, origin SecureString, and two EC2 inline IAM policies must all remain `no-op` in the future Phase 4C-2B plan. Phase 4A must also have zero delta. The only allowed change to an already tracked resource is the in-place header-policy remediation on `aws_cloudfront_origin_request_policy.api`. Any other previously applied resource create/change/replacement/destroy is a blocker: stop and investigate backend/state selection, AWS identity, and live drift instead of applying.
 
 ## Local validation
 
@@ -272,7 +275,7 @@ The existing public hosted zone ID must likewise be supplied only at runtime as 
 
 ## State and deployment gates
 
-The main worktree's Demo partial S3 backend is initialized and remote state exists. Phase 1 network, Phase 3 runtime/guardrail resources, Phase 4A deployment-foundation resources, and Phase 4C-2A origin-foundation resources are applied; the latest approved pre-4C-2B credentialed convergence check reported `No changes`. Phase 4C-3 runtime TLS/header enforcement is complete. Phase 4C-2B is not applied. Code-only worktrees must not copy or modify main's backend configuration, runtime metadata, or recovery artifacts.
+The main worktree's Demo partial S3 backend is initialized and remote state exists. Phase 1 network, Phase 3 runtime/guardrail resources, Phase 4A deployment-foundation resources, and Phase 4C-2A origin-foundation resources are applied; the latest approved pre-4C-2B credentialed convergence check reported `No changes`. Phase 4C-3 runtime TLS/header enforcement is complete. Phase 4C-2B is `PARTIAL APPLY`: its origin request policy is created/state-tracked, and its distribution remains pending after the failed creation. Code-only worktrees must not copy or modify main's backend configuration, runtime metadata, or recovery artifacts.
 
 Before any future state-changing AWS operation, separately verify:
 
@@ -284,4 +287,11 @@ Before any future state-changing AWS operation, separately verify:
 
 The independent [bootstrap root](../bootstrap/README.md) owns the S3 bucket and native lockfile strategy. `backend.hcl.example` documents the `demo/terraform.tfstate` runtime configuration without committing account-specific values.
 
-Before a future Phase 4C-2B plan or apply, review the two new CloudFront resources, managed CachingDisabled reference, exact origin hostname/HTTPS/TLS, viewer-header exclusions, secret state boundary, same-token rollout input, and JP/KR restriction. The code expectation is `2 add / 0 change / 0 destroy`, not an executed or approved plan result. Existing DNS/SSM/IAM, compute, EIP, network, security, database, schedule, alert, Budget, and Phase 4A resources must have zero delta. Any replacement, destroy, unexpected resource, or token rotation requires stopping for Architecture review. Certificate/Nginx changes, S3 frontend, custom viewer domain/certificate/alias, application CORS, WAF, and ALB remain out of scope. Apply remains prohibited until this code is merged and Architecture/PO approves the exact credentialed plan.
+Before a future Phase 4C-2B recovery plan or apply, review the existing policy's in-place update, pending distribution creation, managed CachingDisabled reference, exact origin hostname/HTTPS/TLS, explicit viewer-header whitelist, secret state boundary, same-token rollout input, and JP/KR restriction. The code expectation is `1 add / 1 change / 0 destroy`, not an executed or approved plan result:
+
+| Action | Resource |
+|---|---|
+| ADD | `aws_cloudfront_distribution.api` |
+| IN-PLACE CHANGE | `aws_cloudfront_origin_request_policy.api` |
+
+Existing DNS/SSM/IAM, compute, EIP, network, security, database, schedule, alert, Budget, Phase 4A, and Phase 4C-2A resources must have zero delta. Any replacement, destroy, unexpected resource, or token rotation requires stopping for Architecture review. Certificate/Nginx changes, S3 frontend, custom viewer domain/certificate/alias, application CORS, WAF, and ALB remain out of scope. Apply remains prohibited until this remediation is merged and Architecture/PO approves the exact credentialed plan.
