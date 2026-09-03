@@ -151,3 +151,13 @@ output "budget_name" {
   description = "Name of the account-wide monthly Demo cost budget."
   value       = aws_budgets_budget.monthly_cost.name
 }
+
+output "cloudfront_distribution_id" {
+  description = "ID of the Demo API CloudFront distribution."
+  value       = aws_cloudfront_distribution.api.id
+}
+
+output "cloudfront_distribution_domain_name" {
+  description = "Default CloudFront domain name for the Demo API."
+  value       = aws_cloudfront_distribution.api.domain_name
+}
