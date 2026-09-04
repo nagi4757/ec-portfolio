@@ -2,9 +2,12 @@ import { useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { authApi } from '@/features/auth/api'
 import { authStore } from '@/lib/authStore'
+import { ApiError } from '@/lib/api'
+import { useTranslation } from 'react-i18next'
 
 export default function LoginPage() {
     const navigate = useNavigate()
+    const { t } = useTranslation()
     const [email, setEmail] = useState('')
     const [password, setPassword] = useState('')
     const [error, setError] = useState<string | null>(null)
@@ -18,8 +21,10 @@ export default function LoginPage() {
             const res = await authApi.login({ email, password })
             authStore.save(res.accessToken, res.user)
             navigate('/', { replace: true })
-        } catch {
-            setError('이메일 또는 비밀번호가 올바르지 않습니다.')
+        } catch (cause) {
+            setError(cause instanceof ApiError && cause.status === 401
+                ? 'store.auth.invalidCredentials'
+                : 'store.auth.requestFailed')
         } finally {
             setLoading(false)
         }
@@ -53,7 +58,7 @@ export default function LoginPage() {
                             style={input}
                         />
                     </label>
-                    {error && <div style={errBox}>{error}</div>}
+                    {error && <div role="alert" style={errBox}>{t(error)}</div>}
                     <button type="submit" disabled={loading} style={btn(loading)}>
                         {loading ? '로그인 중...' : '로그인'}
                     </button>
@@ -93,4 +98,3 @@ const btn = (disabled: boolean): React.CSSProperties => ({
     cursor: disabled ? 'not-allowed' : 'pointer',
     fontWeight: 600, fontSize: 15, marginTop: 4,
 })
-

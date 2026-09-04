@@ -8,6 +8,14 @@ export const storeKo = {
         actions: {
             signUp: '회원가입',
         },
+        auth: {
+            invalidCredentials: '이메일 또는 비밀번호가 올바르지 않습니다.',
+            requestFailed: '처리하지 못했습니다. 연결 상태를 확인하고 잠시 후 다시 시도해 주세요.',
+            invalidInput: '입력 내용을 확인해 주세요.',
+            emailAlreadyUsed: '이미 사용 중인 이메일입니다.',
+            passwordMismatch: '비밀번호가 일치하지 않습니다.',
+            passwordTooShort: '비밀번호는 8자 이상이어야 합니다.',
+        },
         stock: {
             label: '재고',
             inStock: '재고 있음',

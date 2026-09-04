@@ -13,8 +13,19 @@ export const authStore = {
         return localStorage.getItem(TOKEN_KEY)
     },
     getUser(): AuthUser | null {
-        const raw = localStorage.getItem(USER_KEY)
-        return raw ? JSON.parse(raw) : null
+        try {
+            const raw = localStorage.getItem(USER_KEY)
+            const user: unknown = raw ? JSON.parse(raw) : null
+            if (!user || typeof user !== 'object') return null
+            const candidate = user as Partial<AuthUser>
+            return typeof candidate.id === 'number' && Number.isFinite(candidate.id)
+                && typeof candidate.email === 'string'
+                && typeof candidate.name === 'string'
+                && typeof candidate.role === 'string'
+                ? candidate as AuthUser : null
+        } catch {
+            return null
+        }
     },
     save(token: string, user: AuthUser) {
         localStorage.setItem(TOKEN_KEY, token)
@@ -28,4 +39,3 @@ export const authStore = {
         return !!this.getToken()
     },
 }
-

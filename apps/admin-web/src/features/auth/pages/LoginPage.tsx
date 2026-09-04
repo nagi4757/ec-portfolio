@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { authApi } from '@/features/auth/api'
 import { authStore } from '@/lib/authStore'
+import { ApiError } from '@/lib/api'
 import LanguageSwitcher from '@/components/LanguageSwitcher'
 import { useTranslation } from 'react-i18next'
 
@@ -10,19 +11,26 @@ export default function LoginPage() {
     const { t } = useTranslation()
     const [email, setEmail] = useState('')
     const [password, setPassword] = useState('')
-    const [loginFailed, setLoginFailed] = useState(false)
+    const [error, setError] = useState<string | null>(null)
     const [loading, setLoading] = useState(false)
 
     async function handleSubmit(e: React.FormEvent) {
         e.preventDefault()
-        setLoginFailed(false)
+        setError(null)
         setLoading(true)
         try {
             const res = await authApi.login({ email, password })
+            // Use the login response for navigation UX, never infer roles from a JWT.
+            if (res.user.role !== 'ADMIN') {
+                setError('admin.auth.adminRequired')
+                return
+            }
             authStore.save(res.accessToken, res.user)
             navigate('/', { replace: true })
-        } catch {
-            setLoginFailed(true)
+        } catch (cause) {
+            setError(cause instanceof ApiError && cause.status === 401
+                ? 'admin.auth.invalidCredentials'
+                : 'admin.auth.requestFailed')
         } finally {
             setLoading(false)
         }
@@ -75,9 +83,9 @@ export default function LoginPage() {
                         />
                     </label>
 
-                    {loginFailed && (
-                        <div style={{ color: '#e53e3e', fontSize: '14px', background: '#fff5f5', padding: '8px 12px', borderRadius: '4px' }}>
-                            {t('admin.auth.loginFailed')}
+                    {error && (
+                        <div role="alert" style={{ color: '#e53e3e', fontSize: '14px', background: '#fff5f5', padding: '8px 12px', borderRadius: '4px' }}>
+                            {t(error)}
                         </div>
                     )}
 

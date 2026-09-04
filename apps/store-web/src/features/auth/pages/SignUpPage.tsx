@@ -2,9 +2,12 @@ import { useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { authApi } from '@/features/auth/api'
 import { authStore } from '@/lib/authStore'
+import { ApiError } from '@/lib/api'
+import { useTranslation } from 'react-i18next'
 
 export default function SignUpPage() {
     const navigate = useNavigate()
+    const { t } = useTranslation()
     const [name, setName] = useState('')
     const [email, setEmail] = useState('')
     const [password, setPassword] = useState('')
@@ -16,11 +19,11 @@ export default function SignUpPage() {
         e.preventDefault()
         setError(null)
         if (password !== passwordConfirm) {
-            setError('비밀번호가 일치하지 않습니다.')
+            setError('store.auth.passwordMismatch')
             return
         }
         if (password.length < 8) {
-            setError('비밀번호는 8자 이상이어야 합니다.')
+            setError('store.auth.passwordTooShort')
             return
         }
         setLoading(true)
@@ -29,10 +32,12 @@ export default function SignUpPage() {
             authStore.save(res.accessToken, res.user)
             navigate('/', { replace: true })
         } catch (err: unknown) {
-            if (err instanceof Error && err.message.includes('409')) {
-                setError('이미 사용 중인 이메일입니다.')
+            if (err instanceof ApiError && err.status === 409) {
+                setError('store.auth.emailAlreadyUsed')
+            } else if (err instanceof ApiError && err.status === 400) {
+                setError('store.auth.invalidInput')
             } else {
-                setError('회원가입에 실패했습니다. 다시 시도해 주세요.')
+                setError('store.auth.requestFailed')
             }
         } finally {
             setLoading(false)
@@ -89,7 +94,7 @@ export default function SignUpPage() {
                             style={input}
                         />
                     </label>
-                    {error && <div style={errBox}>{error}</div>}
+                    {error && <div role="alert" style={errBox}>{t(error)}</div>}
                     <button type="submit" disabled={loading} style={btn(loading)}>
                         {loading ? '처리 중...' : '회원가입'}
                     </button>
@@ -129,4 +134,3 @@ const btn = (disabled: boolean): React.CSSProperties => ({
     cursor: disabled ? 'not-allowed' : 'pointer',
     fontWeight: 600, fontSize: 15, marginTop: 4,
 })
-

@@ -8,6 +8,14 @@ export const storeJa = {
         actions: {
             signUp: '新規登録',
         },
+        auth: {
+            invalidCredentials: 'メールアドレスまたはパスワードが正しくありません。',
+            requestFailed: '処理に失敗しました。接続状況を確認し、時間をおいて再度お試しください。',
+            invalidInput: '入力内容を確認してください。',
+            emailAlreadyUsed: 'このメールアドレスは既に使用されています。',
+            passwordMismatch: 'パスワードが一致しません。',
+            passwordTooShort: 'パスワードは8文字以上で入力してください。',
+        },
         stock: {
             label: '在庫',
             inStock: '在庫あり',

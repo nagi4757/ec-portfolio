@@ -7,9 +7,9 @@ type Props = {
 }
 
 export default function PrivateRoute({ children }: Props) {
-    if (!authStore.isLoggedIn()) {
+    // This is a UX guard only; the backend remains authoritative for permissions.
+    if (!authStore.isLoggedIn() || authStore.getUser()?.role !== 'ADMIN') {
         return <Navigate to="/login" replace />
     }
     return <>{children}</>
 }
-

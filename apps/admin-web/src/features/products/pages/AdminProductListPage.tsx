@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Link, useNavigate } from 'react-router-dom'
 import { ProductApi } from '@/features/products/api'
 import type { Product } from '@/types/product'
+import { ApiError } from '@/lib/api'
 
 type StatusAction = {
     productId: number
@@ -13,28 +14,36 @@ export default function AdminProductListPage() {
     const { t } = useTranslation()
     const [items, setItems] = useState<Product[]>([])
     const [loading, setLoading] = useState(true)
+    const [loadError, setLoadError] = useState<string | null>(null)
+    const [actionError, setActionError] = useState<string | null>(null)
     const [statusAction, setStatusAction] = useState<StatusAction | null>(null)
     const navigate = useNavigate()
 
-    async function load() {
+    const load = useCallback(async () => {
         setLoading(true)
+        setLoadError(null)
         try {
             const data = await ProductApi.list()
             setItems(data)
+        } catch (cause) {
+            setLoadError(cause instanceof ApiError && cause.status === 403
+                ? 'admin.feedback.forbidden' : 'admin.feedback.loadFailed')
         } finally {
             setLoading(false)
         }
-    }
-
-    useEffect(() => {
-        load()
     }, [])
 
+    useEffect(() => {
+        void load()
+    }, [load])
+
     async function onStatusChange(product: Product) {
+        if (statusAction) return
         const kind = product.active ? 'deactivate' : 'reactivate'
         if (kind === 'deactivate' && !window.confirm(t('admin.product.deactivateConfirm'))) return
 
         setStatusAction({ productId: product.id, kind })
+        setActionError(null)
         try {
             if (kind === 'deactivate') {
                 await ProductApi.remove(product.id)
@@ -42,6 +51,9 @@ export default function AdminProductListPage() {
                 await ProductApi.update(product.id, { active: true })
             }
             await load()
+        } catch (cause) {
+            setActionError(cause instanceof ApiError && cause.status === 403
+                ? 'admin.feedback.forbidden' : 'admin.feedback.updateFailed')
         } finally {
             setStatusAction(null)
         }
@@ -55,8 +67,15 @@ export default function AdminProductListPage() {
                 <button onClick={() => navigate('/products/new')}>+ New Product</button>
             </div>
 
+            {actionError && <p role="alert" style={{ color: '#e53e3e' }}>{t(actionError)}</p>}
+
             {loading ? (
                 <div>Loading...</div>
+            ) : loadError ? (
+                <div role="alert">
+                    <p>{t(loadError)}</p>
+                    <button type="button" onClick={() => void load()}>{t('admin.feedback.retry')}</button>
+                </div>
             ) : (
                 <div style={{ overflowX: 'auto' }}>
                     <table border={1} cellPadding={8} style={{ minWidth: 760, width: '100%', background: '#fff' }}>
@@ -84,7 +103,7 @@ export default function AdminProductListPage() {
                                     {' | '}
                                     <button
                                         type="button"
-                                        disabled={statusAction?.productId === p.id}
+                                        disabled={statusAction !== null}
                                         onClick={() => onStatusChange(p)}
                                     >
                                         {statusAction?.productId === p.id

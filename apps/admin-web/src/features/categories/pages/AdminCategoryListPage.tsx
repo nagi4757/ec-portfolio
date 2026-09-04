@@ -1,31 +1,51 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { Link, useNavigate } from 'react-router-dom'
 import { CategoryApi } from '@/features/categories/api'
 import type { Category } from '@/types/category'
+import { ApiError } from '@/lib/api'
 
 export default function AdminCategoryListPage() {
+    const { t } = useTranslation()
     const [items, setItems] = useState<Category[]>([])
     const [loading, setLoading] = useState(true)
+    const [loadError, setLoadError] = useState<string | null>(null)
+    const [actionError, setActionError] = useState<string | null>(null)
+    const [deletingId, setDeletingId] = useState<number | null>(null)
     const navigate = useNavigate()
 
-    async function load() {
+    const load = useCallback(async () => {
         setLoading(true)
+        setLoadError(null)
         try {
             const data = await CategoryApi.list()
             setItems(data)
+        } catch (cause) {
+            setLoadError(cause instanceof ApiError && cause.status === 403
+                ? 'admin.feedback.forbidden' : 'admin.feedback.loadFailed')
         } finally {
             setLoading(false)
         }
-    }
-
-    useEffect(() => {
-        load()
     }, [])
 
+    useEffect(() => {
+        void load()
+    }, [load])
+
     async function onDelete(id: number) {
+        if (deletingId !== null) return
         if (!confirm(`Delete category ${id}?`)) return
-        await CategoryApi.remove(id)
-        await load()
+        setDeletingId(id)
+        setActionError(null)
+        try {
+            await CategoryApi.remove(id)
+            await load()
+        } catch (cause) {
+            setActionError(cause instanceof ApiError && cause.status === 403
+                ? 'admin.feedback.forbidden' : 'admin.feedback.deleteFailed')
+        } finally {
+            setDeletingId(null)
+        }
     }
 
     return (
@@ -36,8 +56,15 @@ export default function AdminCategoryListPage() {
                 <button onClick={() => navigate('/categories/new')}>+ New Category</button>
             </div>
 
+            {actionError && <p role="alert" style={{ color: '#e53e3e' }}>{t(actionError)}</p>}
+
             {loading ? (
                 <div>Loading...</div>
+            ) : loadError ? (
+                <div role="alert">
+                    <p>{t(loadError)}</p>
+                    <button type="button" onClick={() => void load()}>{t('admin.feedback.retry')}</button>
+                </div>
             ) : (
                 <div style={{ overflowX: 'auto' }}>
                     <table border={1} cellPadding={8} style={{ minWidth: 640, width: '100%', background: '#fff' }}>
@@ -55,7 +82,7 @@ export default function AdminCategoryListPage() {
                                     <td>
                                         <Link to={`/categories/${c.id}/edit`}>Edit</Link>
                                         {' | '}
-                                        <button onClick={() => onDelete(c.id)}>Delete</button>
+                                        <button disabled={deletingId !== null} onClick={() => onDelete(c.id)}>Delete</button>
                                     </td>
                                 </tr>
                             ))}
@@ -69,4 +96,3 @@ export default function AdminCategoryListPage() {
         </div>
     )
 }
-

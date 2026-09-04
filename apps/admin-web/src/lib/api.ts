@@ -1,20 +1,23 @@
 import { authStore } from '@/lib/authStore'
 
-const BASE_URL = import.meta.env.VITE_API_BASE_URL ?? ''
+const BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? '').trim().replace(/\/+$/, '')
 
 type ApiErrorResponse = {
     code?: unknown
+    correlationId?: unknown
 }
 
 export class ApiError extends Error {
     public readonly status: number
     public readonly code: string | null
+    public readonly correlationId: string | null
 
-    constructor(status: number, code: string | null, message: string) {
+    constructor(status: number, code: string | null, message: string, correlationId: string | null = null) {
         super(message)
         this.name = 'ApiError'
         this.status = status
         this.code = code
+        this.correlationId = correlationId
     }
 }
 
@@ -24,7 +27,8 @@ export function isApiErrorCode(error: unknown, code: string): error is ApiError 
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
     const token = authStore.getToken()
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+    const headers: Record<string, string> = {}
+    if (init?.body !== undefined) headers['Content-Type'] = 'application/json'
     if (token) {
         headers['Authorization'] = `Bearer ${token}`
     }
@@ -33,42 +37,44 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
         headers,
         ...init,
     })
+    let correlationId = res.headers.get('X-Correlation-ID')
 
-    // 이미 로그인된 상태에서 401이 오면 토큰 만료 → 자동 로그아웃
-    // 로그인/회원가입 요청 중 401이면 redirect 없이 에러만 throw (에러 메시지 유지)
-    if (res.status === 401) {
-        if (authStore.getToken()) {
+    if (!res.ok) {
+        let code: string | null = null
+        try {
+            const body: unknown = await res.json()
+            if (body && typeof body === 'object') {
+                const error = body as ApiErrorResponse
+                code = typeof error.code === 'string' ? error.code : null
+                if (typeof error.correlationId === 'string') correlationId = error.correlationId
+            }
+        } catch {
+            // An upstream HTML error must not become a user-facing server payload.
+        }
+
+        const isAuthRequest = url === '/api/public/auth/login' || url === '/api/public/auth/signup'
+        // A late 401 must not clear a newer session. Failed logins stay on the form.
+        if (res.status === 401 && !isAuthRequest && token && token === authStore.getToken()) {
             authStore.clear()
             window.location.href = '/login'
         }
-        throw new Error('Unauthorized')
-    }
-    if (!res.ok) {
-        const text = await res.text().catch(() => '')
-        let code: string | null = null
-        if (text) {
-            try {
-                const body = JSON.parse(text) as ApiErrorResponse
-                code = typeof body.code === 'string' ? body.code : null
-            } catch {
-                // Preserve the existing text fallback for non-JSON error responses.
-            }
-        }
-        throw new ApiError(res.status, code, `HTTP ${res.status} ${res.statusText} :: ${text}`)
+        throw new ApiError(res.status, code, `API request failed (HTTP ${res.status}).`, correlationId)
     }
 
     if (res.status === 204) {
         return undefined as T
     }
 
-    const contentType = res.headers.get('content-type') ?? ''
-    if (!contentType.includes('application/json')) {
-        const text = await res.text()
-        return (text ? (text as T) : (undefined as T))
+    const contentType = res.headers.get('content-type')?.split(';')[0].trim().toLowerCase()
+    if (contentType !== 'application/json') {
+        throw new ApiError(res.status, null, 'Expected a JSON API response. Check VITE_API_BASE_URL.', correlationId)
     }
 
-    const text = await res.text()
-    return (text ? JSON.parse(text) : undefined) as T
+    try {
+        return await res.json() as T
+    } catch {
+        throw new ApiError(res.status, null, 'Invalid JSON API response.', correlationId)
+    }
 }
 
 export const api = {

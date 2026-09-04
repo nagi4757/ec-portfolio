@@ -12,6 +12,11 @@ dist
 dist-ssr
 *.local
 
+# Local Vite configuration is public at build time but must not be committed.
+.env
+.env.*
+!.env.example
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
