@@ -35,9 +35,11 @@
 
 ```mermaid
 flowchart TD
-    U[JP/KR demo user] --> R53[Route 53]
-    R53 --> CF[CloudFront<br/>TLS + JP/KR allowlist]
-    CF -->|Static / media| S3[S3 private bucket<br/>OAC]
+    U[JP/KR demo browser] --> STORECF[Store CloudFront<br/>Phase 5A proposed]
+    U --> ADMINCF[Admin CloudFront<br/>Phase 5A proposed]
+    STORECF -->|OAC signed HTTPS| STORES3[Store private S3 REST origin]
+    ADMINCF -->|OAC signed HTTPS| ADMINS3[Admin private S3 REST origin]
+    U -->|Separate API requests| CF[Existing API CloudFront<br/>TLS + JP/KR allowlist]
     CF -->|HTTPS 443 only<br/>prefix list + X-Origin-Verify| NGINX[Nginx on EC2 t3a.medium<br/>x86_64 origin verification]
     DIRECT[Direct EIP request] -- blocked by SG --> NGINX
     NGINX --> API[Spring Boot Docker<br/>private Docker network]
@@ -49,7 +51,8 @@ flowchart TD
     ECR[ECR] --> NGINX
     SSM[SSM Parameter Store] --> NGINX
     GHA[GitHub Actions OIDC] -.future deploy.-> ECR
-    GHA -.future deploy.-> S3
+    GHA -.future artifact upload.-> STORES3
+    GHA -.future artifact upload.-> ADMINS3
     SCH[EventBridge Scheduler] --> NGINX
     SCH --> RDS
     NGINX --> CW[CloudWatch]
@@ -219,12 +222,24 @@ Demo는 **A: EC2 stop 시 Cart 유실 허용**을 선택한다. AOF/RDB와 별�
 
 ### S3
 
-- Store/Admin static assets와 media object를 분리된 prefix 또는 bucket으로 보관한다.
-- Public Access Block을 켜고 CloudFront Origin Access Control만 허용한다.
-- Versioning과 lifecycle은 복구 요구와 비용을 보고 선택하며 access log의 무기한 보관을 금지한다.
-- API upload가 필요해지면 short-lived presigned URL을 사용해 EC2 bandwidth와 memory 사용을 줄인다.
+- Phase 5A는 Store/Admin 각각 private bucket, 전용 OAC, 전용 CloudFront distribution을 정의한다. 기존 API distribution은 변경하지 않고 browser가 별도 API hostname을 호출한다. Media upload는 이번 범위가 아니다.
+- Public Access Block 네 설정을 모두 켜고 `BucketOwnerEnforced`로 ACL을 비활성화한다. SSE-S3와 HTTPS-only bucket policy를 사용하며 website hosting이나 public policy를 만들지 않는다.
+- OAC는 `always`/SigV4로 regional S3 REST origin 요청을 서명한다. 각 bucket policy는 CloudFront service principal의 `s3:GetObject`를 해당 distribution ARN으로 제한한다. 별도 privileged IAM 운영 권한은 account governance 대상으로 남는다.
+- 두 distribution은 `PriceClass_200`, JP/KR allowlist, IPv6, HTTP-to-HTTPS redirect, default CloudFront certificate, GET/HEAD, gzip/Brotli compression을 사용한다. Custom domain/Route 53/ACM, WAF, Origin Shield, Lambda@Edge, 추가 logging resource는 만들지 않는다.
+- Terraform은 hosting만 관리한다. Object upload, versioning/lifecycle, frontend build, deploy IAM/OIDC, invalidation은 이번 구현에 포함하지 않는다. Bucket은 `force_destroy = false`이며 향후 배포는 이전 HTML release와 content-hashed assets를 비용 한도 내에서 보존해 rollback을 지원해야 한다.
 
-Source: [Amazon S3 pricing](https://aws.amazon.com/s3/pricing/)
+공유 CloudFront Function은 새 frontend distribution의 viewer-request에서 확장자 없는 GET/HEAD 경로를 `/index.html`로 내부 rewrite한다. `/products/4/`, `/orders/3`, `/categories/new`, 미래 route에 같은 규칙을 적용하며 application route를 hardcode하지 않는다. `/api`·`/api/*`, `/assets`·`/assets/*`, 점이 포함된 파일형 경로, GET/HEAD 이외 method는 rewrite하지 않는다. 따라서 실제 asset의 403/404를 HTML 200으로 숨기지 않으며 기존 API 오류에도 영향을 주지 않는다. 점이 있는 client-side route는 별도 검토가 필요한 제한이다.
+
+Rewrite는 `request.uri`만 바꾸고 query string, 중복 query 값, header/cookie를 유지한다. Browser의 원래 URL/query는 React가 해석한다. S3에는 같은 HTML shell을 요청하므로 static cache policy는 query/cookie/viewer header를 cache key와 origin forwarding에서 제외한다. API forwarding contract와는 무관하다.
+
+| 구분 | CDN TTL min/default/max | 후속 upload의 metadata |
+|---|---|---|
+| HTML/default/SPA shell | `0 / 0 / 60`초 | HTML `Cache-Control: no-cache` |
+| `/assets/*` content-hashed assets | `0 / 86400 / 31536000`초 | `Cache-Control: public,max-age=31536000,immutable` |
+
+CDN TTL만으로 browser cache를 제어할 수 없으므로 HTML metadata 검증은 배포 gate다. 신규 bucket은 비어 있으므로 apply만으로 SPA가 동작하지 않는다. 실제 frontend domain 생성 후 CORS 추가를 별도 승인하고, 기존 API URL로 build한 artifact를 assets-first/HTML-last 순서로 배포한다. Admin static bundle과 geo restriction은 인증 경계가 아니며 ADMIN 인가는 기존 API가 담당한다. 현재 CORS, API/EC2/RDS/Nginx/SG/IAM, origin token은 수정하지 않는다.
+
+Sources: [Amazon S3 pricing](https://aws.amazon.com/s3/pricing/), [S3 OAC](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/private-content-restricting-access-to-s3.html), [CloudFront Functions URI rewrite](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/example_cloudfront_functions_url_rewrite_single_page_apps_section.html), [Cache expiration](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/Expiration.html)
 
 ### ECR
 
@@ -337,6 +352,8 @@ Sources:
 
 ### Assumptions
 
+아래 표는 기존 Phase 4 baseline이다. Phase 5A 추가분과 갱신된 총액은 이어지는 별도 표에 제시하며 기존 contingency를 줄이지 않는다.
+
 - Price snapshot: 2026-08-28
 - Region: Tokyo, Linux On-Demand, Single-AZ
 - EC2: 22 weekdays × 7 h = 154 h; RDS: 22 weekdays × 7 h 20 m = 161 h 20 m; month = 730 h
@@ -392,6 +409,33 @@ Primary pricing references:
 - [Route 53 pricing](https://aws.amazon.com/route53/pricing/)
 - [EventBridge pricing](https://aws.amazon.com/eventbridge/pricing/)
 - [AWS Tax Help: Japan](https://aws.amazon.com/tax-help/japan/)
+
+### Phase 5A static hosting cost increment
+
+2026-09-04 확인 기준, Store/Admin 합계에 아래 낮은 사용량을 가정한다. Free Tier, CloudFront 무료 전송/요청 allowance, credit을 차감하지 않고 유료 단가를 전체 사용량에 적용한다. 기존 baseline의 S3/CloudFront allowance를 빼지 않고 추가하여 보수적으로 산정한다. 이번에 실제 frontend AWS resource나 artifact를 생성했다는 뜻이 아니다.
+
+| 추가 항목 | 두 frontend 합계 가정 | 월 세전 USD |
+|---|---|---:|
+| S3 Standard storage | Tokyo 1 GB × $0.025/GB-month | $0.0250 |
+| S3 PUT/COPY/POST/LIST | 5,000 × $0.0047/1,000 | $0.0235 |
+| S3 GET/other requests | 100,000 × $0.00037/1,000; cache miss를 보수적으로 가정 | $0.0370 |
+| CloudFront data out | 5 GB × $0.120/GB; JP $0.114보다 높은 KR regional rate 적용 | $0.6000 |
+| CloudFront HTTPS | 100,000 × $0.012/10,000 | $0.1200 |
+| CloudFront Function | 최대 100,000 × $0.10/million; assets behavior 호출 제외에 따른 절감 미반영 | $0.0100 |
+| **추가 합계** | **기존 $2 contingency는 유지** | **$0.8155** |
+
+S3에서 CloudFront로의 AWS-origin 전송료는 $0/GB다. Standard distribution/OAC/bucket 개수 자체에 새로운 월 고정요금을 가정하지 않으며, custom KMS, NAT/ALB/WAF, log delivery, Origin Shield, invalidation은 추가하지 않는다. 실제 배포의 metadata는 기본 upload 요청 수에 포함한다. 추가 invalidation이나 보관 release 증가가 필요하면 별도 산정한다.
+
+`기존 base $22.9907 + Phase 5A $0.8155 + contingency $2.00 = 세전 $25.8062`에 FX와 JCT를 적용한다.
+
+| Scenario | USD subtotal | JPY pre-tax | JCT 10% | Estimated invoice | ¥5,000 buffer |
+|---|---:|---:|---:|---:|---:|
+| ¥160/USD | $25.8062 | ¥4,128.99 | ¥412.90 | **¥4,541.89** | **¥458.11** |
+| ¥165/USD stress | $25.8062 | ¥4,258.02 | ¥425.80 | **¥4,683.83** | **¥316.17** |
+
+Exact 산식에서 최종 금액을 반올림하므로 표시한 중간 반올림 합계와 1엔 미만 차이가 생길 수 있다. 기존 normal 목표 ¥4,500보다는 약 ¥42 높지만 승인된 Phase 5A 사용량 가정에서는 hard ceiling ¥5,000 아래다. Traffic/bot/cache-busting과 보관량 증가를 자동으로 막는 cap은 아니며 Budget/사용량 검토를 유지한다. 연간 domain 갱신 청구는 앞서 설명한 별도 비용이고, 가격·환율·세금·사용량이 변하면 apply 전에 재산정한다.
+
+Sources: [AWS Tokyo S3 price catalog](https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonS3/current/ap-northeast-1/index.json), [CloudFront pay-as-you-go pricing and price classes](https://aws.amazon.com/cloudfront/pricing/pay-as-you-go/), [AWS Tax Help: Japan](https://aws.amazon.com/tax-help/japan/)
 
 ## Operational gates
 

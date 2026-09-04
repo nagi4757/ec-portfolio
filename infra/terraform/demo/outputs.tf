@@ -161,3 +161,33 @@ output "cloudfront_distribution_domain_name" {
   description = "Default CloudFront domain name for the Demo API."
   value       = aws_cloudfront_distribution.api.domain_name
 }
+
+output "store_s3_bucket_name" {
+  description = "Private bucket for future Store artifact uploads; Terraform does not upload files."
+  value       = try(aws_s3_bucket.frontend["store"].id, null)
+}
+
+output "admin_s3_bucket_name" {
+  description = "Private bucket for future Admin artifact uploads; Terraform does not upload files."
+  value       = try(aws_s3_bucket.frontend["admin"].id, null)
+}
+
+output "store_cloudfront_distribution_id" {
+  description = "ID of the Store static distribution, separate from the API."
+  value       = try(aws_cloudfront_distribution.frontend["store"].id, null)
+}
+
+output "store_cloudfront_domain_name" {
+  description = "Default Store CloudFront domain; adding it to API CORS requires separate approval."
+  value       = try(aws_cloudfront_distribution.frontend["store"].domain_name, null)
+}
+
+output "admin_cloudfront_distribution_id" {
+  description = "ID of the Admin static distribution, separate from the API."
+  value       = try(aws_cloudfront_distribution.frontend["admin"].id, null)
+}
+
+output "admin_cloudfront_domain_name" {
+  description = "Default Admin CloudFront domain; adding it to API CORS requires separate approval."
+  value       = try(aws_cloudfront_distribution.frontend["admin"].domain_name, null)
+}
