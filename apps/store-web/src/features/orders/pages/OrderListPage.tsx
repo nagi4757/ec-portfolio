@@ -71,7 +71,7 @@ export default function OrderListPage() {
                                 <div style={{ marginTop: 8, display: 'flex', justifyContent: 'space-between', fontSize: 14, color: '#555', gap: 8, flexWrap: 'wrap' }}>
                                     <span>{order.createdAt ?? '-'}</span>
                                     <span style={{ fontWeight: 700, color: '#111' }}>
-                                        {order.totalAmount.toLocaleString()}원
+                                        {t('store.money.amount', { amount: order.totalAmount })}
                                     </span>
                                 </div>
                             </div>

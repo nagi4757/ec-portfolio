@@ -116,12 +116,12 @@ export default function CheckoutPage() {
                 {cart.items.map((item) => (
                     <div key={item.productId} style={summaryRowStyle}>
                         <span>{item.name} × {item.quantity}</span>
-                        <strong>{item.lineAmount.toLocaleString()}원</strong>
+                        <strong>{t('store.money.amount', { amount: item.lineAmount })}</strong>
                     </div>
                 ))}
                 <div style={{ ...summaryRowStyle, borderTop: '1px solid #e5e7eb', paddingTop: 12 }}>
                     <strong>{t('store.checkout.total')}</strong>
-                    <strong>{cart.totalAmount.toLocaleString()}원</strong>
+                    <strong>{t('store.money.amount', { amount: cart.totalAmount })}</strong>
                 </div>
             </section>
 
@@ -177,7 +177,7 @@ export default function CheckoutPage() {
                     value={address.phoneNumber}
                     onChange={(value) => updateAddress('phoneNumber', value)}
                     maxLength={20}
-                    pattern="[0-9+() -]+"
+                    pattern={'[0-9+\\(\\) \\-]+'}
                     autoComplete="tel"
                 />
 

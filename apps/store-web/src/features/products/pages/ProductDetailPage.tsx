@@ -18,22 +18,30 @@ export default function ProductDetailPage() {
     const { t } = useTranslation();
     const { id } = useParams();
     const [data, setData] = useState<ProductResponse | null>(null);
-    const [err, setErr] = useState<string | null>(null);
+    const [err, setErr] = useState<Error | null>(null);
     const [loading, setLoading] = useState(true);
     const [adding, setAdding] = useState(false);
     const [feedback, setFeedback] = useState<AddFeedback | null>(null);
 
     useEffect(() => {
         if (!id) return;
+        setLoading(true);
+        setErr(null);
         ProductAPI.get(Number(id))
             .then(setData)
-            .catch((e) => setErr(e.message))
+            .catch((e: unknown) => setErr(e instanceof Error ? e : new Error('Unable to load product.')))
             .finally(() => setLoading(false));
     }, [id]);
 
     if (loading) return <div style={{ padding: 24 }}>Loading...</div>;
-    if (err) return <div style={{ padding: 24, color: 'crimson' }}>Error: {err}</div>;
-    if (!data) return <div style={{ padding: 24 }}>상품을 찾을 수 없습니다.</div>;
+    if (err) return (
+        <div role="alert" style={{ padding: 24, color: 'crimson' }}>
+            {isApiErrorCode(err, 'PRODUCT_NOT_FOUND')
+                ? t('store.errors.api.productNotFound')
+                : `Error: ${err.message}`}
+        </div>
+    );
+    if (!data) return <div style={{ padding: 24 }}>{t('store.errors.api.productNotFound')}</div>;
 
     async function addToCart() {
         if (!data) return;
@@ -75,7 +83,7 @@ export default function ProductDetailPage() {
                 <div>
                     <h1 style={{ marginTop: 0 }}>{data.name}</h1>
                     <div style={{ fontSize: 20, fontWeight: 700, margin: '8px 0 16px' }}>
-                        {data.price.toLocaleString()} 円
+                        {t('store.money.amount', { amount: data.price })}
                     </div>
                     <div style={{ marginBottom: 12, color: data.stockQuantity === 0 ? 'crimson' : '#2f855a' }}>
                         {data.stockQuantity === 0

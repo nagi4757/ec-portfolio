@@ -1,5 +1,8 @@
 export const storeJa = {
     store: {
+        money: {
+            amount: '{{amount, number}}円',
+        },
         navigation: {
             cart: 'カート',
             myOrders: '注文履歴',
@@ -83,6 +86,7 @@ export const storeJa = {
             api: {
                 invalidOrderTransition: '注文状態が変更されたため、処理できません。',
                 orderNotFound: '注文が見つかりません。',
+                productNotFound: '商品が見つかりません。',
                 productNotAvailable: 'この商品は現在販売されていません。',
             },
         },

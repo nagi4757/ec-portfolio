@@ -121,17 +121,17 @@ export default function OrderDetailPage() {
                         <div style={{ flex: 1 }}>
                             <div style={{ fontWeight: 600 }}>{item.name}</div>
                             <div style={{ color: '#555', fontSize: 14 }}>
-                                {item.price.toLocaleString()}원 × {item.quantity}
+                                {t('store.money.amount', { amount: item.price })} × {item.quantity}
                             </div>
                         </div>
-                        <div style={{ fontWeight: 700 }}>{item.lineAmount.toLocaleString()}원</div>
+                        <div style={{ fontWeight: 700 }}>{t('store.money.amount', { amount: item.lineAmount })}</div>
                     </div>
                 ))}
             </div>
 
             <div style={{ marginTop: 20, borderTop: '1px solid #eee', paddingTop: 16, textAlign: 'right' }}>
                 <span style={{ fontSize: 18, fontWeight: 700 }}>
-                    합계: {order.totalAmount.toLocaleString()}원
+                    합계: {t('store.money.amount', { amount: order.totalAmount })}
                 </span>
             </div>
 

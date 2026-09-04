@@ -60,7 +60,7 @@ export function ProductCard({ product }: { product: ProductResponse }) {
                 </div>
                 <div style={{ padding: 12 }}>
                     <div style={{ fontWeight: 600, marginBottom: 4 }}>{product.name}</div>
-                    <div style={{ color: '#444' }}>{product.price.toLocaleString()} 円</div>
+                    <div style={{ color: '#444' }}>{t('store.money.amount', { amount: product.price })}</div>
                     <div style={{ marginTop: 6, color: product.stockQuantity === 0 ? 'crimson' : '#2f855a' }}>
                         {product.stockQuantity === 0
                             ? t('store.stock.outOfStock')

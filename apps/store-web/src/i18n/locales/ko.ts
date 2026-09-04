@@ -1,5 +1,8 @@
 export const storeKo = {
     store: {
+        money: {
+            amount: '{{amount, number}}원',
+        },
         navigation: {
             cart: '장바구니',
             myOrders: '내 주문',
@@ -83,6 +86,7 @@ export const storeKo = {
             api: {
                 invalidOrderTransition: '주문 상태가 변경되어 처리할 수 없습니다.',
                 orderNotFound: '주문을 찾을 수 없습니다.',
+                productNotFound: '상품을 찾을 수 없습니다.',
                 productNotAvailable: '현재 판매 중지된 상품입니다.',
             },
         },

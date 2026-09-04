@@ -130,7 +130,7 @@ export default function CartPage() {
                             <div key={item.productId} style={row}>
                                 <div style={{ flex: 1 }}>
                                     <div style={{ fontWeight: 600 }}>{item.name}</div>
-                                    <div style={{ color: '#555', fontSize: 14 }}>{item.price.toLocaleString()}원</div>
+                                    <div style={{ color: '#555', fontSize: 14 }}>{t('store.money.amount', { amount: item.price })}</div>
                                     {!item.available ? (
                                         <>
                                             <div style={{ color: 'crimson', fontSize: 13, fontWeight: 600 }}>
@@ -163,7 +163,7 @@ export default function CartPage() {
                                 </div>
 
                                 <div style={lineAmount}>
-                                    {item.lineAmount.toLocaleString()}원
+                                    {t('store.money.amount', { amount: item.lineAmount })}
                                 </div>
 
                                 <button onClick={() => removeItem(item.productId)}>삭제</button>
@@ -174,7 +174,7 @@ export default function CartPage() {
                     <div style={{ marginTop: 20, borderTop: '1px solid #eee', paddingTop: 14 }}>
                         <div>총 수량: {cart?.totalQuantity ?? 0}</div>
                         <div style={{ fontSize: 20, fontWeight: 700 }}>
-                            총 금액: {(cart?.totalAmount ?? 0).toLocaleString()}원
+                            총 금액: {t('store.money.amount', { amount: cart?.totalAmount ?? 0 })}
                         </div>
                         <div style={{ marginTop: 10, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                             <button onClick={clearCart}>장바구니 비우기</button>
