@@ -1,5 +1,8 @@
 export const adminJa = {
     admin: {
+        money: {
+            amount: '{{amount, number}}円',
+        },
         navigation: {
             products: '商品',
             categories: 'カテゴリー',

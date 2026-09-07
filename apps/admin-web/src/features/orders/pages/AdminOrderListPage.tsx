@@ -110,7 +110,7 @@ export default function AdminOrderListPage() {
                                             </span>
                                         </td>
                                         <td style={{ ...td, fontWeight: 600 }}>
-                                            {order.totalAmount.toLocaleString()}원
+                                            {t('admin.money.amount', { amount: order.totalAmount })}
                                         </td>
                                         <td style={td}>{order.createdAt ?? '-'}</td>
                                         <td style={td}>

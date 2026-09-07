@@ -103,7 +103,7 @@ export default function AdminOrderDetailPage() {
                 </div>
                 <div>
                     <div style={label}>총 금액</div>
-                    <div style={{ fontWeight: 700 }}>{order.totalAmount.toLocaleString()}원</div>
+                    <div style={{ fontWeight: 700 }}>{t('admin.money.amount', { amount: order.totalAmount })}</div>
                 </div>
                 <div>
                     <div style={label}>상태 변경</div>
@@ -164,9 +164,9 @@ export default function AdminOrderDetailPage() {
                             <tr key={item.productId} style={{ borderBottom: '1px solid #eee' }}>
                                 <td style={td}>{item.productId}</td>
                                 <td style={td}>{item.name}</td>
-                                <td style={td}>{item.price.toLocaleString()}원</td>
+                                <td style={td}>{t('admin.money.amount', { amount: item.price })}</td>
                                 <td style={td}>{item.quantity}</td>
-                                <td style={{ ...td, fontWeight: 600 }}>{item.lineAmount.toLocaleString()}원</td>
+                                <td style={{ ...td, fontWeight: 600 }}>{t('admin.money.amount', { amount: item.lineAmount })}</td>
                             </tr>
                         ))}
                     </tbody>

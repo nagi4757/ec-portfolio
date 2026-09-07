@@ -1,5 +1,8 @@
 export const adminKo = {
     admin: {
+        money: {
+            amount: '{{amount, number}}원',
+        },
         navigation: {
             products: '상품',
             categories: '카테고리',

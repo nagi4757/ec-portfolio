@@ -51,6 +51,7 @@ export default function LoginPage() {
                         <span style={labelText}>비밀번호</span>
                         <input
                             type="password"
+                            autoComplete="current-password"
                             value={password}
                             onChange={(e) => setPassword(e.target.value)}
                             required
