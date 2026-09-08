@@ -25,8 +25,8 @@
 | Database | MariaDB/Flyway 사용, production profile에서 RDS Tokyo CA bundle과 `verify-full` 강제 | RDS endpoint와 credentials 주입 |
 | Cache | Redis protocol 사용, production profile에서 TLS와 username/password 강제 | EC2 local Valkey에 TLS/ACL을 구성하거나 TLS sidecar를 검증해야 함 |
 | Configuration | runtime 환경변수 기반이며 image layer에 DB/Redis/JWT secret을 넣지 않는 CI 검증 존재 | SSM Parameter Store 조회와 least-privilege instance role |
-| Frontend | Store/Admin private S3/OAC/CloudFront와 production artifact 배포 완료; SPA direct route와 CORS 검증 완료 | Phase 5E 자동 배포 첫 실행 검증 |
-| CI/CD | Backend, Frontend, production Docker image CI 존재; Phase 5E OIDC provider/deploy role apply·converge 완료와 `demo-frontend` Environment 구성 완료 | main push 기준 첫 자동 배포 실행과 결과 검증 |
+| Frontend | Store/Admin private S3/OAC/CloudFront와 production artifact 배포 완료; SPA direct route와 CORS 검증 완료; Phase 5E 자동 배포 첫 실행 검증 완료 | 없음 |
+| CI/CD | Backend, Frontend, production Docker image CI 존재; Phase 5E frontend 자동 배포 apply·converge·첫 실행 완료; Phase 5F-1 backend image publication 코드 제안 | Phase 5F-1 apply와 `demo-backend` Environment 구성, 이후 Phase 5F-2 EC2 배포 |
 | Messaging/email | 애플리케이션 연동 없음 | SQS/SES는 향후 비동기 알림 use case가 생길 때만 연결 |
 
 현재 repository는 배포 가능한 구성 요소를 갖췄지만, 이 문서만으로 AWS 배포가 완료되는 것은 아니다. 특히 local Valkey의 production TLS/RBAC 계약은 배포 전에 검증해야 하는 명시적 gate다.
@@ -50,7 +50,7 @@ flowchart TD
     API -.future email.-> SES[SES]
     ECR[ECR] --> NGINX
     SSM[SSM Parameter Store] --> NGINX
-    GHA[GitHub Actions OIDC<br/>Phase 5E applied] -.future API image role.-> ECR
+    GHA[GitHub Actions OIDC] -.Phase 5F-1 image publish role.-> ECR
     GHA -.frontend object deploy role.-> STORES3
     GHA -.frontend object deploy role.-> ADMINS3
     SCH[EventBridge Scheduler] --> NGINX
@@ -256,7 +256,8 @@ Source: [Amazon ECR pricing](https://aws.amazon.com/ecr/pricing/)
 Role은 다음과 같이 분리한다.
 
 - **Frontend Deploy Role:** `ec-portfolio-demo-github-frontend-deploy`는 두 frontend bucket object의 `s3:GetObject`/`s3:PutObject`만 보유한다. Delete/List/ACL/bucket configuration, CloudFront, IAM, SSM, Terraform state 권한이 없다.
-- **Future API Deploy Role:** ECR push와 제한된 runtime deployment가 필요해질 때 frontend role과 분리해 별도 설계한다.
+- **Backend Publish Role (Phase 5F-1):** `ec-portfolio-demo-github-backend-deploy`는 `demo-backend` environment의 exact subject `repo:nagi4757/ec-portfolio:environment:demo-backend`로만 assume되며, Demo API repository의 `ecr:DescribeImages`와 image push action, 그리고 deployment state parameter 세 개의 `ssm:GetParameter`(+ desired/pending 두 개의 `ssm:PutParameter`)만 보유한다. Image/repository 삭제, lifecycle·tag mutability 변경, SecureString, EC2/Run Command, CloudFront, S3, Terraform state 권한이 없다. `last-known-good-image-sha` 는 읽기 전용이며 Phase 5F-2의 검증된 배포만 갱신한다.
+- **Future API Runtime Deploy Role:** EC2 runtime 배포(SSM Run Command)는 Phase 5F-2에서 publish role과 분리해 별도 설계한다.
 - **EC2 Instance Role:** 필요한 ECR repository pull, application 전용 Parameter Store path/decrypt, CloudWatch Logs 전송, SSM Agent 권한만 보유한다.
 
 Frontend 배포 흐름은 다음과 같다.
@@ -272,7 +273,27 @@ Frontend 배포 흐름은 다음과 같다.
 
 NOTE: `_releases/<git-sha>/` snapshot은 서비스 중인 bucket에 함께 저장되므로 기존 default CloudFront behavior를 통해 `/_releases/<git-sha>/...`로 접근할 수 있다. 확장자가 있어 SPA rewrite 대상이 아니고 release SHA는 public repository에서 확인 가능하다. Snapshot에는 이미 서비스 중인 production artifact만 들어간다. 배포 script가 source map과 hidden file을 거부하며, 재확인 결과 두 build output 모두 `.map` 파일과 `sourceMappingURL` 참조가 없고 credential이나 token도 포함하지 않는다(public API CloudFront URL만 존재). Phase 5E는 CloudFront behavior와 bucket policy를 변경하지 않으므로 `/_releases/*` 차단은 별도 승인이 필요한 후속 distribution 변경이다.
 
-API image/CD와 database migration/rollback은 이 frontend-only role과 workflow의 범위가 아니다. GitHub Actions manual rollback entrypoint(`workflow_dispatch`)도 이번 phase에 포함하지 않으며, 필요해지면 후속 phase에서 별도로 추가한다.
+Database migration/rollback은 이 frontend-only role과 workflow의 범위가 아니다. GitHub Actions manual rollback entrypoint(`workflow_dispatch`)도 frontend phase에 포함하지 않으며, 필요해지면 후속 phase에서 별도로 추가한다.
+
+### Phase 5F-1 backend image publication
+
+Backend CD는 5F-1(ECR publish + desired state 기록), 5F-2(EC2 배포·readiness·rollback), 5F-3(부팅 시 수렴)으로 나눈다. **5F-1의 범위는 image publish와 deployment state 기록까지이며 EC2 배포를 수행하지 않는다.** SSM Run Command, 그것이 요구하는 EC2 instance role 변경, readiness 확인, rollback은 모두 5F-2 범위다.
+
+EC2/RDS가 평일 주간에만 기동되므로 host에 직접 push하는 CD는 정지 시간대 push마다 실패한다. 따라서 desired-state 방식을 채택한다. image와 원하는 상태는 host 가용성과 무관하게 항상 기록되고, 이후 phase가 host를 그 상태로 수렴시킨다.
+
+`build-and-push-api` job은 main push에서만, `needs = [backend, docker]` 로 실행되며 `demo-backend` environment를 사용한다. 기존 OIDC provider를 재사용하고 backend 전용 role을 `StringEquals` exact subject로만 assume한다. Image tag는 40자 lowercase Git SHA 하나뿐이고 `latest` 를 사용하지 않는다.
+
+`docker` CI job은 자신이 만든 local build만 검증하므로, publish script는 **실제 push 대상 image에 대해 동일한 핵심 계약을 build 직후·ECR 자격증명 사용 전에 다시 검증한다**: non-root `10001:10001`, 기대 entrypoint, `8080/tcp` 단일 노출, `/app/app.jar` 단일 항목, root 소유 mode `444` RDS CA bundle(certificate 존재·private key 부재), image env/history에 runtime secret 부재. 위반 시 push 전에 중단하므로 검증되지 않은 image가 ECR에 도달할 수 없다.
+
+Deployment state parameter 세 개는 `allowed_pattern`(`^[0-9a-f]{40}$`, pending은 `^([0-9a-f]{40}|none)$`)으로 Parameter Store 수준에서도 잘못된 값을 거부한다.
+
+Repository가 `IMMUTABLE` 이므로 동일 SHA rerun은 덮어쓰기가 아니라 조회로 멱등성을 얻는다. `ecr:DescribeImages` 로 해당 tag가 이미 있으면 build/login/push를 모두 skip하고 기존 image를 재사용한다. 없으면 한 번만 build/push하고, immutable 충돌로 push가 거부되면 다시 조회해 tag가 실제로 존재할 때만 성공 처리한다. 그 외 오류는 재시도 없이 fail-closed다. Image/repository 삭제, retag, tag mutability 변경은 하지 않는다.
+
+Flyway는 application 기동 시 migration을 적용하므로 image rollback이 schema를 되돌리지 못한다. 따라서 migration 변경이 포함된 release는 자동 배포를 fail-closed로 중단한다. 비교 기준은 pushed commit의 parent가 아니라 **실제 운영 중인 `last-known-good-image-sha`** 이므로, 여러 commit 전에 추가된 migration도 놓치지 않는다. 차단 시 image는 ECR에 보존하고, `pending-migration-image-sha` 에 해당 SHA를 기록하며, **`desired-image-sha` 는 갱신하지 않는다.** desired를 갱신하지 않는 것이 Phase 5F-3의 부팅 수렴 경로까지 함께 막는 장치다. `last-known-good-image-sha` 를 읽지 못하거나 값이 40자 lowercase SHA가 아니거나 해당 commit이 없어도 fail-closed다. Warning 후 배포하는 방식은 사용하지 않는다.
+
+Deployment state는 비밀이 아닌 `String` parameter 세 개로 관리한다. Terraform이 생성·seed하고 이후 값은 무시하며, 런타임 소유자는 GitHub Actions다. `desired-image-sha` 와 `last-known-good-image-sha` 는 현재 host가 실행 중임이 확인된 `799fddbfa5ed7f663182347f6291163fc4f57983` 로 seed하고, `pending-migration-image-sha` 는 `none` 으로 시작한다. Gate 통과 시에만 `desired-image-sha` 를 갱신하고 pending marker를 `none` 으로 되돌린다.
+
+Terraform 예상 계약은 **5 add / 0 change / 0 destroy** 이며 기존 resource delta는 0이어야 한다. EC2 instance role의 `change` 는 5F-2에 속하므로 이 단계에서 나타나면 blocker다. 현재 Terraform apply, `demo-backend` Environment 생성, 첫 image publish는 **모두 미실행 상태**이며 각각 별도 승인 대상이다.
 
 Sources: [GitHub OIDC for AWS](https://docs.github.com/en/actions/how-tos/secure-your-work/security-harden-deployments/oidc-in-aws), [IAM OIDC identity providers](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_providers_create_oidc.html), [CloudFront versioned files](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/Invalidation.html)
 

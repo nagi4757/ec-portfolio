@@ -196,3 +196,23 @@ output "github_frontend_deploy_role_arn" {
   description = "ARN of the GitHub OIDC role restricted to Store and Admin artifact deployment."
   value       = aws_iam_role.github_frontend_deploy.arn
 }
+
+output "github_backend_deploy_role_arn" {
+  description = "ARN of the GitHub OIDC role restricted to Demo API image publication."
+  value       = aws_iam_role.github_backend_deploy.arn
+}
+
+output "deploy_desired_image_sha_parameter_name" {
+  description = "Name of the non-secret parameter holding the API image SHA the host should converge to."
+  value       = aws_ssm_parameter.deploy_desired_image_sha.name
+}
+
+output "deploy_last_known_good_image_sha_parameter_name" {
+  description = "Name of the non-secret parameter holding the last API image SHA verified healthy."
+  value       = aws_ssm_parameter.deploy_last_known_good_image_sha.name
+}
+
+output "deploy_pending_migration_image_sha_parameter_name" {
+  description = "Name of the non-secret parameter holding an image SHA blocked by the Flyway migration gate."
+  value       = aws_ssm_parameter.deploy_pending_migration_image_sha.name
+}

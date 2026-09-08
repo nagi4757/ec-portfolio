@@ -211,3 +211,75 @@ jobs:
           STORE_DIST_DIR: apps/store-web/dist
           ADMIN_DIST_DIR: apps/admin-web/dist
         run: infra/runtime/demo/deploy-frontends.sh deploy
+
+  build-and-push-api:
+    name: Publish Demo API image
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs:
+      - backend
+      - docker
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: demo-backend
+    concurrency:
+      group: demo-backend-publish
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AWS_REGION: ap-northeast-1
+      AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+      AWS_BACKEND_DEPLOY_ROLE_ARN: ${{ vars.AWS_BACKEND_DEPLOY_ROLE_ARN }}
+      ECR_REPOSITORY_NAME: ec-portfolio-demo-api
+      BUILD_CONTEXT: apps/api
+      MIGRATION_PATH: apps/api/src/main/resources/db/migration
+      DESIRED_IMAGE_SHA_PARAMETER: /ec-portfolio/demo/deploy/desired-image-sha
+      LAST_KNOWN_GOOD_IMAGE_SHA_PARAMETER: /ec-portfolio/demo/deploy/last-known-good-image-sha
+      PENDING_MIGRATION_IMAGE_SHA_PARAMETER: /ec-portfolio/demo/deploy/pending-migration-image-sha
+      IMAGE_TAG: ${{ github.sha }}
+    steps:
+      - name: Checkout reviewed main commit with full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Reject a stale queued publication
+        run: |
+          set -euo pipefail
+          remote_main_sha="$(git ls-remote origin refs/heads/main | awk '{print $1}')"
+          test -n "$remote_main_sha"
+          test "$GITHUB_SHA" = "$remote_main_sha"
+          test "$GITHUB_SHA" = "$(git rev-parse HEAD)"
+
+      - name: Test API publication contract
+        run: infra/runtime/demo/publish-api-image.test.sh
+
+      - name: Validate publication environment
+        run: |
+          set -euo pipefail
+          [[ "$AWS_ACCOUNT_ID" =~ ^[0-9]{12}$ ]]
+          test "$AWS_BACKEND_DEPLOY_ROLE_ARN" = \
+            "arn:aws:iam::$AWS_ACCOUNT_ID:role/ec-portfolio-demo-github-backend-deploy"
+          test "$ECR_REPOSITORY_NAME" = "ec-portfolio-demo-api"
+          [[ "$IMAGE_TAG" =~ ^[0-9a-f]{40}$ ]]
+
+      - name: Configure short-lived AWS credentials
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: ${{ env.AWS_BACKEND_DEPLOY_ROLE_ARN }}
+          role-session-name: gha-backend-${{ github.run_id }}
+          role-duration-seconds: 900
+          aws-region: ${{ env.AWS_REGION }}
+          allowed-account-ids: ${{ env.AWS_ACCOUNT_ID }}
+          mask-aws-account-id: true
+
+      - name: Publish the immutable API image
+        run: infra/runtime/demo/publish-api-image.sh ensure-image
+
+      - name: Block an automatic release that changes Flyway migrations
+        run: infra/runtime/demo/publish-api-image.sh migration-guard
+
+      - name: Record the desired API image
+        run: infra/runtime/demo/publish-api-image.sh record-desired

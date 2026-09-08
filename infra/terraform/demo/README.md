@@ -2,11 +2,11 @@
 
 <!-- markdownlint-disable MD013 MD060 -->
 
-This root module defines the Tokyo network foundation, Phase 3A Demo runtime, Phase 3B Scheduler/cost/failure guardrails, the Phase 4A deployment foundation, the Phase 4C origin/API distribution, the Phase 5A Store/Admin static hosting, and the Phase 5E GitHub frontend deployment identity. Phases 1, 3A/3B, 4A, 4C-2A/2B/3, 5A, and 5E are applied; their latest approved convergence checks reported `No changes`. Phase 5B uploaded both frontend artifacts, and Phase 5C added both deployed frontend origins to the runtime CORS allowlist without rebuilding the API image. All four schedules exist, the SNS subscription is confirmed, the Scheduler failure alarm is `OK`, alarm-to-SNS delivery is verified, and the tax-inclusive monthly Budget limit is `30.30 USD`.
+This root module defines the Tokyo network foundation, Phase 3A Demo runtime, Phase 3B Scheduler/cost/failure guardrails, the Phase 4A deployment foundation, the Phase 4C origin/API distribution, the Phase 5A Store/Admin static hosting, the Phase 5E GitHub frontend deployment identity, and the proposed Phase 5F-1 GitHub backend image publication identity. Phases 1, 3A/3B, 4A, 4C-2A/2B/3, 5A, and 5E are applied; their latest approved convergence checks reported `No changes`. Phase 5B uploaded both frontend artifacts, and Phase 5C added both deployed frontend origins to the runtime CORS allowlist without rebuilding the API image. All four schedules exist, the SNS subscription is confirmed, the Scheduler failure alarm is `OK`, alarm-to-SNS delivery is verified, and the tax-inclusive monthly Budget limit is `30.30 USD`.
 
 The Scheduler stop path was verified on 2026-09-01: EC2 was `stopped` after its 17:00 JST invocation and RDS was `stopped` after 17:10. The start path was verified on 2026-09-02: RDS was `available` after 09:50 and EC2 was `running` after 10:00.
 
-Current approved project status: Phase 4C-2A and 4C-2B are `APPLIED / CONVERGED`; Phase 4C-3 is `COMPLETE`; Phase 5A is `APPLIED / CONVERGED`; and the Phase 5B/5C deployment and runtime verification passed. The origin `A` record points to the existing EC2 EIP and has no `AAAA` record. The Let's Encrypt certificate and Nginx HTTPS origin are verified: missing/invalid `X-Origin-Verify` returns `403`, and the valid token returns `200 / UP`; the renewal timer is enabled and active. Phase 5E is `APPLIED / CONVERGED`: its GitHub OIDC provider, exact-subject frontend deploy role, and inline policy were applied as `3 added / 0 changed / 0 destroyed`, the convergence plan reported `No changes`, and every previously applied resource showed zero delta. The `demo-frontend` GitHub Environment exists with its deployment branch policy limited to `main` and its four non-secret variables configured. The `deploy-frontends` CI job is committed code that has not yet run an automated deployment.
+Current approved project status: Phase 4C-2A and 4C-2B are `APPLIED / CONVERGED`; Phase 4C-3 is `COMPLETE`; Phase 5A is `APPLIED / CONVERGED`; and the Phase 5B/5C deployment and runtime verification passed. The origin `A` record points to the existing EC2 EIP and has no `AAAA` record. The Let's Encrypt certificate and Nginx HTTPS origin are verified: missing/invalid `X-Origin-Verify` returns `403`, and the valid token returns `200 / UP`; the renewal timer is enabled and active. Phase 5E is `APPLIED / CONVERGED`: its GitHub OIDC provider, exact-subject frontend deploy role, and inline policy were applied as `3 added / 0 changed / 0 destroyed`, the convergence plan reported `No changes`, and every previously applied resource showed zero delta. The `demo-frontend` GitHub Environment exists with its deployment branch policy limited to `main` and its four non-secret variables configured. The `deploy-frontends` CI job completed its first automated deployment of the reviewed `main` commit, and both frontends were verified through CloudFront. Phase 5F-1 adds code for a separate backend image publication identity and CI job; neither its Terraform resources nor the `demo-backend` GitHub Environment is applied, and CI has published no API image yet.
 
 Architecture sources:
 
@@ -343,6 +343,89 @@ Referencing an unprotected environment is not an acceptable substitute for that 
 
 Sources: [GitHub OIDC for AWS](https://docs.github.com/en/actions/how-tos/secure-your-work/security-harden-deployments/oidc-in-aws), [IAM OIDC providers](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_providers_create_oidc.html), [S3 `PutObject`](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutObject.html), [CloudFront versioned files](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/Invalidation.html)
 
+## Phase 5F-1 GitHub backend image publication
+
+Phase 5F-1 is the first of three backend continuous-delivery stages. Its scope stops at publishing an immutable API image and recording the deployment state that later stages converge to. **It does not deploy to EC2.** Systems Manager Run Command, the EC2 instance role change that Run Command requires, readiness verification, and rollback all belong to Phase 5F-2, and the boot-time reconciliation unit belongs to Phase 5F-3. Nothing in this stage touches the running Demo API, the RDS schema, CloudFront, CORS, the frontend pipeline, or any existing runtime secret.
+
+The design is desired-state rather than push-to-host. The Demo EC2 instance and RDS are stopped outside a weekday window, so a pipeline that deploys synchronously would fail for every push made while the host is down. Instead the image and the desired state are always recorded, and later stages converge the host to them. Phase 5F-1 delivers the recording half, which is independently useful and carries no host risk.
+
+Phase 5F-1 reuses the account-level GitHub OIDC provider created in Phase 5E and adds a dedicated `ec-portfolio-demo-github-backend-deploy` role. Its trust policy uses `StringEquals` for both `aud = sts.amazonaws.com` and the exact subject `repo:nagi4757/ec-portfolio:environment:demo-backend`; it contains no repository, branch, or environment wildcard, and it is separate from the frontend role. Long-lived AWS access keys remain forbidden.
+
+The role grants only what publication needs:
+
+| Statement | Actions | Resource |
+|---|---|---|
+| `GetEcrAuthorizationToken` | `ecr:GetAuthorizationToken` | `*`, because the API supports no resource-level restriction |
+| `InspectExistingApiImage` | `ecr:DescribeImages` | the Demo API repository ARN |
+| `PublishImmutableApiImage` | `ecr:BatchCheckLayerAvailability`, `CompleteLayerUpload`, `InitiateLayerUpload`, `PutImage`, `UploadLayerPart` | the Demo API repository ARN |
+| `ReadDeploymentState` | `ssm:GetParameter` | the three deployment-state parameter ARNs |
+| `RecordDeploymentState` | `ssm:PutParameter` | the desired and pending parameter ARNs only |
+
+It has no `ecr:*`, `ssm:*`, or `iam:*` wildcard, no image or repository deletion, no lifecycle or tag-mutability change, no SecureString access, and no EC2, Run Command, CloudFront, S3, or Terraform state permission. Write access to `last-known-good-image-sha` is deliberately withheld: that parameter is the reference point for the migration gate, and only a verified Phase 5F-2 deployment may advance it.
+
+### Deployment-state parameters
+
+Three non-secret `String` parameters carry the deployment state. Terraform creates them and seeds them once, then ignores their values, because GitHub Actions owns them at runtime.
+
+| Parameter | Seed | Written by | Purpose |
+|---|---|---|---|
+| `/ec-portfolio/demo/deploy/desired-image-sha` | `799fddbfa5ed7f663182347f6291163fc4f57983` | GitHub Actions | Image SHA the Demo host should converge to |
+| `/ec-portfolio/demo/deploy/last-known-good-image-sha` | `799fddbfa5ed7f663182347f6291163fc4f57983` | Phase 5F-2 only | Last image SHA verified healthy on the host |
+| `/ec-portfolio/demo/deploy/pending-migration-image-sha` | `none` | GitHub Actions | Image SHA blocked by the migration gate |
+
+Each parameter also carries an `allowed_pattern`, so Parameter Store itself rejects a malformed value: `^[0-9a-f]{40}$` for the two convergence parameters and `^([0-9a-f]{40}|none)$` for the pending marker. The seed is the image SHA the Demo host is verified to be running today; the tag exists in ECR and the running `ec-portfolio-demo-api` container uses it. Both convergence parameters therefore start consistent with reality, so no later stage can converge the host onto an unverified image. None of these values is a secret, so `String` is correct and no KMS permission is introduced.
+
+### Publication workflow
+
+The existing CI workflow adds `build-and-push-api` with `needs = [backend, docker]`. It runs only for a push to `main`, uses the `demo-backend` GitHub Environment, serialises on its own concurrency group, and obtains a 15-minute AWS session through GitHub OIDC. It checks that its queued commit is still `origin/main`, runs the publication contract test, and validates the exact account and role inputs before requesting AWS credentials. The existing `backend`, `frontend`, `docker`, and `deploy-frontends` jobs are unchanged.
+
+Images are tagged with the full 40-character lowercase Git SHA and nothing else. The repository is `IMMUTABLE`, so `publish-api-image.sh ensure-image` is idempotent by inspection rather than by overwrite:
+
+1. `ecr:DescribeImages` for the exact tag. If the image exists, the build, the ECR login, and the push are all skipped and the existing image is reused.
+2. If the repository reports `ImageNotFoundException`, the image is built from `apps/api` and pushed once.
+3. If that push is rejected because the immutable tag already exists, the repository is inspected again; the run succeeds only if the tag is genuinely present.
+4. Any other inspection or push failure stops the run without starting or retrying a build.
+
+A re-run of the same commit therefore reuses the published image instead of failing. The script never uses `latest`, never deletes or retags an image, and never changes tag mutability.
+
+The `docker` CI job verifies its own local build, not the artifact the registry receives, so `ensure-image` re-asserts the same core contract on the exact tagged image immediately after building it and before any ECR credential is used: the non-root `10001:10001` runtime user, the expected `java -jar /app/app.jar` entrypoint, exactly one exposed `8080/tcp` port, a single `/app/app.jar` entry under `/app`, the root-owned mode `444` RDS CA bundle that contains a certificate and no private key, and no `DB_PASSWORD`, `REDIS_PASSWORD`, or `APP_AUTH_JWT_SECRET` in the image environment or build history. A violation stops the run before the push, so an unverified image can never reach ECR.
+
+### Flyway migration gate
+
+Flyway runs at application start, so a new image applies its migrations to the production database as soon as a container starts, and rolling the image back does not roll the schema back. Automatic delivery is therefore fail-closed for any release that changes migrations.
+
+`publish-api-image.sh migration-guard` compares `apps/api/src/main/resources/db/migration` between `last-known-good-image-sha` and the release commit. The reference point is the image actually running, not the pushed commit's parent, so a migration introduced several commits earlier is still caught. When the comparison is clean the run continues. When it is not:
+
+- the image stays in ECR, so the reviewed artifact is preserved;
+- `pending-migration-image-sha` records the blocked SHA;
+- `desired-image-sha` is **not** updated, which also blocks the Phase 5F-3 boot-time convergence path, not only this workflow;
+- the job fails with the changed migration files and the manual release procedure.
+
+An unreadable, malformed, or unknown `last-known-good-image-sha` also fails closed. A warning that still deploys is explicitly not an acceptable substitute. Only after the gate passes does `record-desired` write `desired-image-sha` and reset `pending-migration-image-sha` to `none`; a passing gate means there is no migration delta against the running image, so clearing the marker is safe.
+
+### Planned resources and gates
+
+The code expectation is **5 add / 0 change / 0 destroy**, subject to the actual approved plan:
+
+| Resource address | Instances |
+|---|---:|
+| `aws_iam_role.github_backend_deploy` | 1 |
+| `aws_iam_role_policy.github_backend_deploy` | 1 |
+| `aws_ssm_parameter.deploy_desired_image_sha` | 1 |
+| `aws_ssm_parameter.deploy_last_known_good_image_sha` | 1 |
+| `aws_ssm_parameter.deploy_pending_migration_image_sha` | 1 |
+
+The GitHub OIDC provider is reused, so it is not an add. Every previously applied resource, including the EC2 instance role, must show zero delta; a `change` on the EC2 role belongs to Phase 5F-2 and is a blocker here. New outputs expose only the backend role ARN and the three parameter names.
+
+Before the deploy job can run, the `demo-backend` GitHub Environment must exist with a custom deployment branch policy that allows only `main` and these non-secret Environment variables:
+
+- `AWS_ACCOUNT_ID`
+- `AWS_BACKEND_DEPLOY_ROLE_ARN`
+
+Terraform apply, GitHub Environment creation, the first API image publication, and commit/push each remain a separate explicit approval. As of this document, none of them has been performed.
+
+Sources: [GitHub OIDC for AWS](https://docs.github.com/en/actions/how-tos/secure-your-work/security-harden-deployments/oidc-in-aws), [ECR image tag mutability](https://docs.aws.amazon.com/AmazonECR/latest/userguide/image-tag-mutability.html), [ECR IAM action reference](https://docs.aws.amazon.com/service-authorization/latest/reference/list_amazonelasticcontainerregistry.html), [Parameter Store parameter types](https://docs.aws.amazon.com/systems-manager/latest/userguide/parameter-store-about-examples.html)
+
 ## Local validation
 
 Run static checks in the isolated code worktree without AWS credentials or runtime input files:
@@ -350,6 +433,7 @@ Run static checks in the isolated code worktree without AWS credentials or runti
 ```shell
 node --test functions/frontend-spa-rewrite.test.mjs
 ../../runtime/demo/deploy-frontends.test.sh
+../../runtime/demo/publish-api-image.test.sh
 terraform init -backend=false -input=false -lockfile=readonly
 terraform fmt -check -recursive
 terraform validate
@@ -361,7 +445,7 @@ Static validation also does not require `alert_email`. A future approved plan/ap
 
 The existing public hosted zone ID must likewise be supplied only at runtime as `route53_public_hosted_zone_id`. Do not add the real ID to `terraform.tfvars.example`, documentation, outputs, logs, or the PR description.
 
-`terraform plan` needs AWS credentials because it resolves AWS-managed data and the remote state. Phase 5E uses `ec-portfolio-plan`, the existing `demo/terraform.tfstate` backend/workspace, and the same protected runtime inputs. Both origin token variables must use the identical existing Keychain token. Do not rotate inputs, print secrets, create a saved plan, use `-target`/`-refresh=false`, change permissions, switch to the apply profile, or mutate state. Run `terraform plan -input=false -detailed-exitcode`; now that the Phase 5E resources are applied, exit code `0` (`No changes`) is the expected result. AccessDenied, any existing resource delta, replacement, destroy, or unexpected address requires immediate stop and a report. Static validation alone cannot prove a zero-drift plan.
+`terraform plan` needs AWS credentials because it resolves AWS-managed data and the remote state. Phase 5E and Phase 5F-1 both use `ec-portfolio-plan`, the existing `demo/terraform.tfstate` backend/workspace, and the same protected runtime inputs. Both origin token variables must use the identical existing Keychain token. Do not rotate inputs, print secrets, create a saved plan, use `-target`/`-refresh=false`, change permissions, switch to the apply profile, or mutate state. Run `terraform plan -input=false -detailed-exitcode`. With Phase 5E applied and Phase 5F-1 still code only, the expected result is exit code `2` listing exactly the five Phase 5F-1 creates with zero delta on every existing resource; exit code `0` would mean the Phase 5F-1 configuration is missing. Once Phase 5F-1 is applied and converged, exit code `0` (`No changes`) becomes the expected result again. AccessDenied, any existing resource delta, replacement, destroy, or unexpected address requires immediate stop and a report. Static validation alone cannot prove a zero-drift plan.
 
 ## State and deployment gates
 
@@ -379,4 +463,4 @@ The independent [bootstrap root](../bootstrap/README.md) owns the S3 bucket and 
 
 Phase 5E's apply is complete and converged; its plan, exact OIDC trust, and object-only permissions were reviewed before it ran. In any later Terraform operation, all existing resources, especially the API and frontend CloudFront distributions, S3 bucket configuration, DNS/SSM/runtime IAM, EC2/EIP/network/SG, RDS, Scheduler/SNS/Alarm/Budget, Phase 4, and the Phase 5E identity resources, must remain `no-op`. Any change/replacement/destroy, unexpected address, or secret rotation requires stopping for Architecture review; never hide drift with a targeted or refresh-disabled plan.
 
-Terraform apply and GitHub Environment creation/configuration are complete for Phase 5E. Frontend object deployment, invalidation, and commit/push still need explicit approval.
+Terraform apply, GitHub Environment configuration, and the first automated frontend deployment are complete for Phase 5E. Phase 5F-1 is code only: its Terraform apply, the `demo-backend` GitHub Environment, the first API image publication, and commit/push each still need explicit approval.
