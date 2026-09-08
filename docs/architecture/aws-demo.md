@@ -25,8 +25,8 @@
 | Database | MariaDB/Flyway 사용, production profile에서 RDS Tokyo CA bundle과 `verify-full` 강제 | RDS endpoint와 credentials 주입 |
 | Cache | Redis protocol 사용, production profile에서 TLS와 username/password 강제 | EC2 local Valkey에 TLS/ACL을 구성하거나 TLS sidecar를 검증해야 함 |
 | Configuration | runtime 환경변수 기반이며 image layer에 DB/Redis/JWT secret을 넣지 않는 CI 검증 존재 | SSM Parameter Store 조회와 least-privilege instance role |
-| Frontend | Store/Admin Vite production build를 CI에서 검증 | S3 배포, CloudFront cache policy와 SPA fallback |
-| CI/CD | Backend, Frontend, production Docker image CI 존재 | GitHub OIDC trust와 deploy workflow는 아직 없음 |
+| Frontend | Store/Admin private S3/OAC/CloudFront와 production artifact 배포 완료; SPA direct route와 CORS 검증 완료 | Phase 5E 자동 배포 첫 실행 검증 |
+| CI/CD | Backend, Frontend, production Docker image CI 존재; Phase 5E OIDC provider/deploy role apply·converge 완료와 `demo-frontend` Environment 구성 완료 | main push 기준 첫 자동 배포 실행과 결과 검증 |
 | Messaging/email | 애플리케이션 연동 없음 | SQS/SES는 향후 비동기 알림 use case가 생길 때만 연결 |
 
 현재 repository는 배포 가능한 구성 요소를 갖췄지만, 이 문서만으로 AWS 배포가 완료되는 것은 아니다. 특히 local Valkey의 production TLS/RBAC 계약은 배포 전에 검증해야 하는 명시적 gate다.
@@ -35,8 +35,8 @@
 
 ```mermaid
 flowchart TD
-    U[JP/KR demo browser] --> STORECF[Store CloudFront<br/>Phase 5A proposed]
-    U --> ADMINCF[Admin CloudFront<br/>Phase 5A proposed]
+    U[JP/KR demo browser] --> STORECF[Store CloudFront]
+    U --> ADMINCF[Admin CloudFront]
     STORECF -->|OAC signed HTTPS| STORES3[Store private S3 REST origin]
     ADMINCF -->|OAC signed HTTPS| ADMINS3[Admin private S3 REST origin]
     U -->|Separate API requests| CF[Existing API CloudFront<br/>TLS + JP/KR allowlist]
@@ -50,9 +50,9 @@ flowchart TD
     API -.future email.-> SES[SES]
     ECR[ECR] --> NGINX
     SSM[SSM Parameter Store] --> NGINX
-    GHA[GitHub Actions OIDC] -.future deploy.-> ECR
-    GHA -.future artifact upload.-> STORES3
-    GHA -.future artifact upload.-> ADMINS3
+    GHA[GitHub Actions OIDC<br/>Phase 5E applied] -.future API image role.-> ECR
+    GHA -.frontend object deploy role.-> STORES3
+    GHA -.frontend object deploy role.-> ADMINS3
     SCH[EventBridge Scheduler] --> NGINX
     SCH --> RDS
     NGINX --> CW[CloudWatch]
@@ -222,11 +222,11 @@ Demo는 **A: EC2 stop 시 Cart 유실 허용**을 선택한다. AOF/RDB와 별�
 
 ### S3
 
-- Phase 5A는 Store/Admin 각각 private bucket, 전용 OAC, 전용 CloudFront distribution을 정의한다. 기존 API distribution은 변경하지 않고 browser가 별도 API hostname을 호출한다. Media upload는 이번 범위가 아니다.
+- Phase 5A는 Store/Admin 각각 private bucket, 전용 OAC, 전용 CloudFront distribution을 적용했다. 기존 API distribution은 변경하지 않고 browser가 별도 API hostname을 호출한다. Media upload는 이번 범위가 아니다.
 - Public Access Block 네 설정을 모두 켜고 `BucketOwnerEnforced`로 ACL을 비활성화한다. SSE-S3와 HTTPS-only bucket policy를 사용하며 website hosting이나 public policy를 만들지 않는다.
 - OAC는 `always`/SigV4로 regional S3 REST origin 요청을 서명한다. 각 bucket policy는 CloudFront service principal의 `s3:GetObject`를 해당 distribution ARN으로 제한한다. 별도 privileged IAM 운영 권한은 account governance 대상으로 남는다.
 - 두 distribution은 `PriceClass_200`, JP/KR allowlist, IPv6, HTTP-to-HTTPS redirect, default CloudFront certificate, GET/HEAD, gzip/Brotli compression을 사용한다. Custom domain/Route 53/ACM, WAF, Origin Shield, Lambda@Edge, 추가 logging resource는 만들지 않는다.
-- Terraform은 hosting만 관리한다. Object upload, versioning/lifecycle, frontend build, deploy IAM/OIDC, invalidation은 이번 구현에 포함하지 않는다. Bucket은 `force_destroy = false`이며 향후 배포는 이전 HTML release와 content-hashed assets를 비용 한도 내에서 보존해 rollback을 지원해야 한다.
+- Terraform은 hosting과 Phase 5E deploy identity만 관리하고 frontend object는 관리하지 않는다. Bucket은 `force_destroy = false`다. Phase 5E workflow는 content-hashed assets와 immutable `_releases/<git-sha>/` snapshot/manifest를 보존하고 S3 delete와 CloudFront invalidation 없이 rollback할 수 있게 한다.
 
 공유 CloudFront Function은 새 frontend distribution의 viewer-request에서 확장자 없는 GET/HEAD 경로를 `/index.html`로 내부 rewrite한다. `/products/4/`, `/orders/3`, `/categories/new`, 미래 route에 같은 규칙을 적용하며 application route를 hardcode하지 않는다. `/api`·`/api/*`, `/assets`·`/assets/*`, 점이 포함된 파일형 경로, GET/HEAD 이외 method는 rewrite하지 않는다. 따라서 실제 asset의 403/404를 HTML 200으로 숨기지 않으며 기존 API 오류에도 영향을 주지 않는다. 점이 있는 client-side route는 별도 검토가 필요한 제한이다.
 
@@ -237,7 +237,7 @@ Rewrite는 `request.uri`만 바꾸고 query string, 중복 query 값, header/coo
 | HTML/default/SPA shell | `0 / 0 / 60`초 | HTML `Cache-Control: no-cache` |
 | `/assets/*` content-hashed assets | `0 / 86400 / 31536000`초 | `Cache-Control: public,max-age=31536000,immutable` |
 
-CDN TTL만으로 browser cache를 제어할 수 없으므로 HTML metadata 검증은 배포 gate다. 신규 bucket은 비어 있으므로 apply만으로 SPA가 동작하지 않는다. 실제 frontend domain 생성 후 CORS 추가를 별도 승인하고, 기존 API URL로 build한 artifact를 assets-first/HTML-last 순서로 배포한다. Admin static bundle과 geo restriction은 인증 경계가 아니며 ADMIN 인가는 기존 API가 담당한다. 현재 CORS, API/EC2/RDS/Nginx/SG/IAM, origin token은 수정하지 않는다.
+CDN TTL만으로 browser cache를 제어할 수 없으므로 HTML metadata 검증은 배포 gate다. Phase 5B는 기존 API URL로 build한 artifact를 assets-first/HTML-last 순서로 배포했고 Phase 5C는 Store/Admin CloudFront origin을 runtime CORS에 추가했다. Admin static bundle과 geo restriction은 인증 경계가 아니며 ADMIN 인가는 기존 API가 담당한다. Phase 5E는 API/EC2/RDS/Nginx/SG/runtime IAM, origin token, CORS 또는 frontend distribution 설정을 수정하지 않는다.
 
 Sources: [Amazon S3 pricing](https://aws.amazon.com/s3/pricing/), [S3 OAC](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/private-content-restricting-access-to-s3.html), [CloudFront Functions URI rewrite](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/example_cloudfront_functions_url_rewrite_single_page_apps_section.html), [Cache expiration](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/Expiration.html)
 
@@ -251,27 +251,30 @@ Source: [Amazon ECR pricing](https://aws.amazon.com/ecr/pricing/)
 
 ### GitHub OIDC/CD direction
 
-장기 access key를 GitHub secret에 저장하지 않는다. GitHub OIDC trust policy는 `aud = sts.amazonaws.com`을 요구하고 exact repository `nagi4757/ec-portfolio`를 조건에 포함한다. Subject는 `repo:nagi4757/ec-portfolio:ref:refs/heads/main` 또는 `repo:nagi4757/ec-portfolio:environment:<protected-environment>`만 허용하며 repository wildcard를 금지한다.
+장기 access key를 GitHub secret에 저장하지 않는다. Phase 5E의 trust policy는 `StringEquals`로 `aud = sts.amazonaws.com`과 검증된 exact subject `repo:nagi4757/ec-portfolio:environment:demo-frontend`를 요구하며 wildcard를 금지한다. Environment subject에는 branch가 포함되지 않으므로 GitHub `demo-frontend` Environment의 custom deployment branch policy가 `main`만 허용한다. 이 policy와 네 개의 non-secret Environment variables는 구성 완료 상태이고, OIDC provider와 role은 `3 added / 0 changed / 0 destroyed`로 apply된 뒤 convergence plan에서 `0 add / 0 change / 0 destroy`를 확인했다. Environment와 OIDC resources는 code merge와 분리된 수동 approval gate로 남는다.
 
 Role은 다음과 같이 분리한다.
 
-- **GitHub Deploy Role:** ECR push, S3 deployment, 제한된 target/command의 SSM Run Command 등 배포 권한만 보유한다. Application DB/Valkey/JWT/origin secret을 읽을 수 없다.
+- **Frontend Deploy Role:** `ec-portfolio-demo-github-frontend-deploy`는 두 frontend bucket object의 `s3:GetObject`/`s3:PutObject`만 보유한다. Delete/List/ACL/bucket configuration, CloudFront, IAM, SSM, Terraform state 권한이 없다.
+- **Future API Deploy Role:** ECR push와 제한된 runtime deployment가 필요해질 때 frontend role과 분리해 별도 설계한다.
 - **EC2 Instance Role:** 필요한 ECR repository pull, application 전용 Parameter Store path/decrypt, CloudWatch Logs 전송, SSM Agent 권한만 보유한다.
 
-목표 흐름은 다음과 같다.
+Frontend 배포 흐름은 다음과 같다.
 
-1. CI 성공
-2. API image를 full Git SHA immutable tag로 build/scan/ECR push하고 digest 기록
-3. Frontend build, S3 sync, CloudFront invalidation 최소화
-4. SSM Run Command 또는 제한된 deploy mechanism으로 EC2가 image digest를 pull
-5. 새 container start 후 readiness check
-6. 성공하면 stable image SHA/digest 갱신; 실패하면 previous stable digest로 container 재기동
+1. Main push의 Backend/Frontend/production Docker CI 성공
+2. 동일 commit에서 Store/Admin을 production API CloudFront URL로 build
+3. OIDC로 15분 frontend role session 발급
+4. 양쪽 `_releases/<git-sha>/` snapshot과 checksum manifest를 조건부 upload
+5. 양쪽 hashed assets, non-hashed files, `index.html` 순서로 publish하고 metadata/checksum 검증
+6. Rollback script primitive는 선택한 snapshot을 같은 순서로 republish (GitHub Actions manual entrypoint는 아직 없음)
 
-`latest` tag를 deploy 또는 rollback 기준으로 사용하지 않는다. Deployed SHA/digest와 previous stable SHA/digest는 운영 record에 남긴다. Flyway migration은 Docker rollback과 함께 자동 rollback하지 않는다. Backward-compatible expand/migrate/contract migration을 기본으로 하고, destructive migration은 별도 승인, RDS snapshot/restore plan과 application compatibility 검증이 필요하다.
+배포 script는 source map, 예상하지 않은 root/nested artifact, non-hashed `/assets/` 이름을 거부한다. Immutable key가 이미 있으면 checksum과 metadata가 정확히 일치할 때만 재사용하고 충돌 시 overwrite하지 않는다. `sync --delete`, object delete와 CloudFront invalidation은 사용하지 않는다. Shell/default cache TTL과 `no-cache` HTML, versioned assets 때문에 정상 배포에는 invalidation이 필요하지 않다.
 
-현재 workflow는 CI만 제공하며 이 CD 흐름은 향후 별도 review 대상이다.
+NOTE: `_releases/<git-sha>/` snapshot은 서비스 중인 bucket에 함께 저장되므로 기존 default CloudFront behavior를 통해 `/_releases/<git-sha>/...`로 접근할 수 있다. 확장자가 있어 SPA rewrite 대상이 아니고 release SHA는 public repository에서 확인 가능하다. Snapshot에는 이미 서비스 중인 production artifact만 들어간다. 배포 script가 source map과 hidden file을 거부하며, 재확인 결과 두 build output 모두 `.map` 파일과 `sourceMappingURL` 참조가 없고 credential이나 token도 포함하지 않는다(public API CloudFront URL만 존재). Phase 5E는 CloudFront behavior와 bucket policy를 변경하지 않으므로 `/_releases/*` 차단은 별도 승인이 필요한 후속 distribution 변경이다.
 
-Source: [IAM OIDC identity providers](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_providers_create_oidc.html)
+API image/CD와 database migration/rollback은 이 frontend-only role과 workflow의 범위가 아니다. GitHub Actions manual rollback entrypoint(`workflow_dispatch`)도 이번 phase에 포함하지 않으며, 필요해지면 후속 phase에서 별도로 추가한다.
+
+Sources: [GitHub OIDC for AWS](https://docs.github.com/en/actions/how-tos/secure-your-work/security-harden-deployments/oidc-in-aws), [IAM OIDC identity providers](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_providers_create_oidc.html), [CloudFront versioned files](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/Invalidation.html)
 
 ## Configuration and secrets
 
@@ -436,6 +439,14 @@ S3에서 CloudFront로의 AWS-origin 전송료는 $0/GB다. Standard distributio
 Exact 산식에서 최종 금액을 반올림하므로 표시한 중간 반올림 합계와 1엔 미만 차이가 생길 수 있다. 기존 normal 목표 ¥4,500보다는 약 ¥42 높지만 승인된 Phase 5A 사용량 가정에서는 hard ceiling ¥5,000 아래다. Traffic/bot/cache-busting과 보관량 증가를 자동으로 막는 cap은 아니며 Budget/사용량 검토를 유지한다. 연간 domain 갱신 청구는 앞서 설명한 별도 비용이고, 가격·환율·세금·사용량이 변하면 apply 전에 재산정한다.
 
 Sources: [AWS Tokyo S3 price catalog](https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonS3/current/ap-northeast-1/index.json), [CloudFront pay-as-you-go pricing and price classes](https://aws.amazon.com/cloudfront/pricing/pay-as-you-go/), [AWS Tax Help: Japan](https://aws.amazon.com/tax-help/japan/)
+
+### Phase 5E deployment cost impact
+
+GitHub OIDC provider와 IAM role에는 AWS 월 고정비가 없다. 기본 배포는 CloudFront invalidation을 만들지 않는다. Release snapshot은 현재 작은 Store/Admin artifact를 한 번 더 S3에 저장하고 각 배포마다 소수의 PUT/GET request를 추가한다. 월 수십 회 배포와 MB 단위 artifact에서는 Phase 5A가 이미 보수적으로 확보한 1 GB storage와 5,000 PUT/COPY/POST/LIST allowance 안에 머무르므로 별도 base cost를 추가하지 않는다. Release 보관량 또는 배포 빈도가 이 가정을 넘으면 자동 삭제 권한을 추가하지 말고 lifecycle/cost gate를 다시 연다.
+
+현재 public repository가 standard GitHub-hosted runner를 사용하는 동안 GitHub Actions runner 비용은 발생하지 않는다. Repository visibility, runner class, artifact retention 또는 GitHub 가격 정책이 바뀌면 별도 비용이 생길 수 있다. Phase 5E 이후에도 ¥5,000 hard ceiling과 기존 `$2` variable contingency는 그대로 유지한다.
+
+Sources: [GitHub Actions billing](https://docs.github.com/en/billing/concepts/product-billing/github-actions), [Amazon S3 pricing](https://aws.amazon.com/s3/pricing/), [CloudFront invalidation pricing](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/PayingForInvalidation.html)
 
 ## Operational gates
 

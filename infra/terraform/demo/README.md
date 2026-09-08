@@ -2,11 +2,11 @@
 
 <!-- markdownlint-disable MD013 MD060 -->
 
-This root module defines the Tokyo network foundation, Phase 3A Demo runtime, Phase 3B Scheduler/cost/failure guardrails, the Phase 4A deployment foundation, the Phase 4C origin/API distribution, and the proposed Phase 5A Store/Admin static hosting. Phases 1, 3A/3B, 4A, 4C-2A, and 4C-2B are applied to AWS; the approved post-recovery convergence check reported `No changes`. Phase 4A's ECR repository, JWT SecureString, and EC2 runtime deployment IAM policy are applied. All four schedules exist, the SNS subscription is confirmed, the Scheduler failure alarm is `OK`, alarm-to-SNS delivery is verified, and the tax-inclusive monthly Budget limit is `30.30 USD`.
+This root module defines the Tokyo network foundation, Phase 3A Demo runtime, Phase 3B Scheduler/cost/failure guardrails, the Phase 4A deployment foundation, the Phase 4C origin/API distribution, the Phase 5A Store/Admin static hosting, and the Phase 5E GitHub frontend deployment identity. Phases 1, 3A/3B, 4A, 4C-2A/2B/3, 5A, and 5E are applied; their latest approved convergence checks reported `No changes`. Phase 5B uploaded both frontend artifacts, and Phase 5C added both deployed frontend origins to the runtime CORS allowlist without rebuilding the API image. All four schedules exist, the SNS subscription is confirmed, the Scheduler failure alarm is `OK`, alarm-to-SNS delivery is verified, and the tax-inclusive monthly Budget limit is `30.30 USD`.
 
 The Scheduler stop path was verified on 2026-09-01: EC2 was `stopped` after its 17:00 JST invocation and RDS was `stopped` after 17:10. The start path was verified on 2026-09-02: RDS was `available` after 09:50 and EC2 was `running` after 10:00.
 
-Current approved project status: Phase 4C-2A is `APPLIED / CONVERGED`; Phase 4C-3 is `COMPLETE`; Phase 4C-2B is `APPLIED / CONVERGED`, with its distribution `Deployed`. The previous partial apply was recovered by updating the tracked origin request policy in place and creating the distribution. The origin `A` record points to the existing EC2 EIP and has no `AAAA` record. The Let's Encrypt certificate and Nginx HTTPS origin are verified: missing/invalid `X-Origin-Verify` returns `403`, and the valid token returns `200 / UP`; the renewal timer is enabled and active. These are prior approved operational results, not new infrastructure mutations performed by Phase 5A. Phase 5A permits code, static validation, and an explicitly approved credentialed plan only; frontend hosting apply, artifact upload, invalidation, and CORS changes remain prohibited.
+Current approved project status: Phase 4C-2A and 4C-2B are `APPLIED / CONVERGED`; Phase 4C-3 is `COMPLETE`; Phase 5A is `APPLIED / CONVERGED`; and the Phase 5B/5C deployment and runtime verification passed. The origin `A` record points to the existing EC2 EIP and has no `AAAA` record. The Let's Encrypt certificate and Nginx HTTPS origin are verified: missing/invalid `X-Origin-Verify` returns `403`, and the valid token returns `200 / UP`; the renewal timer is enabled and active. Phase 5E is `APPLIED / CONVERGED`: its GitHub OIDC provider, exact-subject frontend deploy role, and inline policy were applied as `3 added / 0 changed / 0 destroyed`, the convergence plan reported `No changes`, and every previously applied resource showed zero delta. The `demo-frontend` GitHub Environment exists with its deployment branch policy limited to `main` and its four non-secret variables configured. The `deploy-frontends` CI job is committed code that has not yet run an automated deployment.
 
 Architecture sources:
 
@@ -253,11 +253,11 @@ Keep the following contract checks as operational regression guards:
 
 The observed resource states provide invocation evidence in addition to the `OK` failure alarm. Retain the stop/start evidence during operational review. If a manual interview/demo start extends beyond the standard window, the same day's stop schedules remain the automatic stop policy; an extension after those times requires an explicit manual stop and cost review.
 
-The applied Phase 4C-2A Route 53 `A` record, origin SecureString, and two EC2 inline IAM policies must remain `no-op` in Phase 5A. Phase 4A and both Phase 4C-2B resources must also have zero delta; the header-policy remediation is already applied and must not recur. Any previously applied resource create/change/replacement/destroy is a blocker: stop and report backend/state selection, AWS identity, and live drift concerns instead of applying or editing existing resources.
+The applied Phase 4C-2A Route 53 `A` record, origin SecureString, and two EC2 inline IAM policies must remain `no-op` in Phase 5E. Phase 4A, both Phase 4C-2B resources, and every Phase 5A hosting resource must also have zero delta. Any previously applied resource create/change/replacement/destroy is a blocker: stop and report backend/state selection, AWS identity, and live drift concerns instead of applying or editing existing resources.
 
 ## Phase 5A Store/Admin static hosting
 
-Phase 5A defines infrastructure only. The two frontends use separate buckets, OACs, and distributions, with shared static-only cache policies and one route-independent viewer-request function:
+Phase 5A is applied and converged. The two frontends use separate buckets, OACs, and distributions, with shared static-only cache policies and one route-independent viewer-request function:
 
 ```text
 Browser -> Store CloudFront -> Store private S3 REST origin
@@ -265,7 +265,7 @@ Browser -> Admin CloudFront -> Admin private S3 REST origin
 Browser -> existing API CloudFront -> existing HTTPS EC2 origin
 ```
 
-There is no API origin or API proxy behavior in either frontend distribution. The future build uses the existing API CloudFront HTTPS URL as public `VITE_API_BASE_URL`; it must not contain a token or secret. No frontend source, build, object upload, deploy role, workflow, Route 53 record, ACM certificate, runtime IAM, or API CORS setting is changed by this phase. New frontend domains become approved CORS inputs only in a separate post-creation runtime gate. The Admin static bundle is not confidential or an authorization boundary: API authentication and ADMIN authorization remain mandatory.
+There is no API origin or API proxy behavior in either frontend distribution. The deployed builds use `https://d1q0vfmnxby7vo.cloudfront.net` as public `VITE_API_BASE_URL`; it contains no token or secret. Terraform does not manage frontend objects. Phase 5E adds only the dedicated artifact-deploy identity and workflow; it does not change frontend source, Route 53, ACM, runtime IAM, API CORS, or either distribution. The Admin static bundle is not confidential or an authorization boundary: API authentication and ADMIN authorization remain mandatory.
 
 ### S3 and OAC boundary
 
@@ -273,8 +273,8 @@ There is no API origin or API proxy behavior in either frontend distribution. Th
 - All four Public Access Block settings are enabled. `BucketOwnerEnforced` disables ACLs; no ACL resource or public policy is created.
 - SSE-S3 (`AES256`) avoids a new KMS key or KMS grants. Non-TLS S3 requests are explicitly denied.
 - Each bucket policy grants the CloudFront service principal only `s3:GetObject` on that bucket's objects, conditioned on its own exact distribution ARN. OAC always signs with SigV4, using the regional S3 REST endpoint over HTTPS, not S3 website hosting. No cross-frontend OAC read grant is present.
-- These policies restrict viewer access through CloudFront; separately privileged account administrators remain an IAM governance boundary. Future deploy IAM permissions require separate least-privilege review.
-- `force_destroy = false`; Terraform does not manage `aws_s3_object`, releases, object metadata, versioning, or artifact deletion. The future deploy workflow must retain prior content-hashed assets and a recoverable prior HTML release for rollback without unbounded storage growth.
+- These policies restrict viewer access through CloudFront; separately privileged account administrators remain an IAM governance boundary. The Phase 5E role can only read and write objects in these two buckets and cannot change bucket or CloudFront configuration.
+- `force_destroy = false`; Terraform does not manage `aws_s3_object`, releases, object metadata, versioning, or artifact deletion. The Phase 5E workflow retains content-hashed assets and immutable `_releases/<git-sha>/` snapshots; cleanup requires a separate cost and lifecycle review.
 
 ### Delivery, routing, and cache contract
 
@@ -289,11 +289,11 @@ The function changes only `request.uri`; query strings, duplicate query values, 
 | Default, HTML, SPA shell, non-hashed root files | `0 / 0 / 60` seconds | HTML: `Cache-Control: no-cache` |
 | `/assets/*` content-hashed files | `0 / 86400 / 31536000` seconds | `Cache-Control: public,max-age=31536000,immutable` |
 
-The future deployment must place only content-hashed artifacts under `/assets/`, upload assets before HTML, and set content types and cache metadata explicitly. CDN maximum TTL does not cap browser caching; correct HTML object metadata is a deployment gate. Real S3 403/404 responses are not mapped to HTML 200. Their configured error TTL is zero, although CloudFront enforces a one-second minimum for S3-origin errors. An empty newly created bucket cannot serve the SPA until a separately approved upload provides `index.html` and assets.
+Deployment places only content-hashed artifacts under `/assets/`, uploads both applications' assets before non-hashed files and publishes `index.html` last. It sets content types and cache metadata explicitly. CDN maximum TTL does not cap browser caching, so correct HTML object metadata remains a deployment gate. Real S3 403/404 responses are not mapped to HTML 200. Their configured error TTL is zero, although CloudFront enforces a one-second minimum for S3-origin errors.
 
-### Planned resources and outputs
+### Managed resources and outputs
 
-The code expectation is **17 add / 0 change / 0 destroy**, subject to the actual approved plan:
+Phase 5A applied the following 17 resources and subsequently converged with no planned changes:
 
 | Resource address | Instances |
 |---|---:|
@@ -310,9 +310,38 @@ The code expectation is **17 add / 0 change / 0 destroy**, subject to the actual
 
 New outputs expose only the Store/Admin bucket names and each distribution's ID/domain. Existing API outputs and all secret contracts remain unchanged. The frontend resources neither consume nor duplicate `cloudfront_origin_verify_token`.
 
-The [Phase 5A cost model](../../../docs/architecture/aws-demo.md#phase-5a-static-hosting-cost-increment) reserves `$0.8155/month` before tax for both frontends together, without free allowances. Keeping the existing `$2` contingency gives a conditional invoice estimate of `¥4,541.89` at ¥160/USD and `¥4,683.83` at ¥165/USD, including JCT. The latter leaves `¥316.17` below ¥5,000. Traffic, retained releases, and annual domain charges require separate monitoring; this is not a billing cap.
+The [Phase 5A cost model](../../../docs/architecture/aws-demo.md#phase-5a-static-hosting-cost-increment) reserves `$0.8155/month` before tax for both frontends together, without free allowances. Keeping the existing `$2` contingency gives a conditional invoice estimate of `¥4,541.89` at ¥160/USD and `¥4,683.83` at ¥165/USD, including JCT. The latter leaves `¥316.17` below ¥5,000. Phase 5E adds no fixed-cost service; retained release storage and deployment requests remain inside the existing frontend allowance but require monitoring.
 
 Sources: [S3 OAC](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/private-content-restricting-access-to-s3.html), [CloudFront Functions URI rewrite](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/example_cloudfront_functions_url_rewrite_single_page_apps_section.html), [Cache expiration](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/Expiration.html), [Error caching](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/custom-error-pages-expiration.html)
+
+## Phase 5E GitHub frontend deployment
+
+Phase 5E defines an account-level GitHub OIDC provider and a dedicated `ec-portfolio-demo-github-frontend-deploy` role. The trust policy uses `StringEquals` for both `aud = sts.amazonaws.com` and the verified exact subject `repo:nagi4757/ec-portfolio:environment:demo-frontend`; it contains no repository, branch, or environment wildcard. The role grants only `s3:GetObject` and `s3:PutObject` on the existing Store/Admin object ARNs. It has no delete, list, ACL, bucket-configuration, CloudFront, IAM, SSM, application secret, or Terraform state access. Conditional `PutObject` plus exact manifest keys make bucket listing unnecessary. These three resources are applied and converged; a re-run of the plan reports `No changes`.
+
+The existing CI workflow adds `deploy-frontends` with `needs = [backend, frontend, docker]`. It runs only for a push to `main`, uses the `demo-frontend` GitHub Environment, checks that its queued commit is still `origin/main`, builds Store and Admin with the public API URL `https://d1q0vfmnxby7vo.cloudfront.net`, and obtains a 15-minute AWS session through GitHub OIDC. Long-lived AWS access keys are forbidden. The workflow validates the exact account, role, and bucket inputs before requesting AWS credentials.
+
+`deploy-frontends.sh validate` checks both build directories before the workflow requests AWS credentials. It rejects symlinks, source maps, unexpected nested files, unknown root artifacts, and `/assets/` names without a content hash. `deploy-frontends.sh deploy` repeats that validation, creates an immutable `_releases/<git-sha>/` snapshot and `manifest.sha256` in each bucket, then publishes both applications in this order:
+
+1. Content-hashed `/assets/*` with `public,max-age=31536000,immutable`
+2. Non-hashed root files with `no-cache`
+3. `index.html` with `no-cache`
+
+Immutable uploads use `If-None-Match: *`. An existing key is accepted only when its content checksum, `Cache-Control`, and `Content-Type` match; otherwise deployment fails without overwriting it. The script never invokes S3 sync/delete or CloudFront. `deploy-frontends.sh rollback` is a script-level primitive only: it downloads and verifies both selected release manifests and snapshots, then republishes them in the same assets-first/HTML-last order using only `GetObject` and `PutObject`. No GitHub Actions entrypoint invokes it yet, because the workflow has no `workflow_dispatch` trigger and the deploy role can be assumed only from the `demo-frontend` environment; a manual rollback entrypoint is deferred to a later phase. Old releases are not deleted automatically.
+
+CloudFront invalidation is intentionally absent. Hashed assets use new names, frontend shell objects use `no-cache`, and the existing default behavior has a zero-second default TTL. If an exceptional invalidation is later required, its exact distribution ARNs and paths need a separate permission and cost gate.
+
+NOTE: `_releases/<git-sha>/` snapshots live in the same bucket as the served site, so the existing default CloudFront behavior serves them at `/_releases/<git-sha>/...`; their file extensions keep them out of the SPA rewrite, and release SHAs are public in this repository. The snapshots hold only the production artifacts that are already served: `deploy-frontends.sh` rejects source maps and hidden files, and a re-check of both build outputs found no `.map` file, no `sourceMappingURL` reference, and no credential or token, only the public API CloudFront URL. Phase 5E therefore leaves every CloudFront behavior and bucket policy unchanged; restricting `/_releases/*` would be a separate distribution change with its own approval.
+
+The `demo-frontend` GitHub Environment is created with a custom deployment branch policy that allows only `main` (one branch, no tags), and these non-secret Environment variables are configured from the approved Terraform outputs and account metadata:
+
+- `AWS_ACCOUNT_ID`
+- `AWS_FRONTEND_DEPLOY_ROLE_ARN`
+- `STORE_BUCKET_NAME`
+- `ADMIN_BUCKET_NAME`
+
+Referencing an unprotected environment is not an acceptable substitute for that gate. The OIDC provider and role are applied and converged, so the deploy job's AWS trust path is already in place. Terraform apply and GitHub Environment configuration are complete; the first frontend object deployment remains a separate explicit approval.
+
+Sources: [GitHub OIDC for AWS](https://docs.github.com/en/actions/how-tos/secure-your-work/security-harden-deployments/oidc-in-aws), [IAM OIDC providers](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_providers_create_oidc.html), [S3 `PutObject`](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutObject.html), [CloudFront versioned files](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/Invalidation.html)
 
 ## Local validation
 
@@ -320,6 +349,7 @@ Run static checks in the isolated code worktree without AWS credentials or runti
 
 ```shell
 node --test functions/frontend-spa-rewrite.test.mjs
+../../runtime/demo/deploy-frontends.test.sh
 terraform init -backend=false -input=false -lockfile=readonly
 terraform fmt -check -recursive
 terraform validate
@@ -331,11 +361,11 @@ Static validation also does not require `alert_email`. A future approved plan/ap
 
 The existing public hosted zone ID must likewise be supplied only at runtime as `route53_public_hosted_zone_id`. Do not add the real ID to `terraform.tfvars.example`, documentation, outputs, logs, or the PR description.
 
-`terraform plan` needs AWS credentials because it resolves AWS-managed data and the remote state. Phase 5A has a separate credentialed PLAN-only approval using `ec-portfolio-plan`, the existing `demo/terraform.tfstate` backend/workspace, and the same protected runtime inputs. Both origin token variables must use the identical existing Keychain token. Do not rotate inputs, print secrets, create a saved plan, use `-target`/`-refresh=false`, change permissions, switch to the apply profile, or mutate state. Run `terraform plan -input=false -detailed-exitcode`; exit code 2 is expected only for the approved frontend creates. Inspect the full change summary: AccessDenied, any existing resource delta, replacement, or destroy requires immediate stop and a report. Static validation alone cannot prove a zero-drift plan.
+`terraform plan` needs AWS credentials because it resolves AWS-managed data and the remote state. Phase 5E uses `ec-portfolio-plan`, the existing `demo/terraform.tfstate` backend/workspace, and the same protected runtime inputs. Both origin token variables must use the identical existing Keychain token. Do not rotate inputs, print secrets, create a saved plan, use `-target`/`-refresh=false`, change permissions, switch to the apply profile, or mutate state. Run `terraform plan -input=false -detailed-exitcode`; now that the Phase 5E resources are applied, exit code `0` (`No changes`) is the expected result. AccessDenied, any existing resource delta, replacement, destroy, or unexpected address requires immediate stop and a report. Static validation alone cannot prove a zero-drift plan.
 
 ## State and deployment gates
 
-The main worktree's Demo partial S3 backend is initialized and remote state exists. Phase 1 network, Phase 3 runtime/guardrail resources, Phase 4A deployment-foundation resources, Phase 4C-2A origin-foundation resources, and Phase 4C-2B API resources are applied; the approved post-recovery convergence check reported `No changes`. Phase 4C-3 runtime TLS/header enforcement is complete. Main's ignored backend configuration, runtime metadata, recovery artifacts, and untracked `AGENTS.md` must not be modified. An approved isolated plan may read the existing backend configuration while initializing only its own worktree metadata; it must not create/select a different workspace or migrate state.
+The main worktree's Demo partial S3 backend is initialized and remote state exists. Phase 1 network, Phase 3 runtime/guardrail resources, Phase 4A deployment-foundation resources, Phase 4C origin/API resources, Phase 5A frontend hosting resources, and the Phase 5E GitHub deployment identity are applied and converged. Phase 5B artifacts and Phase 5C runtime CORS are deployed. Main's ignored backend configuration, runtime metadata, recovery artifacts, and untracked `AGENTS.md` must not be modified. An approved isolated plan may read the existing backend configuration while initializing only its own worktree metadata; it must not create/select a different workspace or migrate state.
 
 Before any future state-changing AWS operation, separately verify:
 
@@ -347,6 +377,6 @@ Before any future state-changing AWS operation, separately verify:
 
 The independent [bootstrap root](../bootstrap/README.md) owns the S3 bucket and native lockfile strategy. `backend.hcl.example` documents the `demo/terraform.tfstate` runtime configuration without committing account-specific values.
 
-Before any Phase 5A apply, review the actual frontend-only plan, private bucket/OAC policies, routing tests, cache metadata contract, and tax-aware cost assumptions. All existing resources, especially `aws_cloudfront_distribution.api`, `aws_cloudfront_origin_request_policy.api`, DNS/SSM/IAM, EC2/EIP/network/SG, RDS, Scheduler/SNS/Alarm/Budget, Phase 4A, and Phase 4C-2A, must remain `no-op`. Any change/replacement/destroy, unexpected address, or token rotation requires stopping for Architecture review; never hide drift with a targeted or refresh-disabled plan.
+Phase 5E's apply is complete and converged; its plan, exact OIDC trust, and object-only permissions were reviewed before it ran. In any later Terraform operation, all existing resources, especially the API and frontend CloudFront distributions, S3 bucket configuration, DNS/SSM/runtime IAM, EC2/EIP/network/SG, RDS, Scheduler/SNS/Alarm/Budget, Phase 4, and the Phase 5E identity resources, must remain `no-op`. Any change/replacement/destroy, unexpected address, or secret rotation requires stopping for Architecture review; never hide drift with a targeted or refresh-disabled plan.
 
-Apply, S3 upload, invalidation, CORS changes, frontend build, commit, and push are not authorized by Phase 5A's implementation/validation gate. A later apply requires explicit approval of the then-current plan and permissions. Afterwards, record generated domains, separately approve CORS additions, design exact-bucket deploy permissions/OIDC, build with the existing API URL, upload assets and HTML with the required metadata, and run browser/direct-route/security smoke checks. None of these later actions is performed by this phase.
+Terraform apply and GitHub Environment creation/configuration are complete for Phase 5E. Frontend object deployment, invalidation, and commit/push still need explicit approval.
