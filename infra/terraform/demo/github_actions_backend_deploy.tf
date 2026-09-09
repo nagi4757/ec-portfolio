@@ -104,9 +104,14 @@ resource "aws_iam_role_policy" "github_backend_deploy" {
 
 # Phase 5F-2b: runtime deployment via SSM Run Command. Scoped to the single
 # Demo instance and the AWS-owned AWS-RunShellScript document only. No
-# ec2:StartInstances, no ssm:GetDocument/DescribeDocument, no ssm:CancelCommand,
-# and no access to the last-known-good image (the EC2 instance role owns both
-# the read and the write of that rollback reference).
+# ec2:StartInstances, no ssm:GetDocument/DescribeDocument, no ssm:CancelCommand.
+#
+# Last-known-good image contract, split across three policies:
+#   - this policy grants no access to it at all;
+#   - the Phase 5F-1 api-image-publish policy above keeps its read grant, which
+#     the migration and rollback gate depends on;
+#   - write stays exclusive to the EC2 instance role, so only the host that
+#     actually completed a deployment can advance the rollback reference.
 #
 # The action list mirrors exactly what deploy-runtime.sh calls: nothing more.
 data "aws_iam_policy_document" "github_backend_deploy_runtime" {

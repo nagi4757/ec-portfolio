@@ -206,11 +206,18 @@ assert_contains "$script_contents" "install -o root -g root -m 0755" \
 assert_contains "$script_contents" "checksum mismatch" \
     "The remote install must verify a checksum before use."
 
-# --- the CI poll budget must outlast the host side deployment ----------------
-# If CI gives up first it reports a timeout for a deployment that then goes on
-# to succeed, leaving the recorded state and the host disagreeing.
+# --- the deployment timeout contract -----------------------------------------
+# Three budgets have to stay ordered:
+#
+#   host deployment  <  CI poll budget  <  OIDC credential  <  job timeout
+#
+# If the poll budget is too short, CI reports a timeout for a deployment that
+# then goes on to succeed. If the job timeout is not the largest, the job is cut
+# off before the credential expires and the deployment ends with no verdict at
+# all. The workflow values are read from ci.yml rather than duplicated here, so
+# editing the workflow alone cannot silently break the ordering.
 readonly DEPLOY_API_SCRIPT_FILE="$SCRIPT_DIRECTORY/deploy-api.sh"
-readonly OIDC_CREDENTIAL_SECONDS=900
+readonly WORKFLOW_FILE="$SCRIPT_DIRECTORY/../../../.github/workflows/ci.yml"
 
 read_constant() {
     local file="$1"
@@ -222,6 +229,27 @@ read_constant() {
     printf '%s' "$value"
 }
 
+# Reads a numeric key from the deploy-api job block of the workflow.
+read_deploy_job_value() {
+    local key="$1"
+    local value
+
+    value="$(
+        awk -v key="$key" '
+            /^  deploy-api:/ { inside = 1; next }
+            inside && /^  [a-z]/ { exit }
+            inside && $0 ~ "^[[:space:]]+" key ":[[:space:]]*[0-9]+[[:space:]]*$" {
+                sub(/^.*:[[:space:]]*/, "")
+                sub(/[[:space:]]*$/, "")
+                print
+                exit
+            }
+        ' "$WORKFLOW_FILE"
+    )"
+    [[ -n "$value" ]] || fail "Could not read $key from the deploy-api job in $WORKFLOW_FILE"
+    printf '%s' "$value"
+}
+
 poll_budget=$(($(read_constant "$DEPLOY_SCRIPT" "DEFAULT_POLL_ATTEMPTS") *
     $(read_constant "$DEPLOY_SCRIPT" "DEFAULT_POLL_INTERVAL_SECONDS")))
 health_budget=$((
@@ -230,11 +258,26 @@ health_budget=$((
     2 * $(read_constant "$DEPLOY_API_SCRIPT_FILE" "READINESS_ATTEMPTS") *
     $(read_constant "$DEPLOY_API_SCRIPT_FILE" "READINESS_INTERVAL_SECONDS")
 ))
+oidc_credential_seconds="$(read_deploy_job_value "role-duration-seconds")"
+job_timeout_seconds=$(($(read_deploy_job_value "timeout-minutes") * 60))
 
 ((poll_budget > health_budget)) ||
     fail "The CI poll budget (${poll_budget}s) must exceed the deploy-api.sh health budget (${health_budget}s)."
-((poll_budget < OIDC_CREDENTIAL_SECONDS)) ||
-    fail "The CI poll budget (${poll_budget}s) must stay inside the ${OIDC_CREDENTIAL_SECONDS}s OIDC credential duration."
+((poll_budget < oidc_credential_seconds)) ||
+    fail "The CI poll budget (${poll_budget}s) must stay inside the OIDC credential duration (${oidc_credential_seconds}s)."
+((job_timeout_seconds > oidc_credential_seconds)) ||
+    fail "The deploy job timeout (${job_timeout_seconds}s) must exceed the OIDC credential duration (${oidc_credential_seconds}s)."
+
+# --- the deploy job must run both deployment contract suites -----------------
+# The wrapper suite carries the IAM/wrapper parameter contract, the flock
+# fail-closed behaviour and the reconcile/readiness rules. Running only the
+# orchestrator suite in CI would leave all of that unverified on PR and main.
+workflow_contents="$(cat "$WORKFLOW_FILE")"
+for required_suite in "infra/runtime/demo/deploy-api-from-ssm.test.sh" \
+    "infra/runtime/demo/deploy-runtime.test.sh"; do
+    assert_contains "$workflow_contents" "$required_suite" \
+        "The deploy-api job must run $required_suite"
+done
 
 # --- the checksum gate is verified by running the generated remote payload ---
 # A static grep proves the text is present, not that the gate actually stops a

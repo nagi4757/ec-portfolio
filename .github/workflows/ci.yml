@@ -293,7 +293,11 @@ jobs:
     needs:
       - build-and-push-api
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Must outlast role-duration-seconds below, so an expiring credential is
+    # what fails a stuck deployment rather than the job being cut off first.
+    # deploy-runtime.test.sh reads both values from this file and enforces
+    # poll budget < role-duration-seconds < job timeout.
+    timeout-minutes: 20
     environment: demo-backend
     concurrency:
       group: demo-backend-deploy
@@ -321,7 +325,10 @@ jobs:
           test "$GITHUB_SHA" = "$(git rev-parse HEAD)"
 
       - name: Test runtime deployment contract
-        run: infra/runtime/demo/deploy-runtime.test.sh
+        run: |
+          set -euo pipefail
+          infra/runtime/demo/deploy-api-from-ssm.test.sh
+          infra/runtime/demo/deploy-runtime.test.sh
 
       - name: Validate deployment environment
         run: |
