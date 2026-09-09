@@ -104,8 +104,11 @@ resource "aws_iam_role_policy" "github_backend_deploy" {
 
 # Phase 5F-2b: runtime deployment via SSM Run Command. Scoped to the single
 # Demo instance and the AWS-owned AWS-RunShellScript document only. No
-# ec2:StartInstances, no ssm:GetDocument/DescribeDocument, no write access to
-# the last-known-good image (the EC2 instance role owns that write).
+# ec2:StartInstances, no ssm:GetDocument/DescribeDocument, no ssm:CancelCommand,
+# and no access to the last-known-good image (the EC2 instance role owns both
+# the read and the write of that rollback reference).
+#
+# The action list mirrors exactly what deploy-runtime.sh calls: nothing more.
 data "aws_iam_policy_document" "github_backend_deploy_runtime" {
   statement {
     sid    = "SendRuntimeDeployCommand"
@@ -133,7 +136,6 @@ data "aws_iam_policy_document" "github_backend_deploy_runtime" {
     effect = "Allow"
     actions = [
       "ssm:GetCommandInvocation",
-      "ssm:ListCommands",
     ]
     resources = ["*"]
   }

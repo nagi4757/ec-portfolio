@@ -6,6 +6,13 @@
 # convergence path to pick up later. The wrapper and deploy-api.sh content
 # is sent inline (base64, checksummed on the host before install) so no
 # GitHub/raw URL access or extra network dependency is introduced.
+#
+# This job is desired-state driven, not commit driven. GITHUB_SHA only decides
+# whether this job may run at all (a stale queued job is rejected); the release
+# the host actually deploys is whatever /ec-portfolio/demo/deploy/
+# desired-image-sha holds at the moment the host-side wrapper reads it. If a
+# later main push has already advanced that parameter, this job converges the
+# host onto the newer release rather than onto its own commit.
 
 set -euo pipefail
 
@@ -19,7 +26,21 @@ readonly DEPLOY_FILE="deploy-api.sh"
 
 readonly INSTANCE_ID_PATTERN='^i-[0-9a-f]{8,17}$'
 
-readonly DEFAULT_POLL_ATTEMPTS=30
+# The poll budget has to outlast the worst case host-side deployment, otherwise
+# CI reports a timeout for a deployment that actually went on to succeed.
+# deploy-api.sh spends at most:
+#
+#   Valkey health      30 attempts x 2s = 60s
+#   candidate readiness 36 attempts x 5s = 180s
+#   host readiness      36 attempts x 5s = 180s
+#                                        ------
+#                                          420s
+#
+# On top of that come two docker pulls (API image plus Valkey) and the SSM agent
+# picking the command up, which we budget at roughly 240s together. 66 attempts
+# at 10s gives 660s, leaving a 240s margin inside the 900s OIDC credential
+# duration configured for the deploy job.
+readonly DEFAULT_POLL_ATTEMPTS=66
 readonly DEFAULT_POLL_INTERVAL_SECONDS=10
 
 log() {
@@ -160,4 +181,8 @@ main() {
     esac
 }
 
-main "$@"
+# Sourcing the script exposes the command builder without running a deployment,
+# which is how deploy-runtime.test.sh executes the generated payload for real.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi

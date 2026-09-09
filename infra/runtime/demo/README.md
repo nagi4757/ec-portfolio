@@ -118,6 +118,40 @@ host port、public port、volumeは使用しません。`restart=unless-stopped`
 
 candidate検証後にだけ既存APIを停止します。最終APIの起動またはreadinessが失敗した場合、失敗containerを削除し、退避した旧containerを元の名前に戻して起動します。成功後は旧containerを削除します。より古いimageへ戻す手動rollbackも、同じscriptへ承認済みの過去Git SHA `IMAGE_REF`を渡して行います。
 
+## CI駆動deployment（Phase 5F-2b）
+
+`main`へのpush時、GitHub Actionsの`deploy-api` jobが`deploy-runtime.sh`を実行します。checkout済みの`deploy-api-from-ssm.sh`と`deploy-api.sh`をbase64で送り、host側でSHA256を検証し、2ファイルとも一致した場合にだけ`/opt/ec-portfolio/runtime/demo/`へ`root:root` `0755`でinstallしてwrapperを実行します。
+
+### desired stateの意味
+
+このjobはcommit駆動ではなくdesired state駆動です。
+
+- `GITHUB_SHA`は**このjobを実行してよいかどうかの判定にだけ**使用します。remote `main` HEADと一致しない stale なqueued jobを拒否するためのものです。
+- hostが実際にdeployするimageは、**host側wrapperが読んだ時点の**`/ec-portfolio/demo/deploy/desired-image-sha`の値です。
+
+したがって、後続の`main` pushが既にdesired stateを更新していた場合、先行するjobは自分のcommitではなく**より新しいdesired SHAへ収束します**。これは意図した動作です。desired stateを唯一の真実として扱うことで、実行順序が前後しても最終状態が一意に定まり、古いreleaseを後から上書きしてしまう事故を防ぎます。
+
+### 同時実行の防止
+
+hostでの同時deploymentは`flock`による非待機lock（`/var/lock/ec-portfolio-demo-deploy.lock`）で防ぎます。lockを取得できなかった場合は待機せずfail-closedで終了します。待機しない理由は、先行runの結果を観測できないまま順番待ちしても、後続runがどの状態の上で動くか保証できないためです。
+
+CI側は`concurrency` groupでもjobの重複を抑止しますが、hostのlockはSSM Run Commandの再送や手動実行など、CI以外の経路も含めて保護します。
+
+### CI polling budget
+
+`deploy-runtime.sh`のpolling budgetは660秒（66回×10秒）です。根拠は次のとおりです。
+
+| 項目 | budget |
+| --- | --- |
+| Valkey health（30回×2秒） | 60秒 |
+| candidate readiness（36回×5秒） | 180秒 |
+| host readiness（36回×5秒） | 180秒 |
+| `deploy-api.sh`の health-check 合計 | **420秒** |
+| docker pull 2件とSSM agentのpickup（見積り） | 約240秒 |
+| polling budget 合計 | **660秒** |
+
+deploy job のOIDC credentialは900秒なので、240秒のsafety marginを残しています。polling budgetがhost側のbudgetより短いと、実際には成功したdeploymentをCIがtimeoutとして報告してしまうため、この関係は維持してください。`deploy-api.sh`のreadiness設定を変更する場合は、この値も合わせて見直す必要があります。
+
 ## Smoke check
 
 deployment後、secretなしで次を実行します。

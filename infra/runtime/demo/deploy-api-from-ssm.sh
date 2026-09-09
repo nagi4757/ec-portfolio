@@ -16,6 +16,14 @@ readonly READINESS_URL="http://127.0.0.1:8080/actuator/health/readiness"
 readonly READINESS_ATTEMPTS=3
 readonly READINESS_INTERVAL_SECONDS=2
 
+# SSM Run Command can deliver a second invocation while the first is still
+# swapping containers, and two concurrent deploy-api.sh runs would race on the
+# same container names and on the rollback reference. The lock is taken without
+# waiting: a second deployment fails closed rather than queueing behind a run
+# whose outcome it cannot observe.
+readonly DEFAULT_DEPLOY_LOCK_FILE="/var/lock/ec-portfolio-demo-deploy.lock"
+readonly DEPLOY_LOCK_FD=9
+
 readonly DESIRED_IMAGE_SHA_PARAMETER="/ec-portfolio/demo/deploy/desired-image-sha"
 readonly LAST_KNOWN_GOOD_IMAGE_SHA_PARAMETER="/ec-portfolio/demo/deploy/last-known-good-image-sha"
 readonly RUNTIME_DB_HOST_PARAMETER="/ec-portfolio/demo/runtime/db-host"
@@ -51,6 +59,22 @@ fail() {
 
 require_command() {
     command -v "$1" >/dev/null 2>&1 || fail "Required command is not available: $1"
+}
+
+# Serialises every state changing path on this host, including the reconcile
+# only path: that one still writes the rollback reference, so it must not run
+# beside a deployment that is about to advance it.
+acquire_deployment_lock() {
+    local lock_file="${DEPLOY_LOCK_FILE:-$DEFAULT_DEPLOY_LOCK_FILE}"
+
+    # A fixed descriptor keeps this working on bash 3.2 as well. The descriptor
+    # is held for the lifetime of the process, so the lock is released by the
+    # kernel on exit however this script terminates.
+    exec 9>"$lock_file" ||
+        fail "Unable to open the deployment lock file: $lock_file"
+
+    flock --nonblock "$DEPLOY_LOCK_FD" ||
+        fail "Another deployment is already running on this host (lock: $lock_file). Refusing to run concurrently."
 }
 
 read_parameter() {
@@ -233,9 +257,11 @@ main() {
 
     (( $# == 0 )) || fail "Usage: deploy-api-from-ssm.sh"
 
-    for command_name in aws curl docker grep; do
+    for command_name in aws curl docker flock grep; do
         require_command "$command_name"
     done
+
+    acquire_deployment_lock
 
     resolve_desired_image
 

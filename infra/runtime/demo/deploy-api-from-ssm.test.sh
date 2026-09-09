@@ -136,6 +136,15 @@ printf '%s\n' "curl $*" >>"$MOCK_CALL_LOG"
 printf '{"status":"UP","groups":["readiness"]}\n'
 MOCK
 
+    # flock is Linux only, so the lock contract is exercised through a mock that
+    # reports whether the non-blocking acquisition succeeded.
+    cat >"$mock_directory/flock" <<'MOCK'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "flock $*" >>"$MOCK_CALL_LOG"
+exit "${MOCK_FLOCK_STATUS:-0}"
+MOCK
+
     cat >"$mock_directory/deploy-api-stub.sh" <<'MOCK'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -154,7 +163,7 @@ exit "${MOCK_DEPLOY_STATUS:-0}"
 MOCK
 
     chmod 755 "$mock_directory"/aws "$mock_directory"/docker "$mock_directory"/curl \
-        "$mock_directory"/deploy-api-stub.sh
+        "$mock_directory"/flock "$mock_directory"/deploy-api-stub.sh
     PATH="$mock_directory:$PATH"
     export PATH
 }
@@ -168,6 +177,7 @@ run_wrapper() {
 
     env \
         DEPLOY_API_SCRIPT="$work_directory/bin/deploy-api-stub.sh" \
+        DEPLOY_LOCK_FILE="$work_directory/deploy.lock" \
         MOCK_DESIRED="$DESIRED_SHA" \
         MOCK_ACCOUNT="$ACCOUNT_ID" \
         MOCK_DB_HOST="demo-db.ap-northeast-1.rds.amazonaws.com" \
@@ -321,11 +331,154 @@ runtime_rejects "A CORS entry without a scheme" "CORS allowlist" \
 runtime_rejects "A missing runtime parameter" "Unable to read" \
     MOCK_MISSING_PARAMETER="/ec-portfolio/demo/runtime/db-name"
 
+# --- the host deployment lock is taken before any state change ---------------
+output="$(run_wrapper 2>&1)" || fail "A deployment must succeed when the lock is free."
+calls="$(cat "$work_directory/calls.log")"
+assert_contains "$calls" "flock --nonblock" "The lock must be acquired without waiting."
+lock_line="$(printf '%s\n' "$calls" | grep -n -F "flock --nonblock" | head -n 1 | cut -d: -f1)"
+deploy_line="$(printf '%s\n' "$calls" | grep -n -F "deploy-api" | head -n 1 | cut -d: -f1)"
+[[ -n "$lock_line" && -n "$deploy_line" && "$lock_line" -lt "$deploy_line" ]] ||
+    fail "The lock must be acquired before the deployment script runs."
+
+# --- a busy lock fails closed and changes nothing ----------------------------
+output="$(run_wrapper MOCK_FLOCK_STATUS=1 2>&1)" &&
+    fail "A deployment must fail closed when the host lock is already held."
+assert_contains "$output" "Another deployment is already running on this host" \
+    "The busy lock must be reported."
+assert_contains "$output" "Refusing to run concurrently" "The refusal must be explicit."
+calls="$(cat "$work_directory/calls.log")"
+assert_absent "$calls" "deploy-api" "A busy lock must not deploy."
+assert_absent "$calls" "put-parameter" "A busy lock must not rewrite deployment state."
+assert_absent "$calls" "get-parameter" "A busy lock must not even read deployment state."
+
+# A converged host still writes the rollback reference, so it must lock too.
+output="$(run_wrapper MOCK_CONTAINER_IMAGE="$EXPECTED_REFERENCE" MOCK_READINESS=up \
+    MOCK_LKG="$PREVIOUS_SHA" MOCK_FLOCK_STATUS=1 2>&1)" &&
+    fail "The reconcile only path must also respect the host lock."
+assert_contains "$output" "Another deployment is already running on this host" \
+    "The reconcile path must report the busy lock."
+calls="$(cat "$work_directory/calls.log")"
+assert_absent "$calls" "put-parameter" "A busy lock must not reconcile the rollback reference."
+
 # --- static contract: no forbidden runtime behaviour ------------------------
 for forbidden in "--with-decryption" "master-password" "auth-jwt-secret" ":latest" \
     "send-command" "start-instances" "ec2 " "DB_PASSWORD=" "APP_AUTH_JWT_SECRET="; do
     grep -Fq -- "$forbidden" "$WRAPPER_SCRIPT" &&
         fail "The wrapper must not reference: $forbidden"
+done
+
+# --- contract: the EC2 IAM policy must match what the wrapper actually uses --
+# A parameter the wrapper reads but the instance role cannot read is an
+# AccessDenied that only shows up on the host, mid-deployment. Resolve both
+# sides down to literal parameter paths and compare them as sets.
+readonly TERRAFORM_DIRECTORY="$SCRIPT_DIRECTORY/../../terraform/demo"
+readonly IAM_FILE="$TERRAFORM_DIRECTORY/iam.tf"
+
+# Maps a terraform aws_ssm_parameter resource name to its literal path.
+terraform_parameter_path() {
+    local resource_name="$1"
+    local name_expression
+
+    name_expression="$(
+        awk -v resource="$resource_name" '
+            $0 ~ "^resource \"aws_ssm_parameter\" \"" resource "\" \\{" { inside = 1; next }
+            inside && /^}/ { exit }
+            inside && /^[[:space:]]*name[[:space:]]*=/ { print; exit }
+        ' "$TERRAFORM_DIRECTORY"/*.tf
+    )"
+    [[ -n "$name_expression" ]] || fail "No aws_ssm_parameter resource named: $resource_name"
+
+    printf '%s' "$name_expression" |
+        sed -e 's/^[[:space:]]*name[[:space:]]*=[[:space:]]*"//' -e 's/"[[:space:]]*$//' \
+            -e 's|${local.deploy_state_prefix}|/ec-portfolio/demo/deploy|' \
+            -e 's|${local.runtime_parameter_prefix}|/ec-portfolio/demo/runtime|'
+}
+
+# Resolves a wrapper variable such as DESIRED_IMAGE_SHA_PARAMETER to its value.
+wrapper_parameter_path() {
+    local variable_name="$1"
+    local value
+
+    value="$(sed -n "s/^readonly ${variable_name}=\"\\(.*\\)\"$/\\1/p" "$WRAPPER_SCRIPT")"
+    [[ -n "$value" ]] || fail "No readonly parameter path named: $variable_name"
+    printf '%s' "$value"
+}
+
+# Every parameter the wrapper reads, resolved from its read_required_parameter calls.
+wrapper_read_paths="$(
+    grep -oE 'read_required_parameter "\$[A-Z_]+"' "$WRAPPER_SCRIPT" |
+        sed -e 's/read_required_parameter "\$//' -e 's/"$//' | sort -u |
+        while read -r variable_name; do
+            wrapper_parameter_path "$variable_name"
+            printf '\n'
+        done | sort -u
+)"
+
+# Every parameter the wrapper writes, resolved from its put-parameter call.
+wrapper_write_paths="$(
+    grep -oE '\-\-name "\$[A-Z_]+"' "$WRAPPER_SCRIPT" |
+        sed -e 's/--name "\$//' -e 's/"$//' | sort -u |
+        while read -r variable_name; do
+            wrapper_parameter_path "$variable_name"
+            printf '\n'
+        done | sort -u
+)"
+
+# The resource lists of the two statements in aws_iam_role_policy.ec2_deployment_state.
+iam_statement_paths() {
+    local statement_sid="$1"
+
+    awk -v sid="$statement_sid" '
+        /resource "aws_iam_role_policy" "ec2_deployment_state"/ { inside_policy = 1 }
+        inside_policy && $0 ~ "Sid[[:space:]]*=[[:space:]]*\"" sid "\"" { inside_statement = 1; next }
+        inside_statement && /^      \},/ { exit }
+        inside_statement && /aws_ssm_parameter\./ { print }
+    ' "$IAM_FILE" |
+        grep -oE 'aws_ssm_parameter\.[a-z_]+' | sed 's/aws_ssm_parameter\.//' | sort -u |
+        while read -r resource_name; do
+            terraform_parameter_path "$resource_name"
+            printf '\n'
+        done | sort -u
+}
+
+iam_read_paths="$(iam_statement_paths "ReadDeploymentState")"
+iam_write_paths="$(iam_statement_paths "RecordLastKnownGoodImage")"
+
+[[ -n "$wrapper_read_paths" ]] || fail "Could not resolve the parameters the wrapper reads."
+[[ -n "$iam_read_paths" ]] || fail "Could not resolve the ReadDeploymentState resources."
+
+if [[ "$wrapper_read_paths" != "$iam_read_paths" ]]; then
+    printf 'wrapper reads:\n%s\n\nIAM ReadDeploymentState allows:\n%s\n' \
+        "$wrapper_read_paths" "$iam_read_paths" >&2
+    fail "The parameters the wrapper reads and the EC2 IAM read grants must match exactly."
+fi
+
+if [[ "$wrapper_write_paths" != "$iam_write_paths" ]]; then
+    printf 'wrapper writes:\n%s\n\nIAM RecordLastKnownGoodImage allows:\n%s\n' \
+        "$wrapper_write_paths" "$iam_write_paths" >&2
+    fail "The parameters the wrapper writes and the EC2 IAM write grants must match exactly."
+fi
+
+# The rollback reference is read on the converged path and written after a
+# deployment, so it must appear on both sides. This is the B1 regression.
+assert_contains "$wrapper_read_paths" "$LAST_KNOWN_GOOD_PARAMETER" \
+    "The wrapper must read the last known good image."
+assert_contains "$iam_read_paths" "$LAST_KNOWN_GOOD_PARAMETER" \
+    "The EC2 role must be allowed to read the last known good image."
+assert_contains "$iam_write_paths" "$LAST_KNOWN_GOOD_PARAMETER" \
+    "The EC2 role must be allowed to write the last known good image."
+
+# The GitHub deploy role must never gain access to the rollback reference.
+readonly BACKEND_DEPLOY_FILE="$TERRAFORM_DIRECTORY/github_actions_backend_deploy.tf"
+runtime_policy_document="$(
+    awk '/data "aws_iam_policy_document" "github_backend_deploy_runtime"/ { inside = 1 }
+         inside { print }
+         inside && /^}/ { exit }' "$BACKEND_DEPLOY_FILE"
+)"
+for forbidden in "last_known_good" "last-known-good" "GetParameter" "PutParameter" \
+    "StartInstances" "ListCommands" "CancelCommand" "GetDocument" "DescribeDocument"; do
+    assert_absent "$runtime_policy_document" "$forbidden" \
+        "The GitHub runtime deploy policy must not grant: $forbidden"
 done
 
 printf '[deploy-from-ssm-test] PASS\n'

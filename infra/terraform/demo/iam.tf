@@ -95,6 +95,9 @@ resource "aws_iam_role_policy" "ec2_deployment_state" {
         Sid    = "ReadDeploymentState"
         Effect = "Allow"
         Action = "ssm:GetParameter"
+        # deploy-api-from-ssm.sh reads the last known good image on the already
+        # converged path to decide whether the rollback reference still has to
+        # be reconciled, so it needs read access alongside the write below.
         Resource = [
           aws_ssm_parameter.runtime_db_host.arn,
           aws_ssm_parameter.runtime_db_port.arn,
@@ -102,6 +105,7 @@ resource "aws_iam_role_policy" "ec2_deployment_state" {
           aws_ssm_parameter.runtime_db_username.arn,
           aws_ssm_parameter.runtime_cors_allowed_origins.arn,
           aws_ssm_parameter.deploy_desired_image_sha.arn,
+          aws_ssm_parameter.deploy_last_known_good_image_sha.arn,
         ]
       },
       {
