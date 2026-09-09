@@ -216,3 +216,28 @@ output "deploy_pending_migration_image_sha_parameter_name" {
   description = "Name of the non-secret parameter holding an image SHA blocked by the Flyway migration gate."
   value       = aws_ssm_parameter.deploy_pending_migration_image_sha.name
 }
+
+output "runtime_db_host_parameter_name" {
+  description = "Name of the non-secret parameter holding the Demo database endpoint."
+  value       = aws_ssm_parameter.runtime_db_host.name
+}
+
+output "runtime_db_port_parameter_name" {
+  description = "Name of the non-secret parameter holding the Demo database port."
+  value       = aws_ssm_parameter.runtime_db_port.name
+}
+
+output "runtime_db_name_parameter_name" {
+  description = "Name of the non-secret parameter holding the Demo database name."
+  value       = aws_ssm_parameter.runtime_db_name.name
+}
+
+output "runtime_db_username_parameter_name" {
+  description = "Name of the non-secret parameter holding the Demo database username."
+  value       = aws_ssm_parameter.runtime_db_username.name
+}
+
+output "runtime_cors_allowed_origins_parameter_name" {
+  description = "Name of the non-secret parameter holding the Phase 5C CORS allowlist."
+  value       = aws_ssm_parameter.runtime_cors_allowed_origins.name
+}

@@ -10,6 +10,12 @@ readonly EXPECTED_IMAGE_ENTRYPOINT='["java","-jar","/app/app.jar"]'
 readonly EXPECTED_IMAGE_PORTS='{"8080/tcp":{}}'
 readonly RDS_CA_BUNDLE_PATH="/etc/ssl/certs/aws-rds-ap-northeast-1-bundle.pem"
 readonly SECRET_CONFIGURATION_PATTERN='DB_PASSWORD|REDIS_PASSWORD|APP_AUTH_JWT_SECRET'
+readonly FLYWAY_PROPERTIES_PATH="apps/api/src/main/resources/application.properties"
+readonly FLYWAY_RESOURCES_PATH="apps/api/src/main/resources"
+readonly FLYWAY_BUILD_FILE="apps/api/build.gradle.kts"
+readonly FLYWAY_ENABLED_LINE="spring.flyway.enabled=true"
+readonly FLYWAY_LOCATIONS_LINE="spring.flyway.locations=classpath:db/migration"
+readonly FLYWAY_CONFIGURATION_PATTERN='spring[.]flyway[.]|org[.]flywaydb|flyway-core|flyway-mysql'
 
 runtime_directory=""
 ecr_registry=""
@@ -81,6 +87,7 @@ validate_common_inputs() {
 # returns 1 when the repository reports it missing. Any other failure stops the
 # script, so it must not run inside a command substitution subshell.
 inspect_published_image() {
+    local tag="${1:-$IMAGE_TAG}"
     local error_file="$runtime_directory/describe.error"
     local status=0
 
@@ -89,14 +96,14 @@ inspect_published_image() {
         AWS_PAGER="" aws ecr describe-images \
             --region "$AWS_REGION" \
             --repository-name "$ECR_REPOSITORY_NAME" \
-            --image-ids "imageTag=$IMAGE_TAG" \
+            --image-ids "imageTag=$tag" \
             --query 'imageDetails[0].imageDigest' \
             --output text 2>"$error_file"
     )" || status=$?
 
     if (( status == 0 )); then
         [[ "$image_digest" =~ $DIGEST_PATTERN ]] ||
-            fail "Unexpected describe-images digest for tag $IMAGE_TAG."
+            fail "Unexpected describe-images digest for tag $tag."
         return 0
     fi
 
@@ -105,7 +112,7 @@ inspect_published_image() {
         return 1
     fi
 
-    fail "Unable to inspect the API repository for tag $IMAGE_TAG."
+    fail "Unable to inspect the API repository for tag $tag."
 }
 
 login_to_ecr() {
@@ -229,6 +236,11 @@ write_state_parameter() {
 migration_guard() {
     local last_known_good
     local changed_migrations
+    local configuration_diff
+    local changed_configuration
+    local configured_locations
+    local release_properties
+    local block_reasons=""
 
     require_environment MIGRATION_PATH
     require_environment LAST_KNOWN_GOOD_IMAGE_SHA_PARAMETER
@@ -247,12 +259,47 @@ migration_guard() {
     git rev-parse --verify --quiet "${IMAGE_TAG}^{commit}" >/dev/null ||
         fail "The release commit $IMAGE_TAG is not present."
 
+    # 1. Migration files themselves.
     changed_migrations="$(
         git diff --name-only "$last_known_good" "$IMAGE_TAG" -- "$MIGRATION_PATH"
     )" || fail "Unable to compare migrations between $last_known_good and $IMAGE_TAG."
+    [[ -z "$changed_migrations" ]] ||
+        block_reasons+="Flyway migration files changed."$'\n'
 
-    if [[ -z "$changed_migrations" ]]; then
-        log "No Flyway migration change between $last_known_good and $IMAGE_TAG."
+    # 2. Flyway configuration or dependency lines anywhere in the API resources
+    #    and build file, so the gate cannot be bypassed by repointing Flyway.
+    configuration_diff="$(
+        git diff -U0 "$last_known_good" "$IMAGE_TAG" \
+            -- "$FLYWAY_RESOURCES_PATH" "$FLYWAY_BUILD_FILE"
+    )" || fail "Unable to compare Flyway configuration between $last_known_good and $IMAGE_TAG."
+    changed_configuration="$(
+        printf '%s\n' "$configuration_diff" |
+            grep -E "^[+-][^+-].*($FLYWAY_CONFIGURATION_PATTERN)" || true
+    )"
+    [[ -z "$changed_configuration" ]] ||
+        block_reasons+="Flyway configuration or dependency changed."$'\n'
+
+    # 3. Invariants that must still hold in the release commit.
+    release_properties="$(git show "$IMAGE_TAG:$FLYWAY_PROPERTIES_PATH")" ||
+        fail "The release commit does not contain $FLYWAY_PROPERTIES_PATH."
+    printf '%s\n' "$release_properties" | grep -qxF "$FLYWAY_ENABLED_LINE" ||
+        block_reasons+="$FLYWAY_ENABLED_LINE is no longer declared."$'\n'
+    printf '%s\n' "$release_properties" | grep -qxF "$FLYWAY_LOCATIONS_LINE" ||
+        block_reasons+="$FLYWAY_LOCATIONS_LINE is no longer declared."$'\n'
+
+    # 4. Flyway must stay configured in exactly one file.
+    configured_locations="$(
+        git grep -l -E 'spring[.]flyway[.]' "$IMAGE_TAG" -- "$FLYWAY_RESOURCES_PATH" || true
+    )"
+    configured_locations="$(
+        printf '%s' "$configured_locations" | sed "s|^$IMAGE_TAG:||" |
+            LC_ALL=C sort | tr '\n' ' ' | sed 's/ *$//'
+    )"
+    [[ "$configured_locations" == "$FLYWAY_PROPERTIES_PATH" ]] ||
+        block_reasons+="Flyway is configured outside $FLYWAY_PROPERTIES_PATH."$'\n'
+
+    if [[ -z "$block_reasons" ]]; then
+        log "No Flyway migration, configuration, or dependency change between $last_known_good and $IMAGE_TAG."
         return 0
     fi
 
@@ -260,7 +307,13 @@ migration_guard() {
 
     printf '[api-publish] ERROR: %s\n' \
         "Flyway migration change detected between $last_known_good and $IMAGE_TAG." >&2
-    printf '%s\n' "$changed_migrations" | sed 's/^/[api-publish]   changed: /' >&2
+    printf '%s' "$block_reasons" | sed 's/^/[api-publish]   reason: /' >&2
+    if [[ -n "$changed_migrations" ]]; then
+        printf '%s\n' "$changed_migrations" | sed 's/^/[api-publish]   changed: /' >&2
+    fi
+    if [[ -n "$changed_configuration" ]]; then
+        printf '%s\n' "$changed_configuration" | sed 's/^/[api-publish]   config: /' >&2
+    fi
     printf '[api-publish] ERROR: %s\n' \
         "Automatic backend deployment is blocked. A manual migration release is required:" >&2
     printf '[api-publish] ERROR: %s\n' \
@@ -272,6 +325,28 @@ migration_guard() {
     printf '[api-publish] ERROR: %s\n' \
         "The image for $IMAGE_TAG is preserved in ECR and the desired image SHA is unchanged." >&2
     exit 1
+}
+
+# Refuses to advance the desired image while the recorded rollback target has
+# already been expired from ECR by the repository lifecycle policy.
+assert_rollback_image() {
+    local last_known_good
+
+    require_environment LAST_KNOWN_GOOD_IMAGE_SHA_PARAMETER
+    validate_parameter_name LAST_KNOWN_GOOD_IMAGE_SHA_PARAMETER
+
+    last_known_good="$(read_state_parameter "$LAST_KNOWN_GOOD_IMAGE_SHA_PARAMETER")" ||
+        fail "Unable to read the last known good image SHA."
+    [[ "$last_known_good" =~ ^[0-9a-f]{40}$ ]] ||
+        fail "The last known good image SHA is not a full lowercase Git SHA."
+
+    log "Confirming that the rollback image $last_known_good is still published."
+    if inspect_published_image "$last_known_good"; then
+        log "Rollback image is available. Digest: $image_digest"
+        return 0
+    fi
+
+    fail "The last known good image $last_known_good is no longer published in ECR, so a rollback would be impossible. The desired image SHA is left unchanged. Restore that image or promote a verified replacement before deploying again."
 }
 
 record_desired() {
@@ -289,10 +364,13 @@ main() {
     local mode="${1-}"
     local command_name
 
-    (( $# == 1 )) || fail "Usage: publish-api-image.sh ensure-image|migration-guard|record-desired"
+    (( $# == 1 )) ||
+        fail "Usage: publish-api-image.sh ensure-image|migration-guard|assert-rollback-image|record-desired"
     case "$mode" in
-        ensure-image | migration-guard | record-desired) ;;
-        *) fail "Usage: publish-api-image.sh ensure-image|migration-guard|record-desired" ;;
+        ensure-image | migration-guard | assert-rollback-image | record-desired) ;;
+        *)
+            fail "Usage: publish-api-image.sh ensure-image|migration-guard|assert-rollback-image|record-desired"
+            ;;
     esac
 
     for command_name in aws grep mktemp rm sed; do
@@ -309,6 +387,7 @@ main() {
     case "$mode" in
         ensure-image) ensure_image ;;
         migration-guard) migration_guard ;;
+        assert-rollback-image) assert_rollback_image ;;
         record-desired) record_desired ;;
     esac
 
