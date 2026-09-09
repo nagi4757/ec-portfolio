@@ -8,6 +8,26 @@ readonly MIGRATION_PATH="apps/api/src/main/resources/db/migration"
 readonly DESIRED_PARAMETER="/ec-portfolio/demo/deploy/desired-image-sha"
 readonly LAST_KNOWN_GOOD_PARAMETER="/ec-portfolio/demo/deploy/last-known-good-image-sha"
 readonly PENDING_PARAMETER="/ec-portfolio/demo/deploy/pending-migration-image-sha"
+readonly FLYWAY_PROPERTIES_PATH="apps/api/src/main/resources/application.properties"
+readonly FLYWAY_BUILD_FILE="apps/api/build.gradle.kts"
+
+readonly BASE_PROPERTIES='spring.application.name=ec-api
+
+# Flyway
+spring.flyway.enabled=true
+spring.flyway.locations=classpath:db/migration
+'
+readonly BASE_GRADLE='plugins {
+    id("org.springframework.boot") version "3.5.7"
+    id("org.flywaydb.flyway") version "11.7.2"
+}
+
+dependencies {
+    implementation("org.springframework.boot:spring-boot-starter-web")
+    implementation("org.flywaydb:flyway-core:11.7.2")
+    implementation("org.flywaydb:flyway-mysql:11.7.2")
+}
+'
 
 work_directory=""
 
@@ -75,6 +95,14 @@ operation="${2-}"
 
 case "$service $operation" in
     "ecr describe-images")
+        requested_tag=""
+        for arg in "$@"; do
+            case "$arg" in imageTag=*) requested_tag="${arg#imageTag=}" ;; esac
+        done
+        if [[ -n "${MOCK_MISSING_TAG-}" && "$requested_tag" == "${MOCK_MISSING_TAG}" ]]; then
+            printf 'An error occurred (ImageNotFoundException) when calling DescribeImages\n' >&2
+            exit 254
+        fi
         if [[ "${MOCK_IMAGE_PRESENT-false}" == "true" ]]; then
             printf 'sha256:%064d\n' 1
             exit 0
@@ -141,7 +169,13 @@ case "${1-}" in
     run)
         exit "${MOCK_IMAGE_RUN_STATUS:-0}"
         ;;
-    build | login | logout) ;;
+    login)
+        # Real docker reads the password from stdin. Draining it here keeps the
+        # mock from closing the pipe early and making get-login-password fail
+        # with EPIPE under pipefail.
+        cat >/dev/null 2>&1 || true
+        ;;
+    build | logout) ;;
     *)
         printf 'unexpected docker invocation: %s\n' "$*" >&2
         exit 64
@@ -161,6 +195,8 @@ create_repository() {
     printf 'FROM scratch\n' >"$repository/apps/api/Dockerfile"
     printf 'SELECT 1;\n' >"$repository/$MIGRATION_PATH/V1__init.sql"
     printf 'base\n' >"$repository/README.md"
+    printf '%s' "$BASE_PROPERTIES" >"$repository/$FLYWAY_PROPERTIES_PATH"
+    printf '%s' "$BASE_GRADLE" >"$repository/$FLYWAY_BUILD_FILE"
 
     git -C "$repository" init --quiet
     git -C "$repository" -c user.name=test -c user.email=test@example.invalid \
@@ -169,6 +205,24 @@ create_repository() {
         commit --quiet -m "base"
 
     printf '%s' "$repository"
+}
+
+# Creates a one-commit variant directly on top of the base commit so each Flyway
+# scenario is independent of the others.
+commit_variant() {
+    local repository="$1"
+    local base="$2"
+    local relative_path="$3"
+    local content="$4"
+    local message="$5"
+
+    git -C "$repository" checkout -f --quiet --detach "$base"
+    mkdir -p "$repository/$(dirname -- "$relative_path")"
+    printf '%s' "$content" >"$repository/$relative_path"
+    git -C "$repository" -c user.name=test -c user.email=test@example.invalid add -A
+    git -C "$repository" -c user.name=test -c user.email=test@example.invalid \
+        commit --quiet -m "$message"
+    git -C "$repository" rev-parse HEAD
 }
 
 commit_change() {
@@ -294,7 +348,8 @@ assert_absent "$calls" "docker build" "A failed inspection must not start a buil
 output="$(run_publish "$repository" migration-guard IMAGE_TAG="$code_sha" \
     MOCK_PARAMETER_VALUE="$base_sha" 2>&1)" ||
     fail "A code-only release must pass the migration guard."
-assert_contains "$output" "No Flyway migration change" "The guard must report a clean comparison."
+assert_contains "$output" "No Flyway migration, configuration, or dependency change" \
+    "The guard must report a clean comparison."
 calls="$(cat "$work_directory/calls.log")"
 assert_absent "$calls" "put-parameter" "A clean guard must not write deployment state."
 
@@ -340,6 +395,86 @@ assert_contains "$calls" "put-parameter --region ap-northeast-1 --name $DESIRED_
     "The desired image SHA must be recorded."
 assert_contains "$calls" "put-parameter --region ap-northeast-1 --name $PENDING_PARAMETER --value none --type String --overwrite" \
     "A successful publication must clear the pending migration marker."
+
+# --- assert-rollback-image: the recorded rollback target must still exist ----
+output="$(run_publish "$repository" assert-rollback-image IMAGE_TAG="$code_sha" \
+    MOCK_IMAGE_PRESENT=true MOCK_PARAMETER_VALUE="$base_sha" 2>&1)" ||
+    fail "A published rollback image must satisfy the guard."
+assert_contains "$output" "Rollback image is available" "The guard must confirm the rollback image."
+calls="$(cat "$work_directory/calls.log")"
+assert_contains "$calls" "imageTag=$base_sha" "The guard must inspect the last known good tag."
+
+output="$(run_publish "$repository" assert-rollback-image IMAGE_TAG="$code_sha" \
+    MOCK_IMAGE_PRESENT=true MOCK_MISSING_TAG="$base_sha" MOCK_PARAMETER_VALUE="$base_sha" 2>&1)" &&
+    fail "An expired rollback image must block the release."
+assert_contains "$output" "no longer published" "The guard must name the missing rollback image."
+assert_contains "$output" "desired image SHA is left unchanged" \
+    "The guard must state that the desired SHA is untouched."
+calls="$(cat "$work_directory/calls.log")"
+assert_absent "$calls" "put-parameter" "A blocked rollback guard must not write deployment state."
+
+output="$(run_publish "$repository" assert-rollback-image IMAGE_TAG="$code_sha" \
+    MOCK_IMAGE_PRESENT=true MOCK_PARAMETER_VALUE="not-a-sha" 2>&1)" &&
+    fail "A malformed last known good SHA must fail closed."
+assert_contains "$output" "not a full lowercase Git SHA" "The guard must reject a malformed SHA."
+
+# --- migration-guard: Flyway configuration bypasses are blocked --------------
+flyway_blocked() {
+    local description="$1"
+    local variant_sha="$2"
+    local expected_reason="$3"
+    local blocked_output
+    local blocked_calls
+
+    blocked_output="$(run_publish "$repository" migration-guard IMAGE_TAG="$variant_sha" \
+        MOCK_PARAMETER_VALUE="$base_sha" 2>&1)" &&
+        fail "$description must block automatic deployment."
+    assert_contains "$blocked_output" "$expected_reason" "$description must report its reason."
+    blocked_calls="$(cat "$work_directory/calls.log")"
+    assert_contains "$blocked_calls" "--name $PENDING_PARAMETER --value $variant_sha" \
+        "$description must record the pending migration image."
+    assert_absent "$blocked_calls" "--name $DESIRED_PARAMETER" \
+        "$description must never update the desired image SHA."
+}
+
+flyway_disabled_sha="$(commit_variant "$repository" "$base_sha" "$FLYWAY_PROPERTIES_PATH" \
+    "${BASE_PROPERTIES/spring.flyway.enabled=true/spring.flyway.enabled=false}" "disable flyway")"
+flyway_blocked "Disabling Flyway" "$flyway_disabled_sha" "spring.flyway.enabled=true is no longer declared"
+
+flyway_moved_sha="$(commit_variant "$repository" "$base_sha" "$FLYWAY_PROPERTIES_PATH" \
+    "${BASE_PROPERTIES/classpath:db\/migration/classpath:db\/elsewhere}" "repoint flyway locations")"
+flyway_blocked "Repointing Flyway locations" "$flyway_moved_sha" \
+    "spring.flyway.locations=classpath:db/migration is no longer declared"
+
+flyway_profile_sha="$(commit_variant "$repository" "$base_sha" \
+    "apps/api/src/main/resources/application-demo.properties" \
+    "spring.flyway.baseline-on-migrate=true"$'\n' "override flyway in a profile")"
+flyway_blocked "A profile level Flyway override" "$flyway_profile_sha" \
+    "Flyway is configured outside"
+
+flyway_dependency_sha="$(commit_variant "$repository" "$base_sha" "$FLYWAY_BUILD_FILE" \
+    "${BASE_GRADLE//flyway-core:11.7.2/flyway-core:11.8.0}" "bump flyway dependency")"
+flyway_blocked "A Flyway dependency change" "$flyway_dependency_sha" \
+    "Flyway configuration or dependency changed"
+
+# --- migration-guard: unrelated changes must not be false positives ----------
+unrelated_property_sha="$(commit_variant "$repository" "$base_sha" "$FLYWAY_PROPERTIES_PATH" \
+    "${BASE_PROPERTIES}server.port=8080"$'\n' "unrelated property")"
+output="$(run_publish "$repository" migration-guard IMAGE_TAG="$unrelated_property_sha" \
+    MOCK_PARAMETER_VALUE="$base_sha" 2>&1)" ||
+    fail "An unrelated property change must not block the release."
+assert_contains "$output" "No Flyway migration, configuration, or dependency change" \
+    "An unrelated property change must report a clean comparison."
+
+unrelated_dependency_sha="$(commit_variant "$repository" "$base_sha" "$FLYWAY_BUILD_FILE" \
+    "${BASE_GRADLE/spring-boot-starter-web/spring-boot-starter-webflux}" "unrelated dependency")"
+output="$(run_publish "$repository" migration-guard IMAGE_TAG="$unrelated_dependency_sha" \
+    MOCK_PARAMETER_VALUE="$base_sha" 2>&1)" ||
+    fail "An unrelated dependency change must not block the release."
+calls="$(cat "$work_directory/calls.log")"
+assert_absent "$calls" "put-parameter" "A clean guard must not write deployment state."
+
+git -C "$repository" checkout -f --quiet --detach "$code_sha"
 
 # --- input validation -------------------------------------------------------
 for invalid_tag in "latest" "799FDDBFA5ED7F663182347F6291163FC4F57983" "799fddbf"; do

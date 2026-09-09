@@ -2,11 +2,11 @@
 
 <!-- markdownlint-disable MD013 MD060 -->
 
-This root module defines the Tokyo network foundation, Phase 3A Demo runtime, Phase 3B Scheduler/cost/failure guardrails, the Phase 4A deployment foundation, the Phase 4C origin/API distribution, the Phase 5A Store/Admin static hosting, the Phase 5E GitHub frontend deployment identity, and the proposed Phase 5F-1 GitHub backend image publication identity. Phases 1, 3A/3B, 4A, 4C-2A/2B/3, 5A, and 5E are applied; their latest approved convergence checks reported `No changes`. Phase 5B uploaded both frontend artifacts, and Phase 5C added both deployed frontend origins to the runtime CORS allowlist without rebuilding the API image. All four schedules exist, the SNS subscription is confirmed, the Scheduler failure alarm is `OK`, alarm-to-SNS delivery is verified, and the tax-inclusive monthly Budget limit is `30.30 USD`.
+This root module defines the Tokyo network foundation, Phase 3A Demo runtime, Phase 3B Scheduler/cost/failure guardrails, the Phase 4A deployment foundation, the Phase 4C origin/API distribution, the Phase 5A Store/Admin static hosting, the Phase 5E GitHub frontend deployment identity, the Phase 5F-1 GitHub backend image publication identity, and the Phase 5F-2a runtime state and release guards. Phases 1, 3A/3B, 4A, 4C-2A/2B/3, 5A, 5E, 5F-1, and 5F-2a are applied; their latest approved convergence checks reported `No changes`. Phase 5B uploaded both frontend artifacts, and Phase 5C added both deployed frontend origins to the runtime CORS allowlist without rebuilding the API image. All four schedules exist, the SNS subscription is confirmed, the Scheduler failure alarm is `OK`, alarm-to-SNS delivery is verified, and the tax-inclusive monthly Budget limit is `30.30 USD`.
 
 The Scheduler stop path was verified on 2026-09-01: EC2 was `stopped` after its 17:00 JST invocation and RDS was `stopped` after 17:10. The start path was verified on 2026-09-02: RDS was `available` after 09:50 and EC2 was `running` after 10:00.
 
-Current approved project status: Phase 4C-2A and 4C-2B are `APPLIED / CONVERGED`; Phase 4C-3 is `COMPLETE`; Phase 5A is `APPLIED / CONVERGED`; and the Phase 5B/5C deployment and runtime verification passed. The origin `A` record points to the existing EC2 EIP and has no `AAAA` record. The Let's Encrypt certificate and Nginx HTTPS origin are verified: missing/invalid `X-Origin-Verify` returns `403`, and the valid token returns `200 / UP`; the renewal timer is enabled and active. Phase 5E is `APPLIED / CONVERGED`: its GitHub OIDC provider, exact-subject frontend deploy role, and inline policy were applied as `3 added / 0 changed / 0 destroyed`, the convergence plan reported `No changes`, and every previously applied resource showed zero delta. The `demo-frontend` GitHub Environment exists with its deployment branch policy limited to `main` and its four non-secret variables configured. The `deploy-frontends` CI job completed its first automated deployment of the reviewed `main` commit, and both frontends were verified through CloudFront. Phase 5F-1 adds code for a separate backend image publication identity and CI job; neither its Terraform resources nor the `demo-backend` GitHub Environment is applied, and CI has published no API image yet.
+Current approved project status: Phase 4C-2A and 4C-2B are `APPLIED / CONVERGED`; Phase 4C-3 is `COMPLETE`; Phase 5A is `APPLIED / CONVERGED`; and the Phase 5B/5C deployment and runtime verification passed. The origin `A` record points to the existing EC2 EIP and has no `AAAA` record. The Let's Encrypt certificate and Nginx HTTPS origin are verified: missing/invalid `X-Origin-Verify` returns `403`, and the valid token returns `200 / UP`; the renewal timer is enabled and active. Phase 5E is `APPLIED / CONVERGED`: its GitHub OIDC provider, exact-subject frontend deploy role, and inline policy were applied as `3 added / 0 changed / 0 destroyed`, the convergence plan reported `No changes`, and every previously applied resource showed zero delta. The `demo-frontend` GitHub Environment exists with its deployment branch policy limited to `main` and its four non-secret variables configured. The `deploy-frontends` CI job completed its first automated deployment of the reviewed `main` commit, and both frontends were verified through CloudFront. Phase 5F-1 is `APPLIED / CONVERGED`: its role, inline policy, and three deployment-state parameters were applied, the convergence plan reported `No changes`, and the `demo-backend` GitHub Environment is configured for `main` only. Its first automated run published an immutable API image, passed the Flyway gate, and recorded the desired image SHA without touching EC2. Phase 5F-2a is `APPLIED / CONVERGED`: its five runtime state parameters and the raised ECR retention were applied as `6 added / 0 changed / 1 destroyed`, and the convergence plan reported `No changes`. All five parameters read back as `String` with values matching the measured Demo runtime, the tagged retention is `30`, and both the last known good and desired API images are still present in ECR.
 
 Architecture sources:
 
@@ -114,7 +114,7 @@ Sources: [Terraform ephemeral variables](https://developer.hashicorp.com/terrafo
 
 The private `ec-portfolio-demo-api` repository uses immutable tags, AES256 encryption, basic scan-on-push, and `force_delete = false`. Deployment must select an immutable full Git SHA tag and record the resolved digest; it must never depend on `latest`. Enhanced Inspector scanning, cross-Region replication, signing, and deploy automation are outside this phase.
 
-The lifecycle policy retains the ten newest tagged images for rollback and only the newest untagged image. Image expiration is asynchronous and count-based: it limits repository growth but does not guarantee a byte-size ceiling. The existing cost model reserves 1 GB, or `$0.10/month` before tax, for ECR. At the stress assumptions, each additional GB is approximately `$0.10 × ¥165/USD × 1.10 = ¥18.15` invoice-equivalent. Same-Region transfer from ECR to EC2 is currently `$0.00/GB`; storage beyond 1 GB consumes the existing variable contingency and must be reviewed before it threatens the ¥5,000 hard ceiling. Free Tier and credits are not assumed.
+The lifecycle policy retains the thirty newest tagged images for rollback and only the newest untagged image. Phase 5F-2a raised that count from ten because the Demo host is stopped outside a weekday window: a long stop plus frequent publications could otherwise expire the last known good image before it is ever deployed. The provider treats a lifecycle policy change as a replacement, so applying it destroyed and recreated `aws_ecr_lifecycle_policy.demo_api`. That replaces only the policy document: `aws_ecr_repository.demo_api` was untouched and no image was deleted, which the post-apply inventory confirmed. Raising the count also only narrows the expiry set, so it can never widen deletion. Image expiration is asynchronous and count-based: it limits repository growth but does not guarantee a byte-size ceiling. The existing cost model reserves 1 GB, or `$0.10/month` before tax, for ECR. At the stress assumptions, each additional GB is approximately `$0.10 × ¥165/USD × 1.10 = ¥18.15` invoice-equivalent. Same-Region transfer from ECR to EC2 is currently `$0.00/GB`; storage beyond 1 GB consumes the existing variable contingency and must be reviewed before it threatens the ¥5,000 hard ceiling. Free Tier and credits are not assumed.
 
 The Standard SecureString `/ec-portfolio/demo/app/auth-jwt-secret` follows the DB secret's write-only pattern: `auth_jwt_secret` is sensitive and ephemeral, `value_wo` prevents plaintext state storage, and `auth_jwt_secret_version` is the only persisted rotation input. A supplied secret must be at least 32 high-entropy characters. No secret value is committed, tagged, logged, or output; only the parameter name and ARN are non-secret outputs.
 
@@ -425,6 +425,57 @@ Before the deploy job can run, the `demo-backend` GitHub Environment must exist 
 Terraform apply, GitHub Environment creation, the first API image publication, and commit/push each remain a separate explicit approval. As of this document, none of them has been performed.
 
 Sources: [GitHub OIDC for AWS](https://docs.github.com/en/actions/how-tos/secure-your-work/security-harden-deployments/oidc-in-aws), [ECR image tag mutability](https://docs.aws.amazon.com/AmazonECR/latest/userguide/image-tag-mutability.html), [ECR IAM action reference](https://docs.aws.amazon.com/service-authorization/latest/reference/list_amazonelasticcontainerregistry.html), [Parameter Store parameter types](https://docs.aws.amazon.com/systems-manager/latest/userguide/parameter-store-about-examples.html)
+
+## Phase 5F-2a runtime state and release guards
+
+Phase 5F-2 is split so that everything independent of the Demo host lands first. **Phase 5F-2a publishes no deployment and touches no EC2 resource.** It records the non-secret runtime configuration the host will need, raises the rollback retention window, and closes two ways a release could reach the database or lose its rollback path. Systems Manager Run Command, the EC2 instance role change it requires, the deployment wrapper, and the deploy job are all Phase 5F-2b.
+
+### Runtime parameters
+
+Five non-secret `String` parameters carry the runtime configuration that `deploy-api.sh` currently receives from an operator's shell. Terraform owns the values, so they cannot drift from the infrastructure that produces them.
+
+| Parameter | Value source | `allowed_pattern` |
+|---|---|---|
+| `/ec-portfolio/demo/runtime/db-host` | `aws_db_instance.demo.address` | `^[A-Za-z0-9.-]{1,255}$` |
+| `/ec-portfolio/demo/runtime/db-port` | `aws_db_instance.demo.port` | `^[0-9]{1,5}$` |
+| `/ec-portfolio/demo/runtime/db-name` | `aws_db_instance.demo.db_name` | `^[A-Za-z0-9_]{1,64}$` |
+| `/ec-portfolio/demo/runtime/db-username` | `aws_db_instance.demo.username` | `^[A-Za-z0-9_]{1,64}$` |
+| `/ec-portfolio/demo/runtime/cors-allowed-origins` | Phase 5C contract, below | `^https?://[A-Za-z0-9.:-]+(,https?://[A-Za-z0-9.:-]+)*$` |
+
+The CORS allowlist is the Phase 5C contract and has four entries: the Store and Admin Vite dev servers on `http://127.0.0.1:5174` and `http://127.0.0.1:5173`, plus the two deployed frontend origins, which are interpolated from the applied Phase 5A distributions rather than hardcoded. **Reducing this list to the two CloudFront origins would silently break the Phase 5C contract**, so the loopback entries are written out explicitly and the parameter pattern rejects a malformed list.
+
+No new secret is introduced. The database password and the JWT signing secret stay in their existing SecureStrings, and only the EC2 instance role decrypts them.
+
+### Release guards
+
+`publish-api-image.sh migration-guard` previously compared only `apps/api/src/main/resources/db/migration`. A release could therefore reach the database by repointing Flyway rather than by adding a migration file. The guard now blocks, through the same fail-closed path, when any of the following is true between the last known good image and the release commit:
+
+1. Files under the migration directory changed.
+2. A line matching `spring.flyway.`, `org.flywaydb`, `flyway-core`, or `flyway-mysql` changed anywhere under `apps/api/src/main/resources` or in `apps/api/build.gradle.kts`.
+3. The release commit no longer declares `spring.flyway.enabled=true` or `spring.flyway.locations=classpath:db/migration`.
+4. Flyway is configured in any file other than `apps/api/src/main/resources/application.properties`.
+
+Because the guard matches Flyway lines rather than whole files, unrelated property or dependency edits do not block a release. A Flyway version bump does block one, which is intentional: it can change migration behaviour.
+
+`publish-api-image.sh assert-rollback-image` runs between the migration gate and `record-desired`. It reads `last-known-good-image-sha` and confirms with `ecr:DescribeImages` that the image is still published. If the lifecycle policy has expired it, the run fails **before** the desired image SHA advances, so the workflow never leaves the deployment state pointing at a release whose rollback target no longer exists. Placing the check here also blocks the Phase 5F-3 boot-time convergence path, exactly as the migration gate does. The guard needs no new permission: `ecr:DescribeImages` is already in the Phase 5F-1 role.
+
+### Applied resources and gates
+
+The approved plan was expected to be `5 add / 1 change / 0 destroy`. The provider treats the `policy` argument of `aws_ecr_lifecycle_policy` as forcing a new resource, so the applied result was **6 add / 0 change / 1 destroy**:
+
+| Resource address | Action |
+|---|---|
+| `aws_ssm_parameter.runtime_db_host` / `runtime_db_port` / `runtime_db_name` / `runtime_db_username` / `runtime_cors_allowed_origins` | create |
+| `aws_ecr_lifecycle_policy.demo_api` | replacement (destroy + create), retention `10` to `30` |
+
+```text
+Apply complete! Resources: 6 added, 0 changed, 1 destroyed.
+No changes. Your infrastructure matches the configuration.
+```
+
+The single destroy was the lifecycle policy resource itself. `aws_ecr_repository.demo_api` was not changed and keeps `IMMUTABLE` tags, Git SHA tagging, and the ban on `latest`; no container image was deleted, and both the last known good and desired API images remain in the repository. Every other applied resource, including the EC2 instance role, stayed `no-op`; an EC2 role change belongs to Phase 5F-2b and would be a blocker here. Phase 5F-2b work remains a separate explicit approval.
+
+Sources: [ECR lifecycle policy properties](https://docs.aws.amazon.com/AmazonECR/latest/userguide/lifecycle_policy_parameters.html), [Parameter Store parameter types](https://docs.aws.amazon.com/systems-manager/latest/userguide/parameter-store-about-examples.html), [Flyway Spring Boot configuration](https://docs.spring.io/spring-boot/reference/how-to/data-initialization.html)
 
 ## Local validation
 

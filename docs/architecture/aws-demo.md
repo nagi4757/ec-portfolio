@@ -26,7 +26,7 @@
 | Cache | Redis protocol 사용, production profile에서 TLS와 username/password 강제 | EC2 local Valkey에 TLS/ACL을 구성하거나 TLS sidecar를 검증해야 함 |
 | Configuration | runtime 환경변수 기반이며 image layer에 DB/Redis/JWT secret을 넣지 않는 CI 검증 존재 | SSM Parameter Store 조회와 least-privilege instance role |
 | Frontend | Store/Admin private S3/OAC/CloudFront와 production artifact 배포 완료; SPA direct route와 CORS 검증 완료; Phase 5E 자동 배포 첫 실행 검증 완료 | 없음 |
-| CI/CD | Backend, Frontend, production Docker image CI 존재; Phase 5E frontend 자동 배포 apply·converge·첫 실행 완료; Phase 5F-1 backend image publication 코드 제안 | Phase 5F-1 apply와 `demo-backend` Environment 구성, 이후 Phase 5F-2 EC2 배포 |
+| CI/CD | Backend, Frontend, production Docker image CI 존재; Phase 5E frontend 자동 배포와 Phase 5F-1 backend image publication 모두 apply·converge·첫 실행 완료; Phase 5F-2a runtime state parameter와 release guard도 apply·converge 완료 | Phase 5F-2b EC2 배포 |
 | Messaging/email | 애플리케이션 연동 없음 | SQS/SES는 향후 비동기 알림 use case가 생길 때만 연결 |
 
 현재 repository는 배포 가능한 구성 요소를 갖췄지만, 이 문서만으로 AWS 배포가 완료되는 것은 아니다. 특히 local Valkey의 production TLS/RBAC 계약은 배포 전에 검증해야 하는 명시적 gate다.
@@ -293,7 +293,26 @@ Flyway는 application 기동 시 migration을 적용하므로 image rollback이 
 
 Deployment state는 비밀이 아닌 `String` parameter 세 개로 관리한다. Terraform이 생성·seed하고 이후 값은 무시하며, 런타임 소유자는 GitHub Actions다. `desired-image-sha` 와 `last-known-good-image-sha` 는 현재 host가 실행 중임이 확인된 `799fddbfa5ed7f663182347f6291163fc4f57983` 로 seed하고, `pending-migration-image-sha` 는 `none` 으로 시작한다. Gate 통과 시에만 `desired-image-sha` 를 갱신하고 pending marker를 `none` 으로 되돌린다.
 
-Terraform 예상 계약은 **5 add / 0 change / 0 destroy** 이며 기존 resource delta는 0이어야 한다. EC2 instance role의 `change` 는 5F-2에 속하므로 이 단계에서 나타나면 blocker다. 현재 Terraform apply, `demo-backend` Environment 생성, 첫 image publish는 **모두 미실행 상태**이며 각각 별도 승인 대상이다.
+Terraform 계약은 **5 add / 0 change / 0 destroy** 였고 기존 resource delta는 0이었다. Terraform apply, `demo-backend` Environment 구성, 첫 image publish는 모두 완료되었으며 EC2 배포·SendCommand·EC2 start는 수행하지 않았다.
+
+### Phase 5F-2a runtime state와 release guard
+
+Phase 5F-2는 host 의존 여부로 나눈다. **5F-2a는 배포를 수행하지 않고 EC2 resource를 건드리지 않는다.** SSM Run Command, 그것이 요구하는 EC2 instance role 변경, deploy wrapper, deploy job은 모두 5F-2b 범위다.
+
+5F-2a는 세 가지를 한다. 첫째, `deploy-api.sh` 가 지금은 운영자 shell에서 받는 non-secret runtime 값을 `/ec-portfolio/demo/runtime/` 아래 String parameter 다섯 개로 옮긴다. DB 네 개는 `aws_db_instance.demo` 에서 파생되고, CORS는 Phase 5C 계약인 네 origin이다. Store/Admin Vite dev server(`http://127.0.0.1:5174`, `http://127.0.0.1:5173`)와 배포된 frontend origin 두 개로 구성되며, **CloudFront 두 origin만으로 축소하면 Phase 5C 계약이 깨진다.** CloudFront 도메인은 hardcode하지 않고 적용된 Phase 5A distribution에서 보간한다. 새 secret은 만들지 않고 DB password/JWT secret은 기존 SecureString에 그대로 둔다.
+
+둘째, Flyway gate를 우회 경로까지 확장한다. 기존 `db/migration/` 감시에 더해 ① `apps/api/src/main/resources` 와 `apps/api/build.gradle.kts` 에서 `spring.flyway.`·`org.flywaydb`·`flyway-core`·`flyway-mysql` 라인 변경 ② release commit의 `spring.flyway.enabled=true` / `spring.flyway.locations=classpath:db/migration` 불변식 ③ Flyway 설정이 `application.properties` 한 파일에만 존재하는지를 확인하고, 하나라도 어긋나면 기존 fail-closed 경로를 그대로 재사용한다. 파일 전체가 아니라 Flyway 관련 라인만 보므로 무관한 변경은 배포를 막지 않는다.
+
+셋째, rollback 대상 image가 lifecycle로 만료되어 rollback이 불가능해지는 상황을 막는다. ECR lifecycle에는 특정 tag를 보호하는 action이 없으므로 tagged image 보존을 10에서 30으로 올리고, `record-desired` **직전**에 `ecr:DescribeImages` 로 `last-known-good-image-sha` 가 아직 존재하는지 확인한다. 없으면 desired를 갱신하지 않고 실패하므로, 5F-3 부팅 수렴 경로까지 함께 막힌다. 추가 IAM 권한은 필요 없다.
+
+Terraform 예상 계약은 `5 add / 1 change / 0 destroy` 였으나, provider가 `aws_ecr_lifecycle_policy` 의 `policy` 인자를 ForceNew로 처리하므로 실제 적용 결과는 **6 add / 0 change / 1 destroy** 였다.
+
+```text
+Apply complete! Resources: 6 added, 0 changed, 1 destroyed.
+No changes. Your infrastructure matches the configuration.
+```
+
+**교체된 것은 lifecycle policy 리소스 자체뿐이다.** `aws_ecr_repository.demo_api` 는 변경되지 않았고 container image는 하나도 삭제되지 않았다. IMMUTABLE tag·Git SHA·`latest` 금지 원칙도 그대로다. 사후 검증에서 runtime SSM parameter 다섯 개가 모두 생성되어 `String` 타입으로 조회되고 값이 실측 runtime 값과 일치함을, tagged retention이 `30` 임을, last known good image `799fddbf…` 와 desired image `5482d650…` 가 모두 ECR에 존재함을 확인했다. EC2 instance role을 포함한 기존 resource는 전부 `no-op` 이었고, EC2 role의 `change` 는 5F-2b에 속하므로 이 단계에서 나타나면 blocker다. Phase 5F-2a는 **apply·converge 완료** 상태다.
 
 Sources: [GitHub OIDC for AWS](https://docs.github.com/en/actions/how-tos/secure-your-work/security-harden-deployments/oidc-in-aws), [IAM OIDC identity providers](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_providers_create_oidc.html), [CloudFront versioned files](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/Invalidation.html)
 

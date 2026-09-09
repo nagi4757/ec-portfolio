@@ -281,5 +281,8 @@ jobs:
       - name: Block an automatic release that changes Flyway migrations
         run: infra/runtime/demo/publish-api-image.sh migration-guard
 
+      - name: Require a recoverable rollback image
+        run: infra/runtime/demo/publish-api-image.sh assert-rollback-image
+
       - name: Record the desired API image
         run: infra/runtime/demo/publish-api-image.sh record-desired

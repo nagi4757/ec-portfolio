@@ -35,12 +35,12 @@ resource "aws_ecr_lifecycle_policy" "demo_api" {
       },
       {
         rulePriority = 2
-        description  = "Keep the ten newest immutable tagged images for rollback"
+        description  = "Keep the thirty newest immutable tagged images for rollback"
         selection = {
           tagStatus      = "tagged"
           tagPatternList = ["*"]
           countType      = "imageCountMoreThan"
-          countNumber    = 10
+          countNumber    = 30
         }
         action = {
           type = "expire"
