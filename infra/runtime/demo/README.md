@@ -25,6 +25,8 @@ CloudFrontからEC2 originへの通信はHTTPS `443`だけを使用します。N
 | --- | --- |
 | `bootstrap-host.sh` | Dockerのinstall/startと専用network作成 |
 | `deploy-api.sh` | ECR pull、SSM secret取得、Valkey/APIの安全な起動・交換 |
+| `deploy-api-from-ssm.sh` | SSM Parameter Storeからdeployment contractを解決し`deploy-api.sh`へ引き渡すhost-side wrapper（Phase 5F-2a） |
+| `deploy-runtime.sh` | GitHub ActionsからSSM Run Commandで上記2つをhostへinstall・実行するCI側orchestrator（Phase 5F-2b） |
 | `smoke-check.sh` | secret不要のcontainer、port、readiness検証 |
 | `configure-origin.sh` | Nginx install、TLS origin設定、SSM origin verification設定 |
 | `origin-smoke-check.sh` | HTTPS、証明書、origin verification、非公開portの検証 |

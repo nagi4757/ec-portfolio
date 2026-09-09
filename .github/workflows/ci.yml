@@ -286,3 +286,60 @@ jobs:
 
       - name: Record the desired API image
         run: infra/runtime/demo/publish-api-image.sh record-desired
+
+  deploy-api:
+    name: Deploy Demo API
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs:
+      - build-and-push-api
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: demo-backend
+    concurrency:
+      group: demo-backend-deploy
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AWS_REGION: ap-northeast-1
+      AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+      AWS_BACKEND_DEPLOY_ROLE_ARN: ${{ vars.AWS_BACKEND_DEPLOY_ROLE_ARN }}
+      EC2_INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID }}
+    steps:
+      - name: Checkout reviewed main commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Reject a stale queued deployment
+        run: |
+          set -euo pipefail
+          remote_main_sha="$(git ls-remote origin refs/heads/main | awk '{print $1}')"
+          test -n "$remote_main_sha"
+          test "$GITHUB_SHA" = "$remote_main_sha"
+          test "$GITHUB_SHA" = "$(git rev-parse HEAD)"
+
+      - name: Test runtime deployment contract
+        run: infra/runtime/demo/deploy-runtime.test.sh
+
+      - name: Validate deployment environment
+        run: |
+          set -euo pipefail
+          [[ "$AWS_ACCOUNT_ID" =~ ^[0-9]{12}$ ]]
+          test "$AWS_BACKEND_DEPLOY_ROLE_ARN" = \
+            "arn:aws:iam::$AWS_ACCOUNT_ID:role/ec-portfolio-demo-github-backend-deploy"
+          [[ "$EC2_INSTANCE_ID" =~ ^i-[0-9a-f]{8,17}$ ]]
+
+      - name: Configure short-lived AWS credentials
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: ${{ env.AWS_BACKEND_DEPLOY_ROLE_ARN }}
+          role-session-name: gha-deploy-${{ github.run_id }}
+          role-duration-seconds: 900
+          aws-region: ${{ env.AWS_REGION }}
+          allowed-account-ids: ${{ env.AWS_ACCOUNT_ID }}
+          mask-aws-account-id: true
+
+      - name: Deploy to the EC2 host when online
+        run: infra/runtime/demo/deploy-runtime.sh deploy
