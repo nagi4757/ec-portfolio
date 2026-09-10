@@ -13,8 +13,24 @@ readonly EXPECTED_REGION="ap-northeast-1"
 readonly ECR_REPOSITORY_NAME="ec-portfolio-demo-api"
 readonly API_CONTAINER="ec-portfolio-demo-api"
 readonly READINESS_URL="http://127.0.0.1:8080/actuator/health/readiness"
-readonly READINESS_ATTEMPTS=3
-readonly READINESS_INTERVAL_SECONDS=2
+
+# Readiness budget for the already converged path only: the host already runs
+# the desired image and we are deciding whether it is healthy. The default is
+# deliberately short because the caller that has always used it, the CI deploy,
+# is looking at a container that has been serving for a while, so a slow answer
+# there means something is wrong and failing fast is the point.
+#
+# A caller that knows better may raise the budget. The boot convergence path
+# added in Phase 5F-3b looks at a container Docker has just restarted, where a
+# few seconds of Spring Boot start-up is expected rather than suspicious, and
+# will pass a longer budget. The budget belongs to the caller, not to this
+# script, so the default stays exactly as the CI path has it today.
+readonly DEFAULT_CONVERGED_READINESS_ATTEMPTS=3
+readonly DEFAULT_CONVERGED_READINESS_INTERVAL_SECONDS=2
+
+# Rejects 0, negatives, decimals, blanks and leading zeros. Leading zeros are
+# refused rather than normalised so a value can never be read as octal later.
+readonly POSITIVE_INTEGER_PATTERN='^[1-9][0-9]*$'
 
 # SSM Run Command can deliver a second invocation while the first is still
 # swapping containers, and two concurrent deploy-api.sh runs would race on the
@@ -39,6 +55,8 @@ readonly DB_PORT_PATTERN='^[0-9]{1,5}$'
 readonly DB_IDENTIFIER_PATTERN='^[A-Za-z0-9_]{1,64}$'
 readonly CORS_PATTERN='^https?://[A-Za-z0-9.:-]+(,https?://[A-Za-z0-9.:-]+)*$'
 
+converged_readiness_attempts=""
+converged_readiness_interval_seconds=""
 desired_image_sha=""
 image_reference=""
 account_id=""
@@ -107,6 +125,22 @@ validate_value() {
         fail "$description does not match the expected format."
 }
 
+# Resolved before the lock is taken and before any AWS call, so a misconfigured
+# caller fails immediately instead of holding the deployment lock while it works
+# that out. An explicitly empty value is rejected rather than silently falling
+# back: a unit file that meant to widen the budget and set it to nothing would
+# otherwise get the short default back and reintroduce the very failure the
+# override exists to prevent.
+resolve_readiness_budget() {
+    converged_readiness_attempts="${CONVERGED_READINESS_ATTEMPTS-$DEFAULT_CONVERGED_READINESS_ATTEMPTS}"
+    converged_readiness_interval_seconds="${CONVERGED_READINESS_INTERVAL_SECONDS-$DEFAULT_CONVERGED_READINESS_INTERVAL_SECONDS}"
+
+    [[ "$converged_readiness_attempts" =~ $POSITIVE_INTEGER_PATTERN ]] ||
+        fail "CONVERGED_READINESS_ATTEMPTS must be a positive integer."
+    [[ "$converged_readiness_interval_seconds" =~ $POSITIVE_INTEGER_PATTERN ]] ||
+        fail "CONVERGED_READINESS_INTERVAL_SECONDS must be a positive integer."
+}
+
 resolve_desired_image() {
     desired_image_sha="$(read_required_parameter "$DESIRED_IMAGE_SHA_PARAMETER")"
     validate_value "The desired image SHA" "$SHA_PATTERN" "$desired_image_sha"
@@ -144,12 +178,12 @@ readiness_is_up() {
     local attempt
     local response
 
-    for ((attempt = 1; attempt <= READINESS_ATTEMPTS; attempt++)); do
+    for ((attempt = 1; attempt <= converged_readiness_attempts; attempt++)); do
         if response="$(curl --fail --silent --show-error --max-time 3 "$READINESS_URL" 2>/dev/null)" &&
             printf '%s' "$response" | grep -Eq '"status"[[:space:]]*:[[:space:]]*"UP"'; then
             return 0
         fi
-        sleep "$READINESS_INTERVAL_SECONDS"
+        sleep "$converged_readiness_interval_seconds"
     done
 
     return 1
@@ -260,6 +294,8 @@ main() {
     for command_name in aws curl docker flock grep; do
         require_command "$command_name"
     done
+
+    resolve_readiness_budget
 
     acquire_deployment_lock
 

@@ -145,6 +145,14 @@ printf '%s\n' "flock $*" >>"$MOCK_CALL_LOG"
 exit "${MOCK_FLOCK_STATUS:-0}"
 MOCK
 
+    # Records the requested interval instead of waiting, so the readiness budget
+    # is asserted on real behaviour without the test having to sleep for it.
+    cat >"$mock_directory/sleep" <<'MOCK'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "sleep $*" >>"$MOCK_CALL_LOG"
+MOCK
+
     cat >"$mock_directory/deploy-api-stub.sh" <<'MOCK'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -163,7 +171,7 @@ exit "${MOCK_DEPLOY_STATUS:-0}"
 MOCK
 
     chmod 755 "$mock_directory"/aws "$mock_directory"/docker "$mock_directory"/curl \
-        "$mock_directory"/flock "$mock_directory"/deploy-api-stub.sh
+        "$mock_directory"/flock "$mock_directory"/sleep "$mock_directory"/deploy-api-stub.sh
     PATH="$mock_directory:$PATH"
     export PATH
 }
@@ -330,6 +338,113 @@ runtime_rejects "A CORS entry without a scheme" "CORS allowlist" \
     MOCK_CORS="http://127.0.0.1:5174,d39sletn97e89c.cloudfront.net"
 runtime_rejects "A missing runtime parameter" "Unable to read" \
     MOCK_MISSING_PARAMETER="/ec-portfolio/demo/runtime/db-name"
+
+# --- the converged readiness budget ------------------------------------------
+# The budget is observed through the number of readiness probes actually made
+# and the interval actually requested, not by reading the constants back.
+readiness_probe_count() {
+    printf '%s\n' "$1" | grep -Fc "curl " || true
+}
+
+readiness_sleep_count() {
+    printf '%s\n' "$1" | grep -Fc "sleep " || true
+}
+
+# A converged but unready host exhausts the whole budget before failing closed,
+# which makes the probe count the budget itself.
+run_unready_converged() {
+    run_wrapper MOCK_CONTAINER_IMAGE="$EXPECTED_REFERENCE" MOCK_READINESS=down "$@"
+}
+
+# --- default contract is unchanged: 3 attempts, 2 second interval ------------
+output="$(run_unready_converged 2>&1)" &&
+    fail "An unready converged host must still fail closed by default."
+calls="$(cat "$work_directory/calls.log")"
+[[ "$(readiness_probe_count "$calls")" -eq 3 ]] ||
+    fail "The default budget must probe exactly 3 times (got $(readiness_probe_count "$calls"))."
+[[ "$(readiness_sleep_count "$calls")" -eq 3 ]] ||
+    fail "The default budget must sleep exactly 3 times (got $(readiness_sleep_count "$calls"))."
+assert_count "$calls" "sleep 2" 3 "The default interval must remain 2 seconds."
+assert_absent "$calls" "deploy-api" "A readiness failure must not redeploy."
+assert_absent "$calls" "put-parameter" "A readiness failure must not advance the last known good image."
+
+# --- attempts override changes the number of probes --------------------------
+output="$(run_unready_converged CONVERGED_READINESS_ATTEMPTS=7 2>&1)" &&
+    fail "An unready converged host must fail closed regardless of the budget."
+calls="$(cat "$work_directory/calls.log")"
+[[ "$(readiness_probe_count "$calls")" -eq 7 ]] ||
+    fail "An attempts override must probe exactly 7 times (got $(readiness_probe_count "$calls"))."
+assert_count "$calls" "sleep 2" 7 "An attempts override must keep the default interval."
+assert_contains "$output" "is not ready" "The readiness failure must still be reported."
+assert_absent "$calls" "deploy-api" "A larger budget must not turn a readiness failure into a redeploy."
+assert_absent "$calls" "put-parameter" "A larger budget must not advance the last known good image."
+
+# --- interval override changes the requested sleep ---------------------------
+output="$(run_unready_converged CONVERGED_READINESS_INTERVAL_SECONDS=5 2>&1)" &&
+    fail "An unready converged host must fail closed with an interval override."
+calls="$(cat "$work_directory/calls.log")"
+assert_count "$calls" "sleep 5" 3 "An interval override must be used for every wait."
+assert_absent "$calls" "sleep 2" "An interval override must replace the default interval."
+
+# --- the Phase 5F-3b boot budget is expressible ------------------------------
+output="$(run_unready_converged CONVERGED_READINESS_ATTEMPTS=36 \
+    CONVERGED_READINESS_INTERVAL_SECONDS=5 2>&1)" &&
+    fail "An unready converged host must fail closed with the boot budget."
+calls="$(cat "$work_directory/calls.log")"
+[[ "$(readiness_probe_count "$calls")" -eq 36 ]] ||
+    fail "The boot budget must probe exactly 36 times (got $(readiness_probe_count "$calls"))."
+assert_count "$calls" "sleep 5" 36 "The boot budget must wait 5 seconds between probes."
+
+# --- a widened budget still reconciles a healthy converged host --------------
+output="$(run_wrapper MOCK_CONTAINER_IMAGE="$EXPECTED_REFERENCE" MOCK_READINESS=up \
+    MOCK_LKG="$PREVIOUS_SHA" CONVERGED_READINESS_ATTEMPTS=36 \
+    CONVERGED_READINESS_INTERVAL_SECONDS=5 2>&1)" ||
+    fail "A healthy converged host must reconcile with a widened budget."
+assert_contains "$output" "reconciled to $DESIRED_SHA" "Reconciliation must still happen."
+calls="$(cat "$work_directory/calls.log")"
+[[ "$(readiness_probe_count "$calls")" -eq 1 ]] ||
+    fail "A healthy host must stop probing after the first success (got $(readiness_probe_count "$calls"))."
+assert_absent "$calls" "sleep " "A healthy host must not wait between probes."
+assert_count "$calls" "put-parameter" 1 "Reconciliation must record the rollback reference exactly once."
+assert_absent "$calls" "deploy-api" "Reconciliation must never redeploy."
+
+# --- a widened budget does not weaken the drift path -------------------------
+output="$(run_wrapper CONVERGED_READINESS_ATTEMPTS=36 \
+    CONVERGED_READINESS_INTERVAL_SECONDS=5 2>&1)" ||
+    fail "A drifted host must still deploy with a widened budget."
+assert_contains "$output" "Deploying $DESIRED_SHA" "The drift path must still deploy."
+calls="$(cat "$work_directory/calls.log")"
+assert_contains "$calls" "deploy-api" "The drift path must run the deployment script."
+
+# --- malformed budgets fail closed before anything else happens --------------
+# Validation runs before the lock and before the first AWS call, so a bad value
+# can never leave the deployment lock held while it is discovered.
+budget_rejects() {
+    local description="$1"
+    local expected="$2"
+    shift 2
+    local rejected_output
+
+    rejected_output="$(run_wrapper "$@" 2>&1)" && fail "$description must fail closed."
+    assert_contains "$rejected_output" "$expected" "$description must be reported."
+    calls="$(cat "$work_directory/calls.log")"
+    assert_absent "$calls" "curl " "$description must not probe readiness."
+    assert_absent "$calls" "flock" "$description must not take the deployment lock."
+    assert_absent "$calls" "aws " "$description must not reach AWS."
+    assert_absent "$calls" "deploy-api" "$description must not deploy."
+}
+
+for invalid_attempts in "0" "-1" "abc" "1.5" "" "03" "3 " " 3" "+3" "1e3"; do
+    budget_rejects "An invalid attempts value '$invalid_attempts'" \
+        "CONVERGED_READINESS_ATTEMPTS must be a positive integer" \
+        CONVERGED_READINESS_ATTEMPTS="$invalid_attempts"
+done
+
+for invalid_interval in "0" "-1" "abc" "1.5" "" "02" "+2"; do
+    budget_rejects "An invalid interval value '$invalid_interval'" \
+        "CONVERGED_READINESS_INTERVAL_SECONDS must be a positive integer" \
+        CONVERGED_READINESS_INTERVAL_SECONDS="$invalid_interval"
+done
 
 # --- the host deployment lock is taken before any state change ---------------
 output="$(run_wrapper 2>&1)" || fail "A deployment must succeed when the lock is free."
