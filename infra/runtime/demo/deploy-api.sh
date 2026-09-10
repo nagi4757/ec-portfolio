@@ -16,6 +16,17 @@ readonly READINESS_INTERVAL_SECONDS=5
 readonly VALKEY_HEALTH_ATTEMPTS=30
 readonly VALKEY_HEALTH_INTERVAL_SECONDS=2
 
+# Both readiness loops spend this per attempt on top of their interval, so it is
+# part of the configured wait budget rather than an implementation detail. It is
+# named here so deploy-runtime.test.sh can read one source of truth instead of
+# re-deriving the number from a literal buried in two curl invocations.
+readonly READINESS_CURL_MAX_TIME_SECONDS=3
+
+# SIGTERM grace given to the outgoing API container before SIGKILL. Every
+# deployment after the first passes through this wait, so it counts towards the
+# configured budget too.
+readonly API_STOP_GRACE_SECONDS=30
+
 runtime_directory=""
 runtime_environment_file=""
 db_password_value=""
@@ -301,7 +312,8 @@ wait_for_candidate_readiness() {
     for ((attempt = 1; attempt <= READINESS_ATTEMPTS; attempt++)); do
         if response="$(
             docker exec "$API_CANDIDATE_CONTAINER" \
-                curl --fail --silent --show-error --max-time 3 \
+                curl --fail --silent --show-error \
+                --max-time "$READINESS_CURL_MAX_TIME_SECONDS" \
                 http://127.0.0.1:8080/actuator/health/readiness 2>/dev/null
         )" && printf '%s' "$response" | readiness_response_is_up; then
             log "Candidate API readiness is UP."
@@ -318,7 +330,8 @@ wait_for_host_readiness() {
     local response
 
     for ((attempt = 1; attempt <= READINESS_ATTEMPTS; attempt++)); do
-        if response="$(curl --fail --silent --show-error --max-time 3 "$READINESS_URL" 2>/dev/null)" &&
+        if response="$(curl --fail --silent --show-error \
+            --max-time "$READINESS_CURL_MAX_TIME_SECONDS" "$READINESS_URL" 2>/dev/null)" &&
             printf '%s' "$response" | readiness_response_is_up; then
             log "Final API readiness is UP on 127.0.0.1:8080."
             return 0
@@ -355,7 +368,7 @@ run_api_candidate() {
 replace_api_container() {
     if container_exists "$API_CONTAINER"; then
         log "Stopping the current API container after candidate verification."
-        docker stop --time 30 "$API_CONTAINER" >/dev/null
+        docker stop --time "$API_STOP_GRACE_SECONDS" "$API_CONTAINER" >/dev/null
         docker rename "$API_CONTAINER" "$API_ROLLBACK_CONTAINER"
         rollback_pending="true"
     fi

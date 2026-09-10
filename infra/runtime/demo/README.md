@@ -137,20 +137,56 @@ hostでの同時deploymentは`flock`による非待機lock（`/var/lock/ec-portf
 
 CI側は`concurrency` groupでもjobの重複を抑止しますが、hostのlockはSSM Run Commandの再送や手動実行など、CI以外の経路も含めて保護します。
 
-### CI polling budget
+### CI polling budget と timeout 契約
 
-`deploy-runtime.sh`のpolling budgetは660秒（66回×10秒）です。根拠は次のとおりです。
+3 つの数字を区別してください。混同すると「900秒あれば必ず deployment が終わる」という誤った結論になります。
 
-| 項目 | budget |
-| --- | --- |
-| Valkey health（30回×2秒） | 60秒 |
-| candidate readiness（36回×5秒） | 180秒 |
-| host readiness（36回×5秒） | 180秒 |
-| `deploy-api.sh`の health-check 合計 | **420秒** |
-| docker pull 2件とSSM agentのpickup（見積り） | 約240秒 |
-| polling budget 合計 | **660秒** |
+#### 1. 明示的に configured された bounded waits: 666秒
 
-deploy job のOIDC credentialは900秒なので、240秒のsafety marginを残しています。polling budgetがhost側のbudgetより短いと、実際には成功したdeploymentをCIがtimeoutとして報告してしまうため、この関係は維持してください。`deploy-api.sh`のreadiness設定を変更する場合は、この値も合わせて見直す必要があります。
+`deploy-api.sh`がコード上で明示的に設定している待ち時間の合計です。readiness の 1 回あたりのコストは interval だけでなく probe の timeout も含みます。
+
+| 項目 | 計算 | budget |
+| --- | --- | --- |
+| Valkey health | `30回 × 2秒` | 60秒 |
+| candidate readiness | `36回 × (3秒 + 5秒)` | 288秒 |
+| API stop grace（`docker stop --time`） | | 30秒 |
+| final readiness | `36回 × (3秒 + 5秒)` | 288秒 |
+| **configured waits 合計** | | **666秒** |
+
+これは各 loop が同時に上限まで使い切った場合の保守的な合計であり、**成功した deployment の実測 wall-clock ではありません**。最初の deployment を除いて既存 container の停止待ちも必ず経路に入るため、stop grace も含めています。
+
+#### 2. CI polling observation budget: 900秒
+
+`deploy-runtime.sh`が SSM command の終了を観測し続ける時間です（`90回 × 10秒`）。
+
+#### 3. operational headroom: 約234秒
+
+`900 - 666 = 234秒`。これは **script-level の上限が存在しない** 次の作業のための運用上の余裕です。
+
+- API image の `docker pull`
+- Valkey image の `docker pull`
+- ECR login
+- SSM Parameter Store / STS / ECR の API 呼び出し
+- SSM Run Command の pickup
+- 一部の Docker daemon operation
+
+これらには timeout が設定されていないため、**「900秒以内に必ず deployment が完了する」とは言えません**。234秒は通常これらにかかる時間から見積もった余裕であって、保証ではありません。
+
+#### 契約の順序
+
+```
+configured waits 666秒 < CI polling 900秒 < OIDC credential 1200秒 < job timeout 1800秒
+```
+
+`deploy-runtime.test.sh`がこの順序と最低 180秒の headroom を検証します。値はすべて source of truth から読み取ります。
+
+- 各 budget は `deploy-api.sh` と `deploy-runtime.sh` の定数から
+- `role-duration-seconds` と `timeout-minutes` は `ci.yml` の `deploy-api` job から
+- 要求する credential duration が role の `max_session_duration` を超えていないかは `github_actions_backend_deploy.tf` から
+
+なお job timeout と credential duration は **clock の起点が異なります**。job timeout は job 開始時点から、credential duration は credential 発行時点から数えます。したがって `1800 > 1200` は運用上の余裕であって、credential が必ず先に失効することの証明ではありません。
+
+`deploy-api.sh`の readiness 設定や stop grace を変更する場合は、polling budget も合わせて見直してください。
 
 ## Smoke check
 

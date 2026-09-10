@@ -207,17 +207,28 @@ assert_contains "$script_contents" "checksum mismatch" \
     "The remote install must verify a checksum before use."
 
 # --- the deployment timeout contract -----------------------------------------
-# Three budgets have to stay ordered:
+# Four budgets have to stay ordered:
 #
-#   host deployment  <  CI poll budget  <  OIDC credential  <  job timeout
+#   configured waits  <  CI poll budget  <  OIDC credential  <  job timeout
 #
 # If the poll budget is too short, CI reports a timeout for a deployment that
-# then goes on to succeed. If the job timeout is not the largest, the job is cut
-# off before the credential expires and the deployment ends with no verdict at
-# all. The workflow values are read from ci.yml rather than duplicated here, so
-# editing the workflow alone cannot silently break the ordering.
+# then goes on to succeed, and the recorded state stops matching the host. If
+# the job timeout is not the largest, the job is cut off before the credential
+# expires and the deployment ends with no verdict at all.
+#
+# The first figure is the sum of the waits deploy-api.sh explicitly configures,
+# read from that script rather than restated here. It is not an upper bound on a
+# deployment: docker pull, the ECR login, the AWS API calls and the SSM agent
+# pickup have no script-level timeout. The gap between it and the poll budget is
+# operational headroom for that unbounded work, which is why the headroom is
+# asserted as a minimum rather than left to chance.
 readonly DEPLOY_API_SCRIPT_FILE="$SCRIPT_DIRECTORY/deploy-api.sh"
 readonly WORKFLOW_FILE="$SCRIPT_DIRECTORY/../../../.github/workflows/ci.yml"
+readonly BACKEND_ROLE_FILE="$SCRIPT_DIRECTORY/../../terraform/demo/github_actions_backend_deploy.tf"
+
+# Policy value owned by this test: how much room the unbounded work must have
+# above the configured waits, and the credential above the poll budget.
+readonly MIN_OPERATIONAL_HEADROOM_SECONDS=180
 
 read_constant() {
     local file="$1"
@@ -250,23 +261,78 @@ read_deploy_job_value() {
     printf '%s' "$value"
 }
 
+# Reads max_session_duration from the backend deploy role, so the credential the
+# workflow asks for cannot silently exceed what the role is allowed to issue.
+read_role_max_session_duration() {
+    local value
+
+    value="$(
+        awk '
+            /resource "aws_iam_role" "github_backend_deploy"/ { inside = 1 }
+            inside && /^[[:space:]]*max_session_duration[[:space:]]*=/ {
+                sub(/^.*=[[:space:]]*/, "")
+                sub(/[[:space:]]*$/, "")
+                print
+                exit
+            }
+            inside && /^}/ { exit }
+        ' "$BACKEND_ROLE_FILE"
+    )"
+    [[ "$value" =~ ^[0-9]+$ ]] ||
+        fail "Could not read max_session_duration from $BACKEND_ROLE_FILE"
+    printf '%s' "$value"
+}
+
 poll_budget=$(($(read_constant "$DEPLOY_SCRIPT" "DEFAULT_POLL_ATTEMPTS") *
     $(read_constant "$DEPLOY_SCRIPT" "DEFAULT_POLL_INTERVAL_SECONDS")))
-health_budget=$((
+
+# Every wait deploy-api.sh configures. Each readiness attempt costs its curl
+# timeout as well as its interval, and the outgoing container gets a stop grace
+# on every deployment after the first.
+configured_wait_budget=$((
     $(read_constant "$DEPLOY_API_SCRIPT_FILE" "VALKEY_HEALTH_ATTEMPTS") *
     $(read_constant "$DEPLOY_API_SCRIPT_FILE" "VALKEY_HEALTH_INTERVAL_SECONDS") +
     2 * $(read_constant "$DEPLOY_API_SCRIPT_FILE" "READINESS_ATTEMPTS") *
-    $(read_constant "$DEPLOY_API_SCRIPT_FILE" "READINESS_INTERVAL_SECONDS")
+    ($(read_constant "$DEPLOY_API_SCRIPT_FILE" "READINESS_INTERVAL_SECONDS") +
+        $(read_constant "$DEPLOY_API_SCRIPT_FILE" "READINESS_CURL_MAX_TIME_SECONDS")) +
+    $(read_constant "$DEPLOY_API_SCRIPT_FILE" "API_STOP_GRACE_SECONDS")
 ))
+
 oidc_credential_seconds="$(read_deploy_job_value "role-duration-seconds")"
 job_timeout_seconds=$(($(read_deploy_job_value "timeout-minutes") * 60))
+role_max_session_seconds="$(read_role_max_session_duration)"
 
-((poll_budget > health_budget)) ||
-    fail "The CI poll budget (${poll_budget}s) must exceed the deploy-api.sh health budget (${health_budget}s)."
+((poll_budget > configured_wait_budget)) ||
+    fail "The CI poll budget (${poll_budget}s) must exceed the configured deploy-api.sh waits (${configured_wait_budget}s)."
+(((poll_budget - configured_wait_budget) >= MIN_OPERATIONAL_HEADROOM_SECONDS)) ||
+    fail "The CI poll budget (${poll_budget}s) must leave at least ${MIN_OPERATIONAL_HEADROOM_SECONDS}s above the configured waits (${configured_wait_budget}s) for docker pull and the AWS calls."
 ((poll_budget < oidc_credential_seconds)) ||
     fail "The CI poll budget (${poll_budget}s) must stay inside the OIDC credential duration (${oidc_credential_seconds}s)."
+(((oidc_credential_seconds - poll_budget) >= MIN_OPERATIONAL_HEADROOM_SECONDS)) ||
+    fail "The OIDC credential duration (${oidc_credential_seconds}s) must leave at least ${MIN_OPERATIONAL_HEADROOM_SECONDS}s above the poll budget (${poll_budget}s)."
 ((job_timeout_seconds > oidc_credential_seconds)) ||
     fail "The deploy job timeout (${job_timeout_seconds}s) must exceed the OIDC credential duration (${oidc_credential_seconds}s)."
+((oidc_credential_seconds <= role_max_session_seconds)) ||
+    fail "The requested OIDC credential duration (${oidc_credential_seconds}s) exceeds max_session_duration on the backend deploy role (${role_max_session_seconds}s)."
+
+# The ordering assertions above cannot catch a formula that leaves a wait out:
+# under-counting shrinks the budget, which only makes the ordering easier to
+# satisfy. That is exactly how the previous 420s figure went unnoticed. Assert
+# instead that every timing constant deploy-api.sh defines is referenced here,
+# so a newly added or forgotten wait breaks this test rather than hiding in it.
+deploy_api_timing_constants="$(
+    grep -oE '^readonly [A-Z_]+(_ATTEMPTS|_SECONDS)=[0-9]+$' "$DEPLOY_API_SCRIPT_FILE" |
+        sed -e 's/^readonly //' -e 's/=.*$//' | sort -u
+)"
+[[ -n "$deploy_api_timing_constants" ]] ||
+    fail "Could not enumerate the timing constants in $DEPLOY_API_SCRIPT_FILE"
+
+test_source="$(cat "${BASH_SOURCE[0]}")"
+while read -r timing_constant; do
+    [[ -n "$timing_constant" ]] || continue
+    printf '%s' "$test_source" | grep -Fq -- "\"$timing_constant\"" ||
+        fail "The configured wait budget must account for $timing_constant, which deploy-api.sh defines."
+done <<<"$deploy_api_timing_constants"
 
 # --- the deploy job must run both deployment contract suites -----------------
 # The wrapper suite carries the IAM/wrapper parameter contract, the flock

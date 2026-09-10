@@ -293,11 +293,22 @@ jobs:
     needs:
       - build-and-push-api
     runs-on: ubuntu-latest
-    # Must outlast role-duration-seconds below, so an expiring credential is
-    # what fails a stuck deployment rather than the job being cut off first.
+    # The outermost boundary, not the thing that normally stops a stuck
+    # deployment. That job belongs to the 900s polling budget in
+    # deploy-runtime.sh, which gives up explicitly and fails the step. The 1200s
+    # credential below is sized to outlast that polling window rather than to
+    # terminate anything, so the deployment reaches a verdict while its
+    # credential is still valid.
+    #
+    # This timeout also has to cover the steps that run before a credential
+    # exists at all: the checkout, both contract suites and the environment
+    # validation. Its clock starts with the job while the credential clock
+    # starts at issue time, so the ordering here is operational headroom, not a
+    # proof about which of the two runs out first.
+    #
     # deploy-runtime.test.sh reads both values from this file and enforces
-    # poll budget < role-duration-seconds < job timeout.
-    timeout-minutes: 20
+    # configured waits < poll budget < role-duration-seconds < job timeout.
+    timeout-minutes: 30
     environment: demo-backend
     concurrency:
       group: demo-backend-deploy
@@ -343,7 +354,10 @@ jobs:
         with:
           role-to-assume: ${{ env.AWS_BACKEND_DEPLOY_ROLE_ARN }}
           role-session-name: gha-deploy-${{ github.run_id }}
-          role-duration-seconds: 900
+          # Must exceed the 900s poll budget in deploy-runtime.sh with margin.
+          # Bounded above by the max_session_duration on the backend deploy role
+          # in Terraform, which deploy-runtime.test.sh checks against.
+          role-duration-seconds: 1200
           aws-region: ${{ env.AWS_REGION }}
           allowed-account-ids: ${{ env.AWS_ACCOUNT_ID }}
           mask-aws-account-id: true
