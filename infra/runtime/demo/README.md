@@ -130,7 +130,13 @@ trap 'exit 130' INT
 trap cleanup EXIT
 ```
 
-`128 + signal` という慣例どおりの status で明示的に終了することで、既存の rollback 条件が signal 経路でも正しく評価されます。さらに `cleanup()` の先頭で `trap '' TERM INT` を宣言し、rollback の途中に 2 発目の signal が入って処理が半分で切れることを防いでいます。
+`128 + signal` という慣例どおりの status で明示的に終了することで、既存の rollback 条件が signal 経路でも正しく評価されます。さらに `cleanup()` の先頭で `trap '' TERM INT` を宣言し、rollback の途中に 2 発目の signal が入って処理が半分で切れることを防いでいます。宣言の順序も重要で、status を保存し、signal を ignore にし、最後に EXIT trap を解除します。EXIT trap を先に解除すると、その隙に届いた 2 発目の signal が handler を再入して `exit` を呼び、解除済みの EXIT trap を素通りして rollback なしで終了し得ます。
+
+#### cleanup 中の child process への影響
+
+`trap '' TERM INT` が設定する SIG_IGN の disposition は、`cleanup()` が起動する **child process にも継承されます**。つまり rollback 中の `docker rm` / `rename` / `start` / `logout` も、後続の SIGTERM では中断されません。これは rollback を半分で終わらせないための意図的な挙動です。
+
+裏返すと、`dockerd` や docker CLI が hang した場合に SIGTERM で断ち切ることはできません。したがって Phase 5F-3b で systemd unit を追加する際は、`TimeoutStopSec` 経過後の SIGKILL が最終的な上限として機能する必要があります。ただし SIGKILL では rollback を保証できません。
 
 #### SIGKILL は保護できません
 

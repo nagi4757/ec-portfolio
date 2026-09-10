@@ -60,11 +60,15 @@ container_role() {
 
 cleanup() {
     local exit_code=$?
-    trap - EXIT
-    # A second signal must not cut the rollback below in half; that would leave
-    # exactly the half-replaced state this cleanup exists to undo. Only SIGKILL
-    # can interrupt from here on.
+    # Order matters. The status has to be captured first, then the signals
+    # ignored, and only then the EXIT trap cleared. Clearing EXIT first would
+    # leave a window where a second TERM or INT still runs the signal handler:
+    # it would call exit, find no EXIT trap left, and terminate without the
+    # rollback below. A second signal must not cut the rollback in half either;
+    # that would leave exactly the half-replaced state this cleanup exists to
+    # undo. Only SIGKILL can interrupt from here on.
     trap '' TERM INT
+    trap - EXIT
 
     if (( exit_code != 0 )) && [[ "$replacement_started" == "true" ]]; then
         log "Deployment failed after replacement started; removing the failed API container."

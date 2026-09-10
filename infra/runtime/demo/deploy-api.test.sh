@@ -90,6 +90,10 @@ rm)
 rename)
     from="${2-}"; to="${3-}"
     [[ -f "$registry/$from" ]] || exit 1
+    # Real docker refuses to rename onto a name that is already taken. Without
+    # this the rollback could appear to succeed while silently discarding the
+    # container still holding the destination name.
+    [[ ! -e "$registry/$to" ]] || exit 1
     mv "$registry/$from" "$registry/$to"
     ;;
 start)
@@ -288,6 +292,15 @@ status="$scenario_status"
 calls="$(cat "$work_directory/docker-calls.log")"
 assert_contains "$calls" "docker rm -f $API_CONTAINER" \
     "The failed replacement container must be removed before restoring."
+
+# Ordering is the contract, not just presence. docker refuses to rename onto a
+# name that is still taken, so removing the failed container has to come first.
+# If it did not, the rename would fail and the rollback would only look like it
+# had worked.
+remove_line="$(printf '%s\n' "$calls" | grep -n -F "docker rm -f $API_CONTAINER" | head -n 1 | cut -d: -f1)"
+rename_line="$(printf '%s\n' "$calls" | grep -n -F "docker rename $ROLLBACK_CONTAINER $API_CONTAINER" | head -n 1 | cut -d: -f1)"
+[[ -n "$remove_line" && -n "$rename_line" && "$remove_line" -lt "$rename_line" ]] ||
+    fail "The failed container must be removed before the rollback rename (rm at ${remove_line:-none}, rename at ${rename_line:-none})."
 
 # --- 4. INT gets the same rollback, with its own exit status ----------------
 reset_world
