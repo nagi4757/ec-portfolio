@@ -61,6 +61,10 @@ container_role() {
 cleanup() {
     local exit_code=$?
     trap - EXIT
+    # A second signal must not cut the rollback below in half; that would leave
+    # exactly the half-replaced state this cleanup exists to undo. Only SIGKILL
+    # can interrupt from here on.
+    trap '' TERM INT
 
     if (( exit_code != 0 )) && [[ "$replacement_started" == "true" ]]; then
         log "Deployment failed after replacement started; removing the failed API container."
@@ -90,6 +94,18 @@ cleanup() {
     exit "$exit_code"
 }
 
+# Bash does run the EXIT trap when an untrapped SIGTERM ends the shell, but the
+# status cleanup() observes there is 0. That makes cleanup take the success path
+# and skip the replacement rollback, which is the one case where skipping it
+# leaves the host with the previous API container renamed aside and nothing
+# serving. Exiting explicitly with the conventional 128+signal status makes the
+# existing rollback condition evaluate correctly on a signal as well.
+#
+# SIGKILL cannot be trapped, so it still bypasses this entirely. Anything that
+# terminates this script has to allow enough grace after SIGTERM for the
+# rollback in cleanup() to finish.
+trap 'exit 143' TERM
+trap 'exit 130' INT
 trap cleanup EXIT
 
 require_environment() {
@@ -409,4 +425,10 @@ main() {
     log "Demo API deployment completed successfully."
 }
 
-main "$@"
+# Sourcing installs the signal and exit traps without running a deployment,
+# which is how deploy-api.test.sh drives the real cleanup() through the signal
+# paths. Running the script normally is unchanged. The same guard is used by
+# deploy-runtime.sh.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi
