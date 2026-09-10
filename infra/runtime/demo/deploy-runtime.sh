@@ -26,21 +26,34 @@ readonly DEPLOY_FILE="deploy-api.sh"
 
 readonly INSTANCE_ID_PATTERN='^i-[0-9a-f]{8,17}$'
 
-# The poll budget has to outlast the worst case host-side deployment, otherwise
-# CI reports a timeout for a deployment that actually went on to succeed.
-# deploy-api.sh spends at most:
+# The poll budget has to outlast the host-side deployment, otherwise CI reports
+# a timeout for a deployment that actually went on to succeed and the recorded
+# state stops matching the host.
 #
-#   Valkey health      30 attempts x 2s = 60s
-#   candidate readiness 36 attempts x 5s = 180s
-#   host readiness      36 attempts x 5s = 180s
-#                                        ------
-#                                          420s
+# deploy-api.sh has these explicitly configured waits. Each readiness attempt
+# costs its per-probe HTTP timeout as well as its interval, and every deployment
+# after the first also waits for the outgoing container to stop:
 #
-# On top of that come two docker pulls (API image plus Valkey) and the SSM agent
-# picking the command up, which we budget at roughly 240s together. 66 attempts
-# at 10s gives 660s, leaving a 240s margin inside the 900s OIDC credential
-# duration configured for the deploy job.
-readonly DEFAULT_POLL_ATTEMPTS=66
+#   Valkey health        30 x 2s              =  60s
+#   candidate readiness  36 x (3s + 5s)       = 288s
+#   API stop grace                            =  30s
+#   final readiness      36 x (3s + 5s)       = 288s
+#                                             ------
+#                                               666s
+#
+# That 666s is a conservative sum of the configured waits, not a measured
+# wall-clock figure: it adds up every loop as if each ran to exhaustion, which
+# cannot all happen in one successful run. It is also not an upper bound on the
+# deployment as a whole, because several steps have no script-level timeout at
+# all: both docker pulls, the ECR login, the Parameter Store, STS and ECR API
+# calls, the SSM agent picking the command up, and the Docker daemon operations
+# themselves.
+#
+# 90 attempts at 10s gives a 900s observation budget. The roughly 234s above the
+# configured waits is operational headroom for that unbounded work, sized from
+# how long those steps normally take rather than from any guarantee about them.
+# It sits inside the 1200s OIDC credential duration the deploy job requests.
+readonly DEFAULT_POLL_ATTEMPTS=90
 readonly DEFAULT_POLL_INTERVAL_SECONDS=10
 
 log() {
