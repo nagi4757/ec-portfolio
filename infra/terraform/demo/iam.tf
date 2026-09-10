@@ -84,6 +84,40 @@ resource "aws_iam_role_policy" "ec2_runtime_deployment" {
   })
 }
 
+resource "aws_iam_role_policy" "ec2_deployment_state" {
+  name = "deployment-state"
+  role = aws_iam_role.ec2.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "ReadDeploymentState"
+        Effect = "Allow"
+        Action = "ssm:GetParameter"
+        # deploy-api-from-ssm.sh reads the last known good image on the already
+        # converged path to decide whether the rollback reference still has to
+        # be reconciled, so it needs read access alongside the write below.
+        Resource = [
+          aws_ssm_parameter.runtime_db_host.arn,
+          aws_ssm_parameter.runtime_db_port.arn,
+          aws_ssm_parameter.runtime_db_name.arn,
+          aws_ssm_parameter.runtime_db_username.arn,
+          aws_ssm_parameter.runtime_cors_allowed_origins.arn,
+          aws_ssm_parameter.deploy_desired_image_sha.arn,
+          aws_ssm_parameter.deploy_last_known_good_image_sha.arn,
+        ]
+      },
+      {
+        Sid      = "RecordLastKnownGoodImage"
+        Effect   = "Allow"
+        Action   = "ssm:PutParameter"
+        Resource = aws_ssm_parameter.deploy_last_known_good_image_sha.arn
+      },
+    ]
+  })
+}
+
 resource "aws_iam_role_policy" "ec2_origin_verification" {
   name = "origin-verification-read"
   role = aws_iam_role.ec2.id
