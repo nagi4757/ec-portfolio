@@ -112,7 +112,17 @@ The AWS-managed `/aws/service/ami-amazon-linux-latest/...` parameter is **not** 
 - Docker images, containers and the `ec-portfolio-demo` network
 - the boot convergence systemd unit once Phase 5F-3b lands
 
-The guard is separate from the pin. The pin removes the cause already encountered; the guard fails the plan closed for causes not yet encountered, such as a change to `instance_type`, `subnet_id` or any other attribute the provider treats as ForceNew. A plan that requires a replacement will error rather than proceed, which is the intended behaviour.
+The guard is separate from the pin. The pin removes the cause already encountered; the guard fails the plan closed for causes not yet encountered, such as a change to `subnet_id` or another attribute the provider treats as ForceNew. A plan that requires a replacement will error rather than proceed, which is the intended behaviour.
+
+`prevent_destroy` only stops replacement and destroy. It does not stop a normal in-place update, nor an update the provider performs by stopping and starting the instance. `instance_type` is one of those: the provider changes it in place rather than replacing the instance, so this guard is not what reviews a sizing change.
+
+The guard also does not cover every path to losing the host:
+
+- removing the `aws_instance.demo` block from the configuration removes the `lifecycle` block with it, so the guard cannot protect against its own deletion
+- state operations such as `terraform state rm` are outside its scope
+- an out-of-band termination through the AWS console or API is outside its scope
+
+Removing the Demo instance resource, running a state operation against it, or terminating it out of band therefore each need their own explicit review.
 
 ### Deprecation and the required upgrade cycle
 
@@ -129,12 +139,16 @@ Operational TODO: schedule the next upgrade cycle before `2026-11-24`.
 5. Open a PR that changes `local.demo_ami_id` and its name comment, recording the new AMI's name, creation date and the review above.
 6. Obtain explicit approval to lift `prevent_destroy`, in that same PR or a companion one.
 7. Perform the planned replacement with the runbook at hand.
-8. Re-run host bootstrap and configuration.
-9. Run the runtime deployment.
-10. Run the smoke and origin checks and confirm end-to-end behaviour.
-11. Restore `prevent_destroy`.
+8. Restore `prevent_destroy` immediately, before touching the host.
+9. Re-run host bootstrap and configuration.
+10. Run the runtime deployment.
+11. Run the smoke and origin checks and confirm end-to-end behaviour.
 
-Steps 6 and 11 are what keep the guard meaningful. Leaving it lifted turns it back into decoration.
+The guard goes back on at step 8 rather than at the end because everything after it is host-side work that Terraform is not involved in. Leaving the guard lifted through bootstrap and verification would mean that if any of those steps fails, the next `plan` or `apply` someone runs is free to replace the instance again. Restoring it early keeps that window as short as the replacement itself.
+
+`prevent_destroy` is Terraform lifecycle configuration, not infrastructure state. Restoring it takes effect from the next plan once the commit is on `main`; there is nothing to apply for the restore itself.
+
+Steps 6 and 8 are what keep the guard meaningful. Leaving it lifted turns it back into decoration.
 
 ## RDS runtime contract
 
