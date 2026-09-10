@@ -293,16 +293,18 @@ jobs:
     needs:
       - build-and-push-api
     runs-on: ubuntu-latest
-    # Sits well above role-duration-seconds below, so that a stuck deployment is
-    # normally ended by an expiring credential rather than by the job being cut
-    # off first.
+    # The outermost boundary, not the thing that normally stops a stuck
+    # deployment. That job belongs to the 900s polling budget in
+    # deploy-runtime.sh, which gives up explicitly and fails the step. The 1200s
+    # credential below is sized to outlast that polling window rather than to
+    # terminate anything, so the deployment reaches a verdict while its
+    # credential is still valid.
     #
-    # The two clocks do not share an origin: this timeout starts when the job
-    # starts, while the credential duration starts when the credential is
-    # issued, several steps later. 30 minutes against a 1200s credential is
-    # therefore an operational margin that also covers the checkout, contract
-    # tests and environment validation running before the credential exists. It
-    # is not a proof that the credential always expires first.
+    # This timeout also has to cover the steps that run before a credential
+    # exists at all: the checkout, both contract suites and the environment
+    # validation. Its clock starts with the job while the credential clock
+    # starts at issue time, so the ordering here is operational headroom, not a
+    # proof about which of the two runs out first.
     #
     # deploy-runtime.test.sh reads both values from this file and enforces
     # configured waits < poll budget < role-duration-seconds < job timeout.
