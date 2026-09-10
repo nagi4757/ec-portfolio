@@ -1,9 +1,5 @@
-data "aws_ssm_parameter" "al2023_x86_64_ami" {
-  name = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64"
-}
-
 resource "aws_instance" "demo" {
-  ami                    = data.aws_ssm_parameter.al2023_x86_64_ami.value
+  ami                    = local.demo_ami_id
   instance_type          = "t3a.medium"
   subnet_id              = aws_subnet.public_app.id
   vpc_security_group_ids = [aws_security_group.ec2_origin.id]
@@ -28,6 +24,20 @@ resource "aws_instance" "demo" {
   }
 
   depends_on = [aws_iam_role_policy.ec2_session_manager]
+
+  # This host carries state Terraform does not rebuild: the runtime scripts
+  # under /opt/ec-portfolio/runtime/demo/, the origin TLS certificate, the
+  # certbot systemd units and the Docker images, containers and network. A
+  # replacement silently discards all of it, so any change that would force one
+  # has to fail the plan instead.
+  #
+  # This is deliberately separate from pinning the AMI. The pin removes the one
+  # cause we already hit; this guard covers the ones we have not. A planned
+  # replacement is done by lifting this guard in its own reviewed PR, together
+  # with the rebuild runbook in README.md.
+  lifecycle {
+    prevent_destroy = true
+  }
 
   tags = {
     Name     = "${local.name_prefix}-ec2"

@@ -72,7 +72,7 @@ Removing `AutoStop` from provider default tags is expected to remove that tag fr
 ## EC2 runtime contract
 
 - The host is x86_64 `t3a.medium` with Standard CPU credits. Do not reduce it to 2 GiB or switch to ARM64 before the architecture's memory/load and multi-platform image gates pass.
-- The AMI is discovered from AWS's public SSM parameter `/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64`. It resolves to the current AWS-maintained Amazon Linux 2023 x86_64 AMI in Tokyo. A newer parameter value can cause a future replacement plan; review that replacement instead of hiding it with `ignore_changes`.
+- The AMI is pinned to an exact image ID in `locals.tf`. AWS's public SSM parameter `/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64` is no longer used. See the AMI lifecycle section below.
 - The instance follows the existing public app subnet's no-auto-public-IP policy and uses only the existing EC2 origin security group. A separately associated Elastic IP provides the stable future CloudFront origin address and continues to incur public IPv4 cost while EC2 is stopped. Do not duplicate the subnet policy with instance-level `associate_public_ip_address = false`: during partial-apply recovery, provider refresh after the explicit EIP association conflicted with the duplicate setting and proposed perpetual instance replacement.
 - The encrypted root volume is 20 GiB gp3 with default IOPS/throughput and is deleted on instance termination. No additional data volume is defined.
 - IMDSv2 tokens are required, the metadata endpoint is enabled, metadata tags are disabled, and the hop limit is `1`. Phase 3A containers do not need instance metadata. A future container AWS SDK requirement must justify a separately reviewed hop-limit change to `2`.
@@ -85,6 +85,70 @@ AWS-provided AL2023 AMIs normally include SSM Agent, so Phase 3A does not add ne
 Both SecureStrings use the default AWS-managed `alias/aws/ssm` key. AWS documents that this key's `Decrypt` permission is available to all IAM principals in the account, so adding another broad `kms:Decrypt` statement would not narrow access and is omitted. Exact `ssm:GetParameter` resource permissions are the retrieval boundary for this role. A future customer-managed key would require a separately reviewed key policy and encryption-context-scoped decrypt permission.
 
 Sources: [AWS public AMI parameters](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/finding-an-ami-parameter-store.html), [AL2023 SSM Agent installation](https://docs.aws.amazon.com/systems-manager/latest/userguide/agent-install-al2.html), [Systems Manager instance permissions](https://docs.aws.amazon.com/systems-manager/latest/userguide/setup-instance-permissions.html), [AmazonSSMManagedInstanceCore policy JSON](https://docs.aws.amazon.com/aws-managed-policy/latest/reference/AmazonSSMManagedInstanceCore.html), [Parameter Store IAM and default-key permissions](https://docs.aws.amazon.com/systems-manager/latest/userguide/parameter-store-setting-up.html), [ECR IAM action/resource reference](https://docs.aws.amazon.com/service-authorization/latest/reference/list_ecr.html)
+
+## AMI lifecycle contract
+
+### The AMI is pinned to an exact ID
+
+`local.demo_ami_id` in `locals.tf` holds the exact image the Demo host runs:
+
+| | |
+| --- | --- |
+| AMI ID | `ami-0794a632d5c1058bf` |
+| AMI name | `al2023-ami-2023.12.20260831.0-kernel-6.18-x86_64` |
+| Deprecation time | `2026-11-24` |
+
+The AWS-managed `/aws/service/ami-amazon-linux-latest/...` parameter is **not** used. It is a mutable pointer, and `ami` forces replacement on `aws_instance`, so every AL2023 release AWS published turned into a plan that destroys the Demo host. That is not an upgrade policy; it is an unreviewed replacement waiting for whoever runs `plan` next.
+
+**Pinning does not mean the OS stops being updated.** It means an AMI change becomes a deliberate, reviewed act instead of a side effect of the calendar. The pinned image ID is not a secret and is deliberately readable in `plan` output, so a reviewer can see exactly which image is proposed. Do not wrap it in `sensitive()`, and do not use `ignore_changes = [ami]`: that hides the drift rather than resolving it, and leaves the config claiming to track "latest" while telling Terraform not to look.
+
+### `prevent_destroy` on the instance
+
+`aws_instance.demo` carries `lifecycle { prevent_destroy = true }`. The host holds state Terraform does not rebuild:
+
+- the runtime scripts under `/opt/ec-portfolio/runtime/demo/`
+- the origin TLS certificate and its private key
+- the certbot systemd unit and timer
+- Docker images, containers and the `ec-portfolio-demo` network
+- the boot convergence systemd unit once Phase 5F-3b lands
+
+The guard is separate from the pin. The pin removes the cause already encountered; the guard fails the plan closed for causes not yet encountered, such as a change to `subnet_id` or another attribute the provider treats as ForceNew. A plan that requires a replacement will error rather than proceed, which is the intended behaviour.
+
+`prevent_destroy` only stops replacement and destroy. It does not stop a normal in-place update, nor an update the provider performs by stopping and starting the instance. `instance_type` is one of those: the provider changes it in place rather than replacing the instance, so this guard is not what reviews a sizing change.
+
+The guard also does not cover every path to losing the host:
+
+- removing the `aws_instance.demo` block from the configuration removes the `lifecycle` block with it, so the guard cannot protect against its own deletion
+- state operations such as `terraform state rm` are outside its scope
+- an out-of-band termination through the AWS console or API is outside its scope
+
+Removing the Demo instance resource, running a state operation against it, or terminating it out of band therefore each need their own explicit review.
+
+### Deprecation and the required upgrade cycle
+
+The pinned AMI has a deprecation time of `2026-11-24`. Deprecation makes an image harder to discover for new launches; it does not stop the already-running instance. Even so, **an AMI upgrade and host rebuild cycle should be completed before that date** so the pin does not quietly become the reason the host is years behind on OS updates.
+
+Operational TODO: schedule the next upgrade cycle before `2026-11-24`.
+
+### Upgrade procedure
+
+1. Read the current value of the public `ami-amazon-linux-latest` parameter.
+2. Compare it against `local.demo_ami_id` and review what changed between the two images.
+3. Review the replacement impact: enumerate what the host holds that Terraform will not restore.
+4. Confirm the rebuild runbook is current: `bootstrap-host.sh`, `configure-origin.sh`, `configure-acme.sh`, the runtime deployment, and once Phase 5F-3b lands, the boot convergence systemd unit installation.
+5. Open a PR that changes `local.demo_ami_id` and its name comment, recording the new AMI's name, creation date and the review above.
+6. Obtain explicit approval to lift `prevent_destroy`, in that same PR or a companion one.
+7. Perform the planned replacement with the runbook at hand.
+8. Restore `prevent_destroy` immediately, before touching the host.
+9. Re-run host bootstrap and configuration.
+10. Run the runtime deployment.
+11. Run the smoke and origin checks and confirm end-to-end behaviour.
+
+The guard goes back on at step 8 rather than at the end because everything after it is host-side work that Terraform is not involved in. Leaving the guard lifted through bootstrap and verification would mean that if any of those steps fails, the next `plan` or `apply` someone runs is free to replace the instance again. Restoring it early keeps that window as short as the replacement itself.
+
+`prevent_destroy` is Terraform lifecycle configuration, not infrastructure state. Restoring it takes effect from the next plan once the commit is on `main`; there is nothing to apply for the restore itself.
+
+Steps 6 and 8 are what keep the guard meaningful. Leaving it lifted turns it back into decoration.
 
 ## RDS runtime contract
 
