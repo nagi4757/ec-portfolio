@@ -118,6 +118,38 @@ host port、public port、volumeは使用しません。`restart=unless-stopped`
 
 candidate検証後にだけ既存APIを停止します。最終APIの起動またはreadinessが失敗した場合、失敗containerを削除し、退避した旧containerを元の名前に戻して起動します。成功後は旧containerを削除します。より古いimageへ戻す手動rollbackも、同じscriptへ承認済みの過去Git SHA `IMAGE_REF`を渡して行います。
 
+### signal終了時のrollback（Phase 5F-3b-0）
+
+上記の rollback は EXIT trap の中にあり、終了 status が 0 以外のときだけ実行されます。bash は trap されていない SIGTERM で終了するときも EXIT trap を実行しますが、そこで観測される status は `0` です。そのため signal handler が無いと、**rollback がちょうど必要な場面で飛ばされます**。
+
+これを避けるため `deploy-api.sh` は次を宣言しています。
+
+```bash
+trap 'exit 143' TERM
+trap 'exit 130' INT
+trap cleanup EXIT
+```
+
+`128 + signal` という慣例どおりの status で明示的に終了することで、既存の rollback 条件が signal 経路でも正しく評価されます。さらに `cleanup()` の先頭で `trap '' TERM INT` を宣言し、rollback の途中に 2 発目の signal が入って処理が半分で切れることを防いでいます。宣言の順序も重要で、status を保存し、signal を ignore にし、最後に EXIT trap を解除します。EXIT trap を先に解除すると、その隙に届いた 2 発目の signal が handler を再入して `exit` を呼び、解除済みの EXIT trap を素通りして rollback なしで終了し得ます。
+
+#### cleanup 中の child process への影響
+
+`trap '' TERM INT` が設定する SIG_IGN の disposition は、`cleanup()` が起動する **child process にも継承されます**。つまり rollback 中の `docker rm` / `rename` / `start` / `logout` も、後続の SIGTERM では中断されません。これは rollback を半分で終わらせないための意図的な挙動です。
+
+裏返すと、`dockerd` や docker CLI が hang した場合に SIGTERM で断ち切ることはできません。したがって Phase 5F-3b で systemd unit を追加する際は、`TimeoutStopSec` 経過後の SIGKILL が最終的な上限として機能する必要があります。ただし SIGKILL では rollback を保証できません。
+
+#### SIGKILL は保護できません
+
+**SIGKILL は trap できないため、rollback を保証できません。** SIGKILL で中断された場合、旧 container が `-rollback` 名のまま残り、次回の deployment は `validate_prerequisites` の「A rollback container already exists」で fail-closed になります。安全側ではありますが、復旧には手作業が必要です。
+
+したがって、この script を終了させ得る仕組みを追加する場合は、SIGTERM の後に rollback を完了できるだけの猶予を必ず確保してください。Phase 5F-3b で systemd unit を追加する際は次をあわせて検討します。
+
+- `TimeoutStartSec`
+- SIGTERM の後 rollback を完了できる終了 grace
+- `TimeoutStopSec`
+
+現時点で CI は remote SSM command を polling するだけで command 自体を kill しないため、この script を中断する仕組みは存在しません。
+
 ## CI駆動deployment（Phase 5F-2b）
 
 `main`へのpush時、GitHub Actionsの`deploy-api` jobが`deploy-runtime.sh`を実行します。checkout済みの`deploy-api-from-ssm.sh`と`deploy-api.sh`をbase64で送り、host側でSHA256を検証し、2ファイルとも一致した場合にだけ`/opt/ec-portfolio/runtime/demo/`へ`root:root` `0755`でinstallしてwrapperを実行します。

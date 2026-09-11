@@ -334,12 +334,14 @@ while read -r timing_constant; do
         fail "The configured wait budget must account for $timing_constant, which deploy-api.sh defines."
 done <<<"$deploy_api_timing_constants"
 
-# --- the deploy job must run both deployment contract suites -----------------
+# --- the deploy job must run every deployment contract suite -----------------
 # The wrapper suite carries the IAM/wrapper parameter contract, the flock
-# fail-closed behaviour and the reconcile/readiness rules. Running only the
-# orchestrator suite in CI would leave all of that unverified on PR and main.
+# fail-closed behaviour and the reconcile/readiness rules; the deploy-api suite
+# carries the signal-path rollback. Running only the orchestrator suite in CI
+# would leave all of that unverified before a deployment.
 workflow_contents="$(cat "$WORKFLOW_FILE")"
-for required_suite in "infra/runtime/demo/deploy-api-from-ssm.test.sh" \
+for required_suite in "infra/runtime/demo/deploy-api.test.sh" \
+    "infra/runtime/demo/deploy-api-from-ssm.test.sh" \
     "infra/runtime/demo/deploy-runtime.test.sh"; do
     assert_contains "$workflow_contents" "$required_suite" \
         "The deploy-api job must run $required_suite"
