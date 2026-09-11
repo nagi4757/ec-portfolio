@@ -3,9 +3,10 @@
 # Deploys the reviewed API runtime to the Demo EC2 host through SSM Run
 # Command. This never starts the host: if it is not Online, the desired
 # image SHA is simply left in Parameter Store for the Phase 5F-3 boot
-# convergence path to pick up later. The wrapper and deploy-api.sh content
-# is sent inline (base64, checksummed on the host before install) so no
-# GitHub/raw URL access or extra network dependency is introduced.
+# convergence path to pick up later. The wrapper, deploy script, convergence
+# installer and systemd unit are sent inline. All four are checksummed on the
+# host before any temporary file or installation is created, so no GitHub/raw
+# URL access or extra network dependency is introduced.
 #
 # This job is desired-state driven, not commit driven. GITHUB_SHA only decides
 # whether this job may run at all (a stale queued job is rejected); the release
@@ -23,6 +24,8 @@ readonly SSM_DOCUMENT="AWS-RunShellScript"
 readonly REMOTE_RUNTIME_DIR="/opt/ec-portfolio/runtime/demo"
 readonly WRAPPER_FILE="deploy-api-from-ssm.sh"
 readonly DEPLOY_FILE="deploy-api.sh"
+readonly INSTALLER_FILE="install-api-convergence.sh"
+readonly UNIT_FILE="ec-portfolio-api-converge.service"
 
 readonly INSTANCE_ID_PATTERN='^i-[0-9a-f]{8,17}$'
 
@@ -83,30 +86,41 @@ instance_ping_status() {
         fail "Unable to query DescribeInstanceInformation for $EC2_INSTANCE_ID."
 }
 
-# Builds the AWS-RunShellScript command list that installs both reviewed
-# scripts on the host and, only once both pass a checksum comparison,
-# executes the wrapper. Script content never contains a secret; deploy-api.sh
-# resolves the database password and JWT secret itself, on the host, with the
-# EC2 instance role.
+# Builds the AWS-RunShellScript command list that verifies all four reviewed
+# artifacts before creating any host-side file, runs the idempotent installer,
+# and executes the installed wrapper only after installation succeeds. Artifact
+# content never contains a secret; deploy-api.sh resolves the database password
+# and JWT secret itself, on the host, with the EC2 instance role.
 build_install_and_run_commands() {
-    local wrapper_b64 deploy_b64 wrapper_sha256 deploy_sha256
+    local wrapper_b64 deploy_b64 installer_b64 unit_b64
+    local wrapper_sha256 deploy_sha256 installer_sha256 unit_sha256
 
     wrapper_b64="$(base64 <"$SCRIPT_DIRECTORY/$WRAPPER_FILE" | tr -d '\n')"
     deploy_b64="$(base64 <"$SCRIPT_DIRECTORY/$DEPLOY_FILE" | tr -d '\n')"
+    installer_b64="$(base64 <"$SCRIPT_DIRECTORY/$INSTALLER_FILE" | tr -d '\n')"
+    unit_b64="$(base64 <"$SCRIPT_DIRECTORY/$UNIT_FILE" | tr -d '\n')"
     wrapper_sha256="$(sha256sum "$SCRIPT_DIRECTORY/$WRAPPER_FILE" | awk '{print $1}')"
     deploy_sha256="$(sha256sum "$SCRIPT_DIRECTORY/$DEPLOY_FILE" | awk '{print $1}')"
+    installer_sha256="$(sha256sum "$SCRIPT_DIRECTORY/$INSTALLER_FILE" | awk '{print $1}')"
+    unit_sha256="$(sha256sum "$SCRIPT_DIRECTORY/$UNIT_FILE" | awk '{print $1}')"
 
     local -a commands=(
         "set -euo pipefail"
+        "wrapper_b64='$wrapper_b64'"
+        "deploy_b64='$deploy_b64'"
+        "installer_b64='$installer_b64'"
+        "unit_b64='$unit_b64'"
+        "[ \"\$(printf '%s' \"\$wrapper_b64\" | base64 -d | sha256sum | awk '{print \$1}')\" = \"$wrapper_sha256\" ] || { echo '$WRAPPER_FILE checksum mismatch' >&2; exit 1; }"
+        "[ \"\$(printf '%s' \"\$deploy_b64\" | base64 -d | sha256sum | awk '{print \$1}')\" = \"$deploy_sha256\" ] || { echo '$DEPLOY_FILE checksum mismatch' >&2; exit 1; }"
+        "[ \"\$(printf '%s' \"\$installer_b64\" | base64 -d | sha256sum | awk '{print \$1}')\" = \"$installer_sha256\" ] || { echo '$INSTALLER_FILE checksum mismatch' >&2; exit 1; }"
+        "[ \"\$(printf '%s' \"\$unit_b64\" | base64 -d | sha256sum | awk '{print \$1}')\" = \"$unit_sha256\" ] || { echo '$UNIT_FILE checksum mismatch' >&2; exit 1; }"
         "tmp_dir=\"\$(mktemp -d /tmp/ec-portfolio-deploy.XXXXXX)\""
         "trap 'rm -rf \"\$tmp_dir\"' EXIT"
-        "printf '%s' '$wrapper_b64' | base64 -d > \"\$tmp_dir/$WRAPPER_FILE\""
-        "printf '%s' '$deploy_b64' | base64 -d > \"\$tmp_dir/$DEPLOY_FILE\""
-        "[ \"\$(sha256sum \"\$tmp_dir/$WRAPPER_FILE\" | awk '{print \$1}')\" = \"$wrapper_sha256\" ] || { echo 'deploy-api-from-ssm.sh checksum mismatch' >&2; exit 1; }"
-        "[ \"\$(sha256sum \"\$tmp_dir/$DEPLOY_FILE\" | awk '{print \$1}')\" = \"$deploy_sha256\" ] || { echo 'deploy-api.sh checksum mismatch' >&2; exit 1; }"
-        "mkdir -p $REMOTE_RUNTIME_DIR"
-        "install -o root -g root -m 0755 \"\$tmp_dir/$WRAPPER_FILE\" $REMOTE_RUNTIME_DIR/$WRAPPER_FILE"
-        "install -o root -g root -m 0755 \"\$tmp_dir/$DEPLOY_FILE\" $REMOTE_RUNTIME_DIR/$DEPLOY_FILE"
+        "printf '%s' \"\$wrapper_b64\" | base64 -d > \"\$tmp_dir/$WRAPPER_FILE\""
+        "printf '%s' \"\$deploy_b64\" | base64 -d > \"\$tmp_dir/$DEPLOY_FILE\""
+        "printf '%s' \"\$installer_b64\" | base64 -d > \"\$tmp_dir/$INSTALLER_FILE\""
+        "printf '%s' \"\$unit_b64\" | base64 -d > \"\$tmp_dir/$UNIT_FILE\""
+        "bash \"\$tmp_dir/$INSTALLER_FILE\""
         "$REMOTE_RUNTIME_DIR/$WRAPPER_FILE"
     )
 

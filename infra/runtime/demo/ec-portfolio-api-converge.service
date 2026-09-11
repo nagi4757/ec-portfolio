@@ -1,0 +1,26 @@
+[Unit]
+Wants=network-online.target
+After=network-online.target docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+UMask=0077
+Environment=CONVERGED_READINESS_ATTEMPTS=36
+Environment=CONVERGED_READINESS_INTERVAL_SECONDS=5
+ExecStart=/opt/ec-portfolio/runtime/demo/deploy-api-from-ssm.sh
+TimeoutStartSec=20min
+TimeoutStartFailureMode=terminate
+TimeoutStopSec=2min
+KillMode=control-group
+KillSignal=SIGTERM
+SendSIGKILL=yes
+FinalKillSignal=SIGKILL
+Restart=no
+PrivateTmp=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

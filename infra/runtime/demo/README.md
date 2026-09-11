@@ -26,7 +26,9 @@ CloudFrontからEC2 originへの通信はHTTPS `443`だけを使用します。N
 | `bootstrap-host.sh` | Dockerのinstall/startと専用network作成 |
 | `deploy-api.sh` | ECR pull、SSM secret取得、Valkey/APIの安全な起動・交換 |
 | `deploy-api-from-ssm.sh` | SSM Parameter Storeからdeployment contractを解決し`deploy-api.sh`へ引き渡すhost-side wrapper（Phase 5F-2a） |
-| `deploy-runtime.sh` | GitHub ActionsからSSM Run Commandで上記2つをhostへinstall・実行するCI側orchestrator（Phase 5F-2b） |
+| `deploy-runtime.sh` | GitHub ActionsからSSM Run Commandで4 artifactを検証し、installerとwrapperを順に実行するCI側orchestrator（Phase 5F-2b / 5F-3b） |
+| `install-api-convergence.sh` | runtime scriptsとboot convergence unitを冪等にinstall・enableするhost-side installer |
+| `ec-portfolio-api-converge.service` | EC2起動時にdesired image SHAへ収束するsystemd oneshot unit |
 | `smoke-check.sh` | secret不要のcontainer、port、readiness検証 |
 | `configure-origin.sh` | Nginx install、TLS origin設定、SSM origin verification設定 |
 | `origin-smoke-check.sh` | HTTPS、証明書、origin verification、非公開portの検証 |
@@ -142,17 +144,62 @@ trap cleanup EXIT
 
 **SIGKILL は trap できないため、rollback を保証できません。** SIGKILL で中断された場合、旧 container が `-rollback` 名のまま残り、次回の deployment は `validate_prerequisites` の「A rollback container already exists」で fail-closed になります。安全側ではありますが、復旧には手作業が必要です。
 
-したがって、この script を終了させ得る仕組みを追加する場合は、SIGTERM の後に rollback を完了できるだけの猶予を必ず確保してください。Phase 5F-3b で systemd unit を追加する際は次をあわせて検討します。
-
-- `TimeoutStartSec`
-- SIGTERM の後 rollback を完了できる終了 grace
-- `TimeoutStopSec`
+したがって、この script を終了させ得る仕組みでは、SIGTERM の後に rollback を完了できるだけの猶予が必要です。Phase 5F-3b の systemd unit は `TimeoutStartSec=20min` と `TimeoutStopSec=2min` を組み合わせ、通常の終了 signal に `SIGTERM`、最終 signal に `SIGKILL` を使用します。詳細は次節の timeout / signal contract を参照してください。
 
 現時点で CI は remote SSM command を polling するだけで command 自体を kill しないため、この script を中断する仕組みは存在しません。
 
+## EC2 boot convergence（Phase 5F-3b）
+
+`ec-portfolio-api-converge.service`は`multi-user.target`にenableされる`Type=oneshot` unitです。`network-online.target`を待ち、`docker.service`を必須dependencyとしてその後に実行し、`deploy-api-from-ssm.sh`が起動時点のdesired image SHAへ収束させます。unit自身はRDSやEC2をstartせず、Docker以外の外部serviceをactivateしません。
+
+boot callerだけが次のreadiness budgetを設定します。
+
+```text
+CONVERGED_READINESS_ATTEMPTS=36
+CONVERGED_READINESS_INTERVAL_SECONDS=5
+```
+
+CIから実行するwrapperにはこの環境変数を注入しません。したがってwrapper defaultの`3回 / 2秒`は変わらず、boot時だけ`36回 / 5秒`になります。同時deploymentを待たずに失敗させる既存のnon-blocking `flock`も維持します。
+
+### timeout / signal contract
+
+`TimeoutStartSec=20min`は、`deploy-api.sh`のconfigured bounded waitsである666秒と同じ値ではありません。また、deployment全体の数学的なworst-caseでもありません。Docker pull、AWS API、Docker daemon operationなどscript-level timeoutを持たない処理も含め、boot convergence全体へ適用する**outer operational bound**です。
+
+`TimeoutStartSec`を超過した場合、次の順序で終了処理が進みます。
+
+```text
+TimeoutStartSec=20min expires
+  -> systemd sends SIGTERM to the control group
+  -> deploy-api.sh exits with status 143
+  -> EXIT cleanup runs
+  -> rollback runs
+  -> cleanup ignores TERM/INT
+  -> child Docker CLI processes inherit SIG_IGN
+  -> TimeoutStopSec=2min expires
+  -> systemd sends SIGKILL to the control group
+```
+
+cleanup中は2回目以降のTERM/INTでrollbackを途中終了させません。その代わり、cleanupが起動したDocker CLIもSIG_IGNを継承するため、hangしてもSIGTERMでは停止しません。`TimeoutStopSec=2min`の経過後に送られるSIGKILLがsystemd側の最終escalationです。SIGKILLはtrapできないため、この経路ではrollback完了を保証できません。
+
+20分のstart timeoutと2分のstop graceを合わせた22分は、**configured systemd escalation bound**です。これはOSやkernelのあらゆる状態まで含めた絶対的な終了保証ではありません。
+
+unitは`KillMode=control-group`、`KillSignal=SIGTERM`、`SendSIGKILL=yes`、`FinalKillSignal=SIGKILL`を明示し、signal exitの130/143を成功扱いしません。`Restart=no`であり、transient failureを含めて自動retryしません。`StartLimit*`によるretryも設定しません。`UMask=0077`、`PrivateTmp=true`、`NoNewPrivileges=true`は既存runtimeの`/run`、`/var/lock`、Docker socket、AWS API利用と互換です。
+
+### installer contract
+
+`install-api-convergence.sh`はroot実行とAmazon Linux 2023を検証し、bundle内の3 executable scriptsを`root:root` `0755`、unitを`root:root` `0644`でinstallします。その後、次の順序だけを実行します。
+
+1. `systemctl daemon-reload`
+2. `systemctl enable ec-portfolio-api-converge.service`
+3. `systemctl is-enabled --quiet ec-portfolio-api-converge.service`
+
+各systemd操作は30秒でtimeoutし、さらに5秒後にkillします。installerは冪等で、2回実行しても同じfileとenable状態へ収束します。`enable --now`、`start`、`restart`、`reset-failed`は使用しないため、installer実行そのものがboot convergenceを開始することはありません。自動retryも行いません。
+
 ## CI駆動deployment（Phase 5F-2b）
 
-`main`へのpush時、GitHub Actionsの`deploy-api` jobが`deploy-runtime.sh`を実行します。checkout済みの`deploy-api-from-ssm.sh`と`deploy-api.sh`をbase64で送り、host側でSHA256を検証し、2ファイルとも一致した場合にだけ`/opt/ec-portfolio/runtime/demo/`へ`root:root` `0755`でinstallしてwrapperを実行します。
+`main`へのpush時、GitHub Actionsの`deploy-api` jobが`deploy-runtime.sh`を実行します。checkout済みのwrapper、deploy script、convergence installer、systemd unitの4 artifactをbase64で送り、host側で4つすべてのSHA256を検証します。検証はtemporary directoryの作成より前に行い、1つでも不一致ならinstallerもwrapperも実行せず、hostへfileを作成・installしません。
+
+4 artifactが一致した場合だけtemporary bundleを作成してinstallerを実行し、installer成功後にinstall済みwrapperを実行します。EC2がSSM managed instanceとして`Online`でなければ従来どおりzero `SendCommand`、zero auto-startで成功終了し、installationとdeploymentは次のOnline機会までdeferします。
 
 ### desired stateの意味
 

@@ -110,7 +110,7 @@ The AWS-managed `/aws/service/ami-amazon-linux-latest/...` parameter is **not** 
 - the origin TLS certificate and its private key
 - the certbot systemd unit and timer
 - Docker images, containers and the `ec-portfolio-demo` network
-- the boot convergence systemd unit once Phase 5F-3b lands
+- the boot convergence installer and `ec-portfolio-api-converge.service` unit
 
 The guard is separate from the pin. The pin removes the cause already encountered; the guard fails the plan closed for causes not yet encountered, such as a change to `subnet_id` or another attribute the provider treats as ForceNew. A plan that requires a replacement will error rather than proceed, which is the intended behaviour.
 
@@ -135,7 +135,7 @@ Operational TODO: schedule the next upgrade cycle before `2026-11-24`.
 1. Read the current value of the public `ami-amazon-linux-latest` parameter.
 2. Compare it against `local.demo_ami_id` and review what changed between the two images.
 3. Review the replacement impact: enumerate what the host holds that Terraform will not restore.
-4. Confirm the rebuild runbook is current: `bootstrap-host.sh`, `configure-origin.sh`, `configure-acme.sh`, the runtime deployment, and once Phase 5F-3b lands, the boot convergence systemd unit installation.
+4. Confirm the rebuild runbook is current: `bootstrap-host.sh`, `configure-origin.sh`, `configure-acme.sh`, the four-artifact runtime deployment, and the boot convergence systemd unit installation.
 5. Open a PR that changes `local.demo_ami_id` and its name comment, recording the new AMI's name, creation date and the review above.
 6. Obtain explicit approval to lift `prevent_destroy`, in that same PR or a companion one.
 7. Perform the planned replacement with the runbook at hand.
