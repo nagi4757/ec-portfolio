@@ -197,14 +197,18 @@ assert_contains "$output" "does not match the expected instance id format" \
 # --- static contract: no forbidden runtime behaviour ------------------------
 script_contents="$(cat "$DEPLOY_SCRIPT")"
 for forbidden in "raw.githubusercontent" "curl " "start-instances" "run-instances" \
-    ":latest" "GetDocument" "DescribeDocument"; do
+    "start-db-instance" ":latest" "GetDocument" "DescribeDocument"; do
     printf '%s' "$script_contents" | grep -Fq -- "$forbidden" &&
         fail "deploy-runtime.sh must not reference: $forbidden"
 done
-assert_contains "$script_contents" "install -o root -g root -m 0755" \
-    "The installed files must be root owned and 0755."
-assert_contains "$script_contents" "checksum mismatch" \
-    "The remote install must verify a checksum before use."
+for artifact_variable in WRAPPER_FILE DEPLOY_FILE INSTALLER_FILE UNIT_FILE; do
+    assert_contains "$script_contents" "\$$artifact_variable checksum mismatch" \
+        "The remote payload must verify every artifact before use."
+done
+assert_absent "$script_contents" "CONVERGED_READINESS_ATTEMPTS=36" \
+    "CI must not override the wrapper's default readiness attempts."
+assert_absent "$script_contents" "CONVERGED_READINESS_INTERVAL_SECONDS=5" \
+    "CI must not override the wrapper's default readiness interval."
 
 # --- the deployment timeout contract -----------------------------------------
 # Four budgets have to stay ordered:
@@ -342,6 +346,7 @@ done <<<"$deploy_api_timing_constants"
 workflow_contents="$(cat "$WORKFLOW_FILE")"
 for required_suite in "infra/runtime/demo/deploy-api.test.sh" \
     "infra/runtime/demo/deploy-api-from-ssm.test.sh" \
+    "infra/runtime/demo/install-api-convergence.test.sh" \
     "infra/runtime/demo/deploy-runtime.test.sh"; do
     assert_contains "$workflow_contents" "$required_suite" \
         "The deploy-api job must run $required_suite"
@@ -349,10 +354,13 @@ done
 
 # --- the checksum gate is verified by running the generated remote payload ---
 # A static grep proves the text is present, not that the gate actually stops a
-# tampered payload. Render the real command list, retarget it at a sandbox so it
-# can run without root, and execute it.
+# tampered payload. Render the real command list and execute it against a local
+# sandbox. The installer itself has a separate behavioral suite; here a fake
+# installer isolates the four-artifact orchestration contract.
 readonly WRAPPER_FILE="deploy-api-from-ssm.sh"
 readonly DEPLOY_FILE="deploy-api.sh"
+readonly INSTALLER_FILE="install-api-convergence.sh"
+readonly UNIT_FILE="ec-portfolio-api-converge.service"
 
 # Sourcing happens in its own process so the orchestrator's readonly globals and
 # its log/fail helpers cannot collide with the ones this test defines.
@@ -364,31 +372,46 @@ commands_json="$(render_command_json)" ||
     fail "The orchestrator must render its remote command list."
 [[ -n "$commands_json" ]] || fail "The rendered command list must not be empty."
 
-# Rewrites the rendered commands so they can run locally: the install target
-# moves under the sandbox and the root ownership flags are dropped. The
-# checksum gate itself is left exactly as it will run on the host.
+# Every checksum comparison must precede mktemp. A mismatched artifact therefore
+# cannot create even a temporary payload directory, let alone install or run it.
+mktemp_index="$(printf '%s' "$commands_json" | jq -r 'to_entries[] | select(.value | contains("mktemp -d")) | .key')"
+[[ "$mktemp_index" =~ ^[0-9]+$ ]] || fail "The payload must create one temporary directory."
+for artifact in "$WRAPPER_FILE" "$DEPLOY_FILE" "$INSTALLER_FILE" "$UNIT_FILE"; do
+    checksum_index="$(printf '%s' "$commands_json" | jq -r --arg artifact "$artifact" \
+        'to_entries[] | select(.value | contains($artifact + " checksum mismatch")) | .key')"
+    [[ "$checksum_index" =~ ^[0-9]+$ ]] ||
+        fail "The payload must verify $artifact."
+    ((checksum_index < mktemp_index)) ||
+        fail "$artifact must be verified before any temporary host file is created."
+done
+
 render_payload() {
     local sandbox="$1"
 
     printf '%s' "$commands_json" | jq -r '.[]' |
-        sed -e "s|/opt/ec-portfolio/runtime/demo|$sandbox/opt/ec-portfolio/runtime/demo|g" \
-            -e "s|install -o root -g root -m 0755|install -m 0755|g"
+        sed -e "s|/opt/ec-portfolio/runtime/demo|$sandbox/opt/ec-portfolio/runtime/demo|g"
 }
 
-# Replaces one file's base64 payload with different content, leaving the
-# recorded SHA256 untouched. This is what a payload tampered in transit looks
-# like to the host.
+# Replaces the single in-memory base64 value for one artifact while leaving its
+# reviewed SHA256 untouched. The same variable is used for verification and the
+# later decode, so bytes that pass the gate are exactly the bytes installed.
 tamper_payload() {
     local target_file="$1"
-    local tampered_b64
-    local line
+    local payload_variable tampered_b64 line
+
+    case "$target_file" in
+    "$WRAPPER_FILE") payload_variable="wrapper_b64" ;;
+    "$DEPLOY_FILE") payload_variable="deploy_b64" ;;
+    "$INSTALLER_FILE") payload_variable="installer_b64" ;;
+    "$UNIT_FILE") payload_variable="unit_b64" ;;
+    *) fail "Unknown payload artifact: $target_file" ;;
+    esac
 
     tampered_b64="$(printf '#!/usr/bin/env bash\nexit 0\n' | base64 | tr -d '\n')"
 
     while IFS= read -r line; do
-        if [[ "$line" == *"> \"\$tmp_dir/$target_file\""* ]]; then
-            printf "printf '%%s' '%s' | base64 -d > \"\$tmp_dir/%s\"\n" \
-                "$tampered_b64" "$target_file"
+        if [[ "$line" == "$payload_variable="* ]]; then
+            printf "%s='%s'\n" "$payload_variable" "$tampered_b64"
         else
             printf '%s\n' "$line"
         fi
@@ -400,19 +423,42 @@ install_payload_mocks() {
     local mock
 
     mkdir -p "$sandbox/bin"
+
+    # Inner `bash installer` is intercepted so this orchestrator suite can run
+    # without root or systemd. The dedicated installer suite exercises the real
+    # installer twice with fake systemctl.
+    cat >"$sandbox/bin/bash" <<'MOCK'
+#!/bin/bash
+set -euo pipefail
+if [[ "${1-}" == */install-api-convergence.sh ]]; then
+    [[ "${MOCK_INSTALLER_FAIL:-false}" != "true" ]] || exit 1
+    source_directory="$(dirname -- "$1")"
+    mkdir -p "$PAYLOAD_RUNTIME_DIRECTORY" "$PAYLOAD_SYSTEMD_DIRECTORY"
+    install -m 0755 "$source_directory/deploy-api-from-ssm.sh" "$PAYLOAD_RUNTIME_DIRECTORY/deploy-api-from-ssm.sh"
+    install -m 0755 "$source_directory/deploy-api.sh" "$PAYLOAD_RUNTIME_DIRECTORY/deploy-api.sh"
+    install -m 0755 "$source_directory/install-api-convergence.sh" "$PAYLOAD_RUNTIME_DIRECTORY/install-api-convergence.sh"
+    install -m 0644 "$source_directory/ec-portfolio-api-converge.service" "$PAYLOAD_SYSTEMD_DIRECTORY/ec-portfolio-api-converge.service"
+    printf '%s\n' installer >>"$PAYLOAD_EVENT_LOG"
+    exit 0
+fi
+exec /bin/bash "$@"
+MOCK
+    chmod 755 "$sandbox/bin/bash"
+
     # The installed wrapper is the real script, so it needs its dependencies on
-    # PATH. Recording a call proves the wrapper was reached at all.
+    # PATH. Recording a call proves the wrapper was reached after the installer.
     for mock in aws curl docker; do
         cat >"$sandbox/bin/$mock" <<'MOCK'
-#!/usr/bin/env bash
+#!/bin/bash
 printf '%s\n' "$(basename "$0") $*" >>"$WRAPPER_MARKER"
+printf 'wrapper:%s\n' "$(basename "$0")" >>"$PAYLOAD_EVENT_LOG"
 exit 1
 MOCK
         chmod 755 "$sandbox/bin/$mock"
     done
 
     cat >"$sandbox/bin/flock" <<'MOCK'
-#!/usr/bin/env bash
+#!/bin/bash
 exit 0
 MOCK
     chmod 755 "$sandbox/bin/flock"
@@ -425,8 +471,12 @@ run_payload() {
     env \
         PATH="$sandbox/bin:$PATH" \
         WRAPPER_MARKER="$sandbox/wrapper-ran.log" \
+        PAYLOAD_EVENT_LOG="$sandbox/payload-events.log" \
+        PAYLOAD_RUNTIME_DIRECTORY="$sandbox/opt/ec-portfolio/runtime/demo" \
+        PAYLOAD_SYSTEMD_DIRECTORY="$sandbox/etc/systemd/system" \
         DEPLOY_LOCK_FILE="$sandbox/deploy.lock" \
-        bash -c "$payload"
+        MOCK_INSTALLER_FAIL="${MOCK_INSTALLER_FAIL:-false}" \
+        /bin/bash -c "$payload"
 }
 
 payload_sandbox() {
@@ -434,6 +484,7 @@ payload_sandbox() {
     sandbox="$(mktemp -d "$work_directory/payload.XXXXXX")"
     install_payload_mocks "$sandbox"
     : >"$sandbox/wrapper-ran.log"
+    : >"$sandbox/payload-events.log"
     printf '%s' "$sandbox"
 }
 
@@ -441,22 +492,39 @@ installed_directory() {
     printf '%s' "$1/opt/ec-portfolio/runtime/demo"
 }
 
-# An untampered payload installs both files and reaches the wrapper.
+# An untampered payload installs all four artifacts, runs the installer first,
+# and then reaches the installed wrapper without a CI readiness override.
 sandbox="$(payload_sandbox)"
 run_payload "$sandbox" "$(render_payload "$sandbox")" >/dev/null 2>&1 || true
 installed="$(installed_directory "$sandbox")"
-[[ -f "$installed/$WRAPPER_FILE" ]] || fail "A valid payload must install the wrapper."
-[[ -f "$installed/$DEPLOY_FILE" ]] || fail "A valid payload must install deploy-api.sh."
-cmp -s "$installed/$WRAPPER_FILE" "$SCRIPT_DIRECTORY/$WRAPPER_FILE" ||
-    fail "The installed wrapper must be byte identical to the reviewed source."
-cmp -s "$installed/$DEPLOY_FILE" "$SCRIPT_DIRECTORY/$DEPLOY_FILE" ||
-    fail "The installed deploy-api.sh must be byte identical to the reviewed source."
-[[ -x "$installed/$WRAPPER_FILE" ]] || fail "The installed wrapper must be executable."
+for installed_file in "$WRAPPER_FILE" "$DEPLOY_FILE" "$INSTALLER_FILE"; do
+    [[ -f "$installed/$installed_file" ]] ||
+        fail "A valid payload must install $installed_file."
+    cmp -s "$installed/$installed_file" "$SCRIPT_DIRECTORY/$installed_file" ||
+        fail "The installed $installed_file must be byte identical to the reviewed source."
+    [[ -x "$installed/$installed_file" ]] ||
+        fail "The installed $installed_file must be executable."
+done
+[[ -f "$sandbox/etc/systemd/system/$UNIT_FILE" ]] ||
+    fail "A valid payload must install the systemd unit."
+cmp -s "$sandbox/etc/systemd/system/$UNIT_FILE" "$SCRIPT_DIRECTORY/$UNIT_FILE" ||
+    fail "The installed unit must be byte identical to the reviewed source."
 [[ -s "$sandbox/wrapper-ran.log" ]] ||
     fail "A valid payload must reach the installed wrapper."
+first_event="$(sed -n '1p' "$sandbox/payload-events.log")"
+second_event="$(sed -n '2p' "$sandbox/payload-events.log")"
+[[ "$first_event" == "installer" && "$second_event" == wrapper:* ]] ||
+    fail "The installer must succeed before the installed wrapper runs."
 
-# A tampered wrapper fails closed and never runs.
-for tampered_file in "$WRAPPER_FILE" "$DEPLOY_FILE"; do
+# An installer failure must stop the command before the wrapper is reached.
+sandbox="$(payload_sandbox)"
+output="$(MOCK_INSTALLER_FAIL=true run_payload "$sandbox" "$(render_payload "$sandbox")" 2>&1)" &&
+    fail "An installer failure must fail the remote command."
+[[ ! -s "$sandbox/wrapper-ran.log" ]] ||
+    fail "An installer failure must never reach the wrapper."
+
+# Any single tampered artifact fails before mktemp, installation or execution.
+for tampered_file in "$WRAPPER_FILE" "$DEPLOY_FILE" "$INSTALLER_FILE" "$UNIT_FILE"; do
     sandbox="$(payload_sandbox)"
     payload="$(render_payload "$sandbox" | tamper_payload "$tampered_file")"
 
@@ -465,13 +533,14 @@ for tampered_file in "$WRAPPER_FILE" "$DEPLOY_FILE"; do
     assert_contains "$output" "$tampered_file checksum mismatch" \
         "A tampered $tampered_file must be reported as a checksum mismatch."
 
-    installed="$(installed_directory "$sandbox")"
-    [[ ! -f "$installed/$WRAPPER_FILE" ]] ||
-        fail "A tampered $tampered_file must not install the wrapper."
-    [[ ! -f "$installed/$DEPLOY_FILE" ]] ||
-        fail "A tampered $tampered_file must not install deploy-api.sh."
+    [[ ! -e "$(installed_directory "$sandbox")" ]] ||
+        fail "A tampered $tampered_file must not create the runtime install directory."
+    [[ ! -e "$sandbox/etc/systemd/system/$UNIT_FILE" ]] ||
+        fail "A tampered $tampered_file must not install the unit."
     [[ ! -s "$sandbox/wrapper-ran.log" ]] ||
         fail "A tampered $tampered_file must never reach the wrapper."
+    [[ ! -s "$sandbox/payload-events.log" ]] ||
+        fail "A tampered $tampered_file must never reach the installer or wrapper."
 done
 
 printf '[deploy-runtime-test] PASS\n'
