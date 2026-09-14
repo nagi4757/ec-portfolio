@@ -44,6 +44,7 @@ export const adminKo = {
         },
         order: {
             status: {
+                paymentPending: '결제 확인 중',
                 pending: '주문 접수',
                 preparing: '배송 준비 중',
                 shipped: '배송 중',

@@ -31,9 +31,9 @@ export function isApiErrorCode(error: unknown, code: string): error is ApiError 
     return error instanceof ApiError && error.code === code;
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+async function request<T>(path: string, init?: RequestInit, extraHeaders?: Record<string, string>): Promise<T> {
     const token = authStore.getToken();
-    const headers: Record<string, string> = {};
+    const headers: Record<string, string> = { ...extraHeaders };
     if (init?.body !== undefined) headers['Content-Type'] = 'application/json';
     if (token) {
         headers['Authorization'] = `Bearer ${token}`;
@@ -80,8 +80,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
     get: <T>(path: string) => request<T>(path),
-    post: <T>(path: string, body: unknown) =>
-        request<T>(path, { method: 'POST', body: JSON.stringify(body) }),
+    post: <T>(path: string, body: unknown, headers?: Record<string, string>) =>
+        request<T>(path, { method: 'POST', body: JSON.stringify(body) }, headers),
     patch: <T>(path: string, body: unknown) =>
         request<T>(path, { method: 'PATCH', body: JSON.stringify(body) }),
     delete: <T>(path: string) =>

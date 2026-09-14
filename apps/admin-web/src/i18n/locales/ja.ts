@@ -44,6 +44,7 @@ export const adminJa = {
         },
         order: {
             status: {
+                paymentPending: '決済確認中',
                 pending: '注文受付',
                 preparing: '発送準備中',
                 shipped: '発送済み',

@@ -3,11 +3,14 @@ import type { FormEvent } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Link, useNavigate } from 'react-router-dom'
 import { CartAPI } from '@/features/cart/api'
-import { OrderAPI } from '@/features/orders/api'
+import { CheckoutAPI } from '@/features/checkout/api'
+import { cartSignature, clearIdempotencyKey, resolveIdempotencyKey } from '@/features/checkout/idempotency'
 import { isApiErrorCode } from '@/lib/api'
 import { authStore } from '@/lib/authStore'
 import { cartStore } from '@/lib/cartStore'
 import type { CartResponse } from '@/types/cart'
+import { DEMO_PAYMENT_METHODS, DEMO_PAYMENT_METHOD_TRANSLATION_KEY } from '@/types/checkout'
+import type { DemoPaymentMethodId } from '@/types/checkout'
 import type { ShippingAddress } from '@/types/order'
 
 const EMPTY_ADDRESS: ShippingAddress = {
@@ -28,6 +31,10 @@ export default function CheckoutPage() {
     const [loading, setLoading] = useState(true)
     const [submitting, setSubmitting] = useState(false)
     const [errorKey, setErrorKey] = useState<string | null>(null)
+    const [paymentMethodId, setPaymentMethodId] = useState<DemoPaymentMethodId>('mock:success')
+    // An unconfirmed charge is not an error and not a success. It gets its own state
+    // so the page can offer a re-check without pretending the order is paid.
+    const [pendingConfirmation, setPendingConfirmation] = useState(false)
 
     useEffect(() => {
         if (!authStore.isLoggedIn()) {
@@ -48,25 +55,65 @@ export default function CheckoutPage() {
         setAddress((current) => ({ ...current, [field]: value }))
     }
 
-    async function submitOrder(event: FormEvent<HTMLFormElement>) {
+    async function submitCheckout(event: FormEvent<HTMLFormElement>) {
         event.preventDefault()
+        if (!cart) return
+
         setSubmitting(true)
         setErrorKey(null)
+
+        const shippingAddress: ShippingAddress = {
+            ...address,
+            addressLine2: address.addressLine2?.trim() || null,
+        }
+        // The same key is reused for every retry of this attempt. A new one is only
+        // minted when the purchase itself changes, which resolveIdempotencyKey
+        // decides from the payment method, address and cart lines.
+        const idempotencyKey = resolveIdempotencyKey({
+            paymentMethodId,
+            shippingAddress,
+            cartSignature: cartSignature(cart.items),
+        })
+
         try {
-            const order = await OrderAPI.place({
-                shippingAddress: {
-                    ...address,
-                    addressLine2: address.addressLine2?.trim() || null,
-                },
-            })
+            const result = await CheckoutAPI.submit(
+                { shippingAddress, paymentMethodId },
+                idempotencyKey,
+            )
+
+            if (result.outcome === 'PENDING_CONFIRMATION') {
+                // Not a success. The order is reserved, the charge is unresolved, and
+                // the key is kept so a re-check continues the same attempt.
+                setPendingConfirmation(true)
+                return
+            }
+
+            clearIdempotencyKey()
             cartStore.setTotalQuantity(0)
-            navigate(`/orders/${order.id}`, { replace: true })
+            navigate(`/orders/${result.order.id}`, { replace: true })
         } catch (cause) {
-            if (isApiErrorCode(cause, 'PRODUCT_NOT_AVAILABLE')) {
+            // Declined and failed are terminal: the next attempt is a new payment and
+            // must not reuse this key.
+            if (isApiErrorCode(cause, 'PAYMENT_DECLINED')) {
+                clearIdempotencyKey()
+                setPendingConfirmation(false)
+                setErrorKey('store.checkout.declined')
+            } else if (isApiErrorCode(cause, 'PAYMENT_FAILED')) {
+                clearIdempotencyKey()
+                setPendingConfirmation(false)
+                setErrorKey('store.checkout.failed')
+            } else if (isApiErrorCode(cause, 'PAYMENT_IDEMPOTENCY_CONFLICT')) {
+                // The key was reused for a different purchase. Minting a new one here
+                // would hide that from the customer, so the change is surfaced instead.
+                setErrorKey('store.checkout.idempotencyConflict')
+            } else if (isApiErrorCode(cause, 'PRODUCT_NOT_AVAILABLE')) {
                 setErrorKey('store.errors.api.productNotAvailable')
             } else if (isApiErrorCode(cause, 'INSUFFICIENT_STOCK')) {
                 setErrorKey('store.stock.insufficient')
             } else {
+                // Network failures and unknown errors leave the key in place: the
+                // charge may have reached the server, so a retry must be the same
+                // attempt rather than a second payment.
                 setErrorKey('store.checkout.submitFailed')
             }
         } finally {
@@ -125,7 +172,7 @@ export default function CheckoutPage() {
                 </div>
             </section>
 
-            <form onSubmit={submitOrder} style={formStyle}>
+            <form onSubmit={submitCheckout} style={formStyle}>
                 <h2 style={{ margin: 0 }}>{t('store.shipping.title')}</h2>
                 <AddressField
                     label={t('store.shipping.recipientName')}
@@ -181,12 +228,40 @@ export default function CheckoutPage() {
                     autoComplete="tel"
                 />
 
+                <fieldset style={demoPaymentStyle}>
+                    <legend style={{ fontWeight: 700 }}>{t('store.checkout.demoPayment.title')}</legend>
+                    <p style={demoNoticeStyle}>{t('store.checkout.demoPayment.notice')}</p>
+                    {DEMO_PAYMENT_METHODS.map((method) => (
+                        <label key={method} style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                            <input
+                                type="radio"
+                                name="paymentMethodId"
+                                value={method}
+                                checked={paymentMethodId === method}
+                                onChange={() => setPaymentMethodId(method)}
+                            />
+                            <span>{t(DEMO_PAYMENT_METHOD_TRANSLATION_KEY[method])}</span>
+                            <code style={{ color: '#64748b', fontSize: 13 }}>{method}</code>
+                        </label>
+                    ))}
+                </fieldset>
+
+                {pendingConfirmation && (
+                    <div role="status" style={pendingStyle}>
+                        <strong>{t('store.checkout.pendingConfirmation.title')}</strong>
+                        <p style={{ margin: '6px 0 0' }}>{t('store.checkout.pendingConfirmation.description')}</p>
+                    </div>
+                )}
                 {hasUnavailableItems && (
                     <div role="alert" style={{ color: 'crimson' }}>{t('store.checkout.unavailableItems')}</div>
                 )}
                 {errorKey && <div role="alert" style={{ color: 'crimson' }}>{t(errorKey)}</div>}
                 <button type="submit" disabled={submitting || hasUnavailableItems} style={submitStyle}>
-                    {submitting ? t('store.checkout.submitting') : t('store.checkout.submit')}
+                    {submitting
+                        ? t('store.checkout.submitting')
+                        : pendingConfirmation
+                            ? t('store.checkout.pendingConfirmation.retry')
+                            : t('store.checkout.submit')}
                 </button>
             </form>
         </main>
@@ -266,6 +341,29 @@ const inputStyle: React.CSSProperties = {
     borderRadius: 6,
     padding: '9px 10px',
     fontSize: 15,
+}
+
+const demoPaymentStyle: React.CSSProperties = {
+    display: 'grid',
+    gap: 8,
+    border: '1px dashed #f59e0b',
+    borderRadius: 8,
+    padding: 12,
+    background: '#fffbeb',
+}
+
+const demoNoticeStyle: React.CSSProperties = {
+    margin: 0,
+    fontSize: 13,
+    color: '#92400e',
+}
+
+const pendingStyle: React.CSSProperties = {
+    border: '1px solid #0ea5e9',
+    borderRadius: 8,
+    padding: 12,
+    background: '#f0f9ff',
+    color: '#075985',
 }
 
 const submitStyle: React.CSSProperties = {

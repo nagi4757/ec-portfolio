@@ -6,6 +6,8 @@ import com.nagi4757.ec.api.checkout.application.CheckoutOutcome
 import com.nagi4757.ec.api.common.config.ApiErrorCodes
 import com.nagi4757.ec.api.common.config.OpenApiConfig
 import com.nagi4757.ec.api.common.error.ApiErrorCode
+import com.nagi4757.ec.api.common.error.PaymentDeclinedException
+import com.nagi4757.ec.api.common.error.PaymentFailedException
 import com.nagi4757.ec.api.common.security.JwtUserClaims
 import com.nagi4757.ec.api.order.presentation.shared.toDomain
 import com.nagi4757.ec.api.order.presentation.shared.toResponse
@@ -90,13 +92,17 @@ class CheckoutController(
 
         // An unresolved charge is reported as 202 with the reserved order attached,
         // not as an error: the order exists, holds its stock, and is awaiting
-        // reconciliation. A declined or failed charge is a client-visible payment
-        // problem and is reported as 402 through the error handler.
+        // reconciliation.
+        //
+        // A declined or failed charge is raised as an ApplicationException so it
+        // carries the same {code, correlationId} envelope as every other API error.
+        // Returning a success-shaped body with a 402 would force clients to special
+        // case this one endpoint.
         return when (result.outcome) {
             CheckoutOutcome.PAID -> ResponseEntity.status(HttpStatus.CREATED).body(body)
             CheckoutOutcome.PENDING_CONFIRMATION -> ResponseEntity.accepted().body(body)
-            CheckoutOutcome.DECLINED -> ResponseEntity.status(HttpStatus.PAYMENT_REQUIRED).body(body)
-            CheckoutOutcome.FAILED -> ResponseEntity.status(HttpStatus.PAYMENT_REQUIRED).body(body)
+            CheckoutOutcome.DECLINED -> throw PaymentDeclinedException()
+            CheckoutOutcome.FAILED -> throw PaymentFailedException()
         }
     }
 
