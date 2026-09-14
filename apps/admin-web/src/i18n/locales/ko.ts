@@ -43,10 +43,23 @@ export const adminKo = {
             reactivating: '재개 중...',
         },
         order: {
+            refund: {
+                action: '취소 및 환불',
+                refunding: '환불 처리 중...',
+                confirm: '이 주문을 취소하고 환불하시겠습니까?',
+                success: '주문을 취소하고 환불했습니다.',
+                pendingNotice: '환불 결과를 아직 확인하지 못했습니다. 주문은 취소되지 않았습니다.',
+                recheck: '환불 결과 다시 확인',
+                failed: '환불이 거절되었습니다. 주문은 그대로 유지됩니다.',
+                inProgress: '이 주문의 환불이 이미 진행 중입니다.',
+                notEligible: '이 주문은 현재 상태에서 환불할 수 없습니다.',
+                error: '환불에 실패했습니다.',
+            },
             status: {
                 legacyUnpaid: '미결제 (구주문)',
                 paymentPending: '결제 확인 중',
                 pending: '주문 접수',
+                refundPending: '환불 확인 중',
                 preparing: '배송 준비 중',
                 shipped: '배송 중',
                 delivered: '배송 완료',

@@ -100,14 +100,17 @@ describe('order status presentation', () => {
         expect(lookup(storeJa, key)).toBeTruthy()
     })
 
-    it('offers cancellation only for an unpaid legacy order', () => {
+    it('offers direct cancellation only for an unpaid legacy order', () => {
         const detailPage = readSource('features/orders/pages/OrderDetailPage.tsx')
 
-        // PENDING now means paid, and cancelling a paid order needs a refund the
-        // system cannot issue. The button must follow the server's rule.
-        expect(detailPage).toContain("status === 'LEGACY_UNPAID'")
+        // PENDING means paid, so it never gets the plain cancel button. The rule now
+        // lives in types/refund.ts and the page defers to it.
+        expect(detailPage).toContain('isDirectlyCancellable(order.status)')
         expect(detailPage).not.toContain("order.status !== 'PENDING'")
         expect(detailPage).not.toContain("{order.status === 'PENDING' && (")
+
+        const refundTypes = readSource('types/refund.ts')
+        expect(refundTypes).toContain("status === 'LEGACY_UNPAID'")
     })
 
     it('refreshes the cart badge from the server after a successful checkout', () => {
