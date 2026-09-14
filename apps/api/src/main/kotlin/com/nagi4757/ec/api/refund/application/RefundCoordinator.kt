@@ -6,6 +6,8 @@ import com.nagi4757.ec.api.common.error.ResourceNotFoundException
 import com.nagi4757.ec.api.order.domain.repository.OrderRepository
 import com.nagi4757.ec.api.payment.application.PaymentGateway
 import com.nagi4757.ec.api.payment.application.RefundPaymentRequest
+import com.nagi4757.ec.api.payment.domain.model.PaymentAttempt
+import com.nagi4757.ec.api.payment.domain.model.PaymentAttemptStatus
 import com.nagi4757.ec.api.payment.domain.repository.PaymentAttemptRepository
 import com.nagi4757.ec.api.refund.domain.model.RefundAttempt
 import com.nagi4757.ec.api.refund.domain.model.RefundAttemptStatus
@@ -66,7 +68,7 @@ class RefundCoordinator(
             // back, including the REFUND_PENDING transition, so the only thing left
             // is to adopt the winner's attempt. Reloaded here, outside any
             // transaction, rather than being papered over inside R1.
-            log.info("Refund key {} was claimed concurrently; adopting stored attempt", command.idempotencyKey)
+            log.info("Refund for order {} was claimed concurrently; adopting stored attempt", command.orderId)
             val winner = refundAttemptRepository.findByIdempotencyKey(command.idempotencyKey)
                 ?: throw conflict
             return resume(command, winner)
@@ -93,10 +95,21 @@ class RefundCoordinator(
             log.warn("User {} presented a refund key belonging to another account; refusing", command.userId)
             throw RefundIdempotencyConflictException()
         }
-        // The key must also describe the same refund. Everything in the fingerprint
-        // is server-side state, so a mismatch means the key was reused for a
-        // different order or a different charge.
         if (attempt.orderId != command.orderId) {
+            throw RefundIdempotencyConflictException()
+        }
+
+        // Recompute the fingerprint from what is persisted now and compare it with
+        // what was stored when the refund opened. Storing it without ever checking
+        // it would document an invariant nothing enforces; this is the check that
+        // makes a key describing a different charge or amount fail closed.
+        val expected = RefundRequestFingerprint.from(
+            orderId = attempt.orderId,
+            paymentAttemptId = attempt.paymentAttemptId,
+            amountJpy = attempt.amountJpy
+        )
+        if (expected != attempt.requestFingerprint) {
+            log.warn("Refund attempt {} no longer matches its stored fingerprint; refusing", attempt.id)
             throw RefundIdempotencyConflictException()
         }
 
@@ -114,17 +127,14 @@ class RefundCoordinator(
     }
 
     private fun drive(command: RefundCommand, attempt: RefundAttempt): RefundResult {
-        val charge = paymentAttemptRepository.findSuccessfulByOrderId(attempt.orderId)
-            ?: throw ResourceNotFoundException(ApiErrorCode.ORDER_NOT_FOUND)
-        val externalPaymentId = requireNotNull(charge.externalPaymentId) {
-            "Charge ${charge.id} is SUCCESS without an external payment id"
-        }
+        val charge = resolveCharge(attempt)
 
         val result = paymentGateway.refund(
             RefundPaymentRequest(
-                // Amount and reference come from the stored charge, never the request.
-                externalPaymentId = externalPaymentId,
-                amountJpy = attempt.amountJpy,
+                // Both come from the charge this refund was opened against, never
+                // from the request and never from a fresh search.
+                externalPaymentId = requireNotNull(charge.externalPaymentId),
+                amountJpy = charge.amountJpy,
                 idempotencyKey = command.idempotencyKey
             )
         )
@@ -132,6 +142,36 @@ class RefundCoordinator(
         val applied = resultService.record(requireNotNull(attempt.id), result)
 
         return finalizeAndReport(applied.attempt)
+    }
+
+    /**
+     * The charge this refund was opened against, resolved through the id the attempt
+     * stored rather than by searching the order again.
+     *
+     * Searching would let the charge being reversed drift away from the one R1
+     * recorded -- a different row could sort first, or the order could acquire
+     * another settled charge. Every property the refund depends on is re-checked
+     * here, so a mismatch stops the refund instead of returning money against the
+     * wrong payment.
+     */
+    private fun resolveCharge(attempt: RefundAttempt): PaymentAttempt {
+        val charge = paymentAttemptRepository.findById(attempt.paymentAttemptId)
+            ?: throw ResourceNotFoundException(ApiErrorCode.ORDER_NOT_FOUND)
+
+        check(charge.orderId == attempt.orderId) {
+            "Refund ${attempt.id} points at charge ${charge.id}, which belongs to order ${charge.orderId}"
+        }
+        check(charge.status == PaymentAttemptStatus.SUCCESS) {
+            "Refund ${attempt.id} points at charge ${charge.id}, which is ${charge.status}"
+        }
+        check(!charge.externalPaymentId.isNullOrBlank()) {
+            "Charge ${charge.id} is SUCCESS without an external payment id"
+        }
+        check(charge.amountJpy == attempt.amountJpy) {
+            "Refund ${attempt.id} was opened for ${attempt.amountJpy} but charge ${charge.id} took ${charge.amountJpy}"
+        }
+
+        return charge
     }
 
     private fun finalizeAndReport(attempt: RefundAttempt): RefundResult {

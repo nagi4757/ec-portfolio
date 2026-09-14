@@ -429,6 +429,8 @@ class RecordingPaymentAttemptRepository : PaymentAttemptRepository {
         byKey[attempt.idempotencyKey] = attempt
     }
 
+    override fun findById(id: Long): PaymentAttempt? = byKey.values.firstOrNull { it.id == id }
+
     override fun findActiveByUserId(userId: Long): PaymentAttempt? =
         byKey.values.firstOrNull { !it.status.isTerminal() }
 

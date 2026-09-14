@@ -59,6 +59,22 @@ enum class RefundAttemptStatus {
     /** A settled fact that must never be rewritten. */
     fun isTerminal(): Boolean = this == REFUNDED || this == FAILED
 
-    fun canTransitionTo(target: RefundAttemptStatus): Boolean =
-        !isTerminal() && target != PENDING
+    /**
+     * PENDING -> REFUNDED | FAILED | UNKNOWN
+     * UNKNOWN -> REFUNDED | UNKNOWN
+     *
+     * UNKNOWN may not become FAILED. Once the provider has failed to tell us what
+     * happened, the refund may already have gone through; a later "failed" answer to
+     * a duplicate request describes that retry, not the original. Accepting it would
+     * put the order back into a paid state while the customer's money is gone.
+     *
+     * Only a provider contract that can prove the original refund definitively
+     * failed would justify reopening this, which is a question for the PAY.JP
+     * adapter.
+     */
+    fun canTransitionTo(target: RefundAttemptStatus): Boolean = when (this) {
+        PENDING -> target != PENDING
+        UNKNOWN -> target == REFUNDED || target == UNKNOWN
+        REFUNDED, FAILED -> false
+    }
 }

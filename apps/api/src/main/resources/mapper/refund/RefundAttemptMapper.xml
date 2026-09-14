@@ -81,17 +81,29 @@
     </select>
 
     <!--
-        Only a non-terminal attempt may be written. Without the guard a concurrent
-        retry could overwrite a recorded REFUNDED and destroy the only durable
-        evidence that money was returned. Zero affected rows is not an error: another
-        writer settled it first, and the caller reloads to adopt that decision.
+        Only a legal transition may be written.
+
+        A terminal attempt is never rewritten: a concurrent retry must not overwrite
+        a recorded REFUNDED and destroy the only durable evidence that money was
+        returned. UNKNOWN additionally may not become FAILED, because the original
+        refund may have succeeded and a later failure describes the retry rather than
+        the original.
+
+        external_refund_id is only replaced by a non-blank value, so an UNKNOWN reply
+        carrying nothing cannot erase a reference an earlier reply supplied.
+
+        Zero affected rows is not an error: another writer settled it first, or the
+        transition is not allowed, and the caller reloads to adopt the stored state.
     -->
     <update id="updateRefundAttemptResult">
         UPDATE refund_attempts
         SET status = #{status},
-            external_refund_id = #{externalRefundId}
+            external_refund_id = COALESCE(NULLIF(TRIM(#{externalRefundId}), ''), external_refund_id)
         WHERE id = #{id}
-          AND status IN ('PENDING', 'UNKNOWN')
+          AND (
+              status = 'PENDING'
+              OR (status = 'UNKNOWN' AND #{status} IN ('REFUNDED', 'UNKNOWN'))
+          )
     </update>
 
 </mapper>

@@ -225,9 +225,15 @@ class RefundOrchestrationIntegrationTest @Autowired constructor(
             start.countDown()
             val results = futures.map { it.get(30, TimeUnit.SECONDS) }
 
+            // Exactly one refund may run. A loser is told either that a refund is in
+            // progress, or -- if the winner already settled and cancelled the order
+            // before this thread took the lock -- that the order is no longer
+            // refundable. Both are correct refusals; which one depends on timing.
             assertThat(results.count { it == null }).isEqualTo(1)
-            assertThat(results.count { it == ApiErrorCode.REFUND_ATTEMPT_IN_PROGRESS })
-                .isEqualTo(3)
+            assertThat(results.filterNotNull()).allMatch {
+                it == ApiErrorCode.REFUND_ATTEMPT_IN_PROGRESS || it == ApiErrorCode.REFUND_NOT_ELIGIBLE
+            }
+            assertThat(results.filterNotNull()).hasSize(3)
             // One refund, one restoration.
             assertThat(productRepository.findById(fixture.productId)?.stockQuantity).isEqualTo(10)
             assertThat(refundCountForOrder(fixture.orderId)).isEqualTo(1)
@@ -396,6 +402,247 @@ class RefundOrchestrationIntegrationTest @Autowired constructor(
         cleanup(fixture)
     }
 
+
+    // --- review findings: H-1, H-2, H-3, M-5, M-2 ---------------------------------
+
+    @Test
+    fun `an order may hold only one successful charge`() {
+        val fixture = paidOrder(stock = 10, quantity = 3)
+        val chargeId = requireNotNull(paymentAttemptRepository.findSuccessfulByOrderId(fixture.orderId)?.id)
+
+        // Retries that never settled, or settled badly, are legitimate and may repeat.
+        listOf("PENDING", "FAILED", "TIMEOUT", "DECLINED").forEach { status ->
+            jdbcTemplate.update(
+                """
+                INSERT INTO payment_attempts (idempotency_key, request_fingerprint, amount_jpy, status, order_id)
+                VALUES (?, ?, ?, ?, ?)
+                """.trimIndent(),
+                "retry-${'$'}status-${UUID.randomUUID()}", FINGERPRINT, 1_000L, status, fixture.orderId
+            )
+        }
+
+        // A second settled charge is not: the refund amount and payment reference
+        // would stop being well defined.
+        assertThrows<org.springframework.dao.DuplicateKeyException> {
+            jdbcTemplate.update(
+                """
+                INSERT INTO payment_attempts (idempotency_key, request_fingerprint, amount_jpy, status, order_id, external_payment_id)
+                VALUES (?, ?, ?, 'SUCCESS', ?, 'mock-payment:second')
+                """.trimIndent(),
+                "second-success-${UUID.randomUUID()}", FINGERPRINT, 1_000L, fixture.orderId
+            )
+        }
+        // Promoting one of the retries is refused for the same reason.
+        assertThrows<org.springframework.dao.DuplicateKeyException> {
+            jdbcTemplate.update(
+                """
+                UPDATE payment_attempts SET status = 'SUCCESS', external_payment_id = 'mock-payment:promoted'
+                WHERE order_id = ? AND id <> ?
+                """.trimIndent(),
+                fixture.orderId, chargeId
+            )
+        }
+
+        cleanup(fixture)
+    }
+
+    @Test
+    fun `a refund reverses the charge it was opened against, not whatever the order holds`() {
+        val fixture = paidOrder(stock = 10, quantity = 3)
+        val attempt = refundRequestService.start(refundCommand(fixture)) as RefundStartOutcome.Started
+        val chargeId = requireNotNull(paymentAttemptRepository.findSuccessfulByOrderId(fixture.orderId)?.id)
+
+        // The stored link is what the refund follows.
+        assertThat(attempt.attempt.paymentAttemptId).isEqualTo(chargeId)
+
+        // Point the attempt at a charge belonging to a different order. The stored
+        // fingerprint covers paymentAttemptId, so this is caught before the provider
+        // is ever reached.
+        val other = paidOrder(stock = 10, quantity = 1)
+        val otherChargeId = requireNotNull(paymentAttemptRepository.findSuccessfulByOrderId(other.orderId)?.id)
+        jdbcTemplate.update(
+            "UPDATE refund_attempts SET payment_attempt_id = ? WHERE id = ?",
+            otherChargeId, attempt.attempt.id
+        )
+
+        val refused = assertThrows<ApplicationException> { refundCoordinator.refund(refundCommand(fixture)) }
+        assertThat(refused.errorCode).isEqualTo(ApiErrorCode.REFUND_IDEMPOTENCY_CONFLICT)
+        assertThat(orderRepository.findById(fixture.orderId)?.status).isEqualTo(OrderStatus.REFUND_PENDING)
+
+        jdbcTemplate.update(
+            "UPDATE refund_attempts SET payment_attempt_id = ? WHERE id = ?",
+            chargeId, attempt.attempt.id
+        )
+        cleanup(other)
+        cleanup(fixture)
+    }
+
+    @Test
+    fun `a charge that no longer belongs to the order stops the refund`() {
+        val fixture = paidOrder(stock = 10, quantity = 3)
+        val started = refundRequestService.start(refundCommand(fixture)) as RefundStartOutcome.Started
+
+        // A bare order with no settled charge of its own: V13 correctly refuses to
+        // give an order a second SUCCESS, so the charge is moved somewhere free.
+        val strayUser = newUser()
+        jdbcTemplate.update(
+            "INSERT INTO orders (user_id, status, total_amount) VALUES (?, 'PENDING', ?)",
+            strayUser, 1_000L
+        )
+        val strayOrderId = requireNotNull(
+            jdbcTemplate.queryForObject("SELECT LAST_INSERT_ID()", Long::class.java)
+        )
+
+        // Move the charge itself, leaving the refund's stored id and fingerprint
+        // untouched. Only resolveCharge's own consistency checks can notice this, and
+        // they must stop the refund rather than return money against a payment that
+        // is no longer this order's.
+        jdbcTemplate.update(
+            "UPDATE payment_attempts SET order_id = ? WHERE id = ?",
+            strayOrderId, started.attempt.paymentAttemptId
+        )
+
+        assertThrows<IllegalStateException> { refundCoordinator.refund(refundCommand(fixture)) }
+        assertThat(orderRepository.findById(fixture.orderId)?.status).isEqualTo(OrderStatus.REFUND_PENDING)
+
+        jdbcTemplate.update(
+            "UPDATE payment_attempts SET order_id = ? WHERE id = ?",
+            fixture.orderId, started.attempt.paymentAttemptId
+        )
+        jdbcTemplate.update("DELETE FROM orders WHERE id = ?", strayOrderId)
+        jdbcTemplate.update("DELETE FROM users WHERE id = ?", strayUser)
+        cleanup(fixture)
+    }
+
+    @Test
+    fun `a stored fingerprint that no longer matches is refused`() {
+        val fixture = paidOrder(stock = 10, quantity = 3)
+        val started = refundRequestService.start(refundCommand(fixture)) as RefundStartOutcome.Started
+
+        // Tamper with the amount the refund was opened for. The fingerprint check is
+        // what notices; without it the refund would proceed against a changed value.
+        jdbcTemplate.update(
+            "UPDATE refund_attempts SET amount_jpy = amount_jpy + 1 WHERE id = ?",
+            started.attempt.id
+        )
+
+        val refused = assertThrows<ApplicationException> { refundCoordinator.refund(refundCommand(fixture)) }
+
+        assertThat(refused.errorCode).isEqualTo(ApiErrorCode.REFUND_IDEMPOTENCY_CONFLICT)
+        assertThat(orderRepository.findById(fixture.orderId)?.status).isEqualTo(OrderStatus.REFUND_PENDING)
+
+        cleanup(fixture)
+    }
+
+    @Test
+    fun `a pending refund that is refused restores the original order status`() {
+        val fixture = paidOrder(stock = 10, quantity = 3)
+        forceFailedRefund(fixture)
+
+        val result = refundCoordinator.refund(refundCommand(fixture))
+
+        assertThat(result.outcome).isEqualTo(RefundOutcome.FAILED)
+        assertThat(attemptFor(fixture).status).isEqualTo(RefundAttemptStatus.FAILED)
+        assertThat(orderRepository.findById(fixture.orderId)?.status).isEqualTo(OrderStatus.PENDING)
+        assertThat(productRepository.findById(fixture.productId)?.stockQuantity).isEqualTo(7)
+
+        cleanup(fixture)
+    }
+
+    @Test
+    fun `an unresolved refund is never turned into a failure by a later answer`() {
+        val fixture = paidOrder(stock = 10, quantity = 3)
+        forceUnknownRefund(fixture)
+        val first = refundCoordinator.refund(refundCommand(fixture))
+        assertThat(first.outcome).isEqualTo(RefundOutcome.PENDING_CONFIRMATION)
+
+        val attemptId = requireNotNull(attemptFor(fixture).id)
+        val applied = refundResultService.record(
+            attemptId,
+            RefundPaymentResult(RefundPaymentStatus.REFUND_FAILED)
+        )
+
+        // The money may already have gone back, so a later failure describes the
+        // retry, not the original refund. Accepting it would restore a paid order
+        // the customer has already been repaid for.
+        assertThat(applied.applied).isFalse()
+        assertThat(applied.attempt.status).isEqualTo(RefundAttemptStatus.UNKNOWN)
+        assertThat(orderRepository.findById(fixture.orderId)?.status).isEqualTo(OrderStatus.REFUND_PENDING)
+        assertThat(productRepository.findById(fixture.productId)?.stockQuantity).isEqualTo(7)
+
+        cleanup(fixture)
+    }
+
+    @Test
+    fun `an unresolved refund can still settle as refunded`() {
+        val fixture = paidOrder(stock = 10, quantity = 3)
+        forceUnknownRefund(fixture)
+        refundCoordinator.refund(refundCommand(fixture))
+        val attemptId = requireNotNull(attemptFor(fixture).id)
+
+        val applied = refundResultService.record(
+            attemptId,
+            RefundPaymentResult(RefundPaymentStatus.REFUNDED, "mock-refund:late")
+        )
+        assertThat(applied.applied).isTrue()
+
+        val finalized = refundFinalizeService.finalize(applied.attempt)
+
+        assertThat(finalized.changed).isTrue()
+        assertThat(finalized.order.status).isEqualTo(OrderStatus.CANCELLED)
+        assertThat(productRepository.findById(fixture.productId)?.stockQuantity).isEqualTo(10)
+
+        cleanup(fixture)
+    }
+
+    @Test
+    fun `an unresolved reply cannot erase a refund reference already recorded`() {
+        val fixture = paidOrder(stock = 10, quantity = 3)
+        val started = refundRequestService.start(refundCommand(fixture)) as RefundStartOutcome.Started
+        val attemptId = requireNotNull(started.attempt.id)
+
+        refundResultService.record(attemptId, RefundPaymentResult(RefundPaymentStatus.REFUND_UNKNOWN, "mock-refund:partial"))
+        assertThat(attemptFor(fixture).externalRefundId).isEqualTo("mock-refund:partial")
+
+        val applied = refundResultService.record(attemptId, RefundPaymentResult(RefundPaymentStatus.REFUND_UNKNOWN, null))
+
+        assertThat(applied.attempt.externalRefundId).isEqualTo("mock-refund:partial")
+
+        cleanup(fixture)
+    }
+
+    @Test
+    fun `the database refuses a refund opened from a non refundable status`() {
+        val fixture = paidOrder(stock = 10, quantity = 3)
+
+        assertThrows<org.springframework.dao.DataIntegrityViolationException> {
+            jdbcTemplate.update(
+                """
+                INSERT INTO refund_attempts
+                    (idempotency_key, request_fingerprint, order_id, payment_attempt_id,
+                     amount_jpy, status, order_status_before)
+                VALUES (?, ?, ?, ?, ?, 'PENDING', 'SHIPPED')
+                """.trimIndent(),
+                "bad-before-${UUID.randomUUID()}",
+                FINGERPRINT,
+                fixture.orderId,
+                requireNotNull(paymentAttemptRepository.findSuccessfulByOrderId(fixture.orderId)?.id),
+                1_000L
+            )
+        }
+
+        cleanup(fixture)
+    }
+
+    @Test
+    fun `V13 applied`() {
+        val applied = jdbcTemplate.queryForList(
+            "SELECT version, success FROM flyway_schema_history WHERE version = '13'"
+        )
+        assertThat(applied).hasSize(1)
+        assertThat(applied.single()["success"].toString()).isIn("1", "true")
+    }
+
     // --- helpers ----------------------------------------------------------------------
 
     private class Fixture(
@@ -518,6 +765,9 @@ class RefundOrchestrationIntegrationTest @Autowired constructor(
     }
 
     private companion object {
+        /** A syntactically valid fingerprint for rows inserted directly by a test. */
+        val FINGERPRINT = "c".repeat(64)
+
         val SHIPPING_ADDRESS = ShippingAddress(
             recipientName = "山田 太郎",
             postalCode = "100-0001",

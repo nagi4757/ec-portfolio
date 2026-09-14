@@ -19,6 +19,15 @@ interface PaymentAttemptRepository {
     fun findByIdempotencyKey(idempotencyKey: String): PaymentAttempt?
 
     /**
+     * The charge a refund recorded when it started.
+     *
+     * A refund resolves its charge through this stored id rather than by searching
+     * the order again, so the charge it reverses is always the one it was opened
+     * against.
+     */
+    fun findById(id: Long): PaymentAttempt?
+
+    /**
      * The user's unsettled attempt, if any.
      *
      * PENDING and TIMEOUT both mean "a charge may be in flight". Starting a second

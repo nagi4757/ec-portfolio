@@ -39,6 +39,8 @@ class MyBatisPaymentAttemptRepository(
     override fun findByIdempotencyKey(idempotencyKey: String): PaymentAttempt? =
         mapper.selectByIdempotencyKey(idempotencyKey)?.toDomain()
 
+    override fun findById(id: Long): PaymentAttempt? = mapper.selectById(id)?.toDomain()
+
     override fun findActiveByUserId(userId: Long): PaymentAttempt? =
         mapper.selectActiveByUserId(userId)?.toDomain()
 
