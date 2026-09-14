@@ -8,5 +8,17 @@ interface CartRepository {
     fun setQuantity(userId: Long, productId: Long, quantity: Int)
     fun remove(userId: Long, productId: Long)
     fun clear(userId: Long)
+
+    /**
+     * Subtracts exactly the quantity a checkout reserved, leaving anything the
+     * customer added afterwards.
+     *
+     * A blanket clear would discard items added while the payment was in flight,
+     * and a read-then-write would race with a concurrent add. The subtraction is
+     * therefore a single atomic operation.
+     *
+     * @return the quantity left on the line; 0 when the line was removed.
+     */
+    fun removeSnapshotQuantity(userId: Long, productId: Long, quantity: Int): Int
 }
 

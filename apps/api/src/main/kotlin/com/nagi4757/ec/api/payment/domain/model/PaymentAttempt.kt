@@ -9,6 +9,7 @@ data class PaymentAttempt(
     val amountJpy: Long,
     val status: PaymentAttemptStatus,
     val externalPaymentId: String?,
+    val orderId: Long?,
     val createdAt: LocalDateTime?,
     val updatedAt: LocalDateTime?
 ) {
@@ -28,5 +29,15 @@ enum class PaymentAttemptStatus {
     SUCCESS,
     DECLINED,
     FAILED,
-    TIMEOUT
+    TIMEOUT;
+
+    /**
+     * A terminal attempt is a settled fact and must never be rewritten. A
+     * non-terminal one may still be driven to an outcome by a retry, because the
+     * gateway is idempotent and replays the original result for the same key.
+     */
+    fun isTerminal(): Boolean = this == SUCCESS || this == DECLINED || this == FAILED
+
+    fun canTransitionTo(target: PaymentAttemptStatus): Boolean =
+        !isTerminal() && target != PENDING
 }

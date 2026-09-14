@@ -21,6 +21,20 @@ enum class ApiErrorCode(
     INSUFFICIENT_STOCK(HttpStatus.CONFLICT, "Product stock is insufficient"),
     INVALID_ORDER_STATUS(HttpStatus.BAD_REQUEST, "Order status is invalid"),
     INVALID_ORDER_TRANSITION(HttpStatus.CONFLICT, "Order status transition is not allowed"),
+    ORDER_CANCELLATION_REQUIRES_REFUND(
+        HttpStatus.CONFLICT,
+        "A paid order cannot be cancelled without a refund"
+    ),
+    PAYMENT_DECLINED(HttpStatus.PAYMENT_REQUIRED, "Payment was declined"),
+    PAYMENT_FAILED(HttpStatus.PAYMENT_REQUIRED, "Payment could not be processed"),
+    PAYMENT_PENDING_CONFIRMATION(
+        HttpStatus.ACCEPTED,
+        "Payment result is not yet confirmed"
+    ),
+    PAYMENT_IDEMPOTENCY_CONFLICT(
+        HttpStatus.CONFLICT,
+        "Idempotency key was reused with a different request"
+    ),
     EMAIL_ALREADY_EXISTS(HttpStatus.CONFLICT, "Email already exists"),
     INVALID_CREDENTIALS(HttpStatus.UNAUTHORIZED, "Invalid credentials"),
     USER_CREATION_FAILED(HttpStatus.INTERNAL_SERVER_ERROR, "User creation failed"),

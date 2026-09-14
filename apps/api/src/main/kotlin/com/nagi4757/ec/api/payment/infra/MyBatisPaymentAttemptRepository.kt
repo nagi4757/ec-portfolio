@@ -2,6 +2,7 @@ package com.nagi4757.ec.api.payment.infra
 
 import com.nagi4757.ec.api.payment.domain.model.PaymentAttempt
 import com.nagi4757.ec.api.payment.domain.model.PaymentAttemptStatus
+import com.nagi4757.ec.api.payment.domain.repository.AppliedPaymentResult
 import com.nagi4757.ec.api.payment.domain.repository.PaymentAttemptRepository
 import com.nagi4757.ec.api.payment.infra.mapper.PaymentAttemptMapper
 import com.nagi4757.ec.api.payment.infra.mapper.PaymentAttemptRecord
@@ -14,7 +15,8 @@ class MyBatisPaymentAttemptRepository(
     override fun createPending(
         idempotencyKey: String,
         requestFingerprint: String,
-        amountJpy: Long
+        amountJpy: Long,
+        orderId: Long
     ): PaymentAttempt {
         val pending = PaymentAttempt(
             id = null,
@@ -23,6 +25,7 @@ class MyBatisPaymentAttemptRepository(
             amountJpy = amountJpy,
             status = PaymentAttemptStatus.PENDING,
             externalPaymentId = null,
+            orderId = orderId,
             createdAt = null,
             updatedAt = null
         )
@@ -36,13 +39,21 @@ class MyBatisPaymentAttemptRepository(
     override fun findByIdempotencyKey(idempotencyKey: String): PaymentAttempt? =
         mapper.selectByIdempotencyKey(idempotencyKey)?.toDomain()
 
-    override fun updateResult(
+    override fun applyResult(
         id: Long,
         status: PaymentAttemptStatus,
         externalPaymentId: String?
-    ): Boolean {
+    ): AppliedPaymentResult {
         require(status != PaymentAttemptStatus.PENDING) { "Payment result status must not be PENDING" }
-        return mapper.updatePaymentAttemptResult(id, status.name, externalPaymentId) == 1
+
+        // The statement only matches a non-terminal attempt. Zero rows therefore
+        // means another writer settled it first, so the stored outcome wins and this
+        // caller adopts it rather than overwriting it or failing.
+        val applied = mapper.updatePaymentAttemptResult(id, status.name, externalPaymentId) == 1
+        val attempt = mapper.selectById(id)?.toDomain()
+            ?: error("Payment attempt $id could not be reloaded")
+
+        return AppliedPaymentResult(attempt = attempt, applied = applied)
     }
 
     private fun PaymentAttempt.toRecord() = PaymentAttemptRecord(
@@ -52,6 +63,7 @@ class MyBatisPaymentAttemptRepository(
         amountJpy = amountJpy,
         status = status.name,
         externalPaymentId = externalPaymentId,
+        orderId = orderId,
         createdAt = createdAt,
         updatedAt = updatedAt
     )
@@ -63,6 +75,7 @@ class MyBatisPaymentAttemptRepository(
         amountJpy = amountJpy,
         status = PaymentAttemptStatus.valueOf(status),
         externalPaymentId = externalPaymentId,
+        orderId = orderId,
         createdAt = createdAt,
         updatedAt = updatedAt
     )

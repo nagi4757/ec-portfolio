@@ -3,6 +3,7 @@ package com.nagi4757.ec.api.cart.infra
 import com.nagi4757.ec.api.cart.domain.model.CartItem
 import com.nagi4757.ec.api.cart.domain.repository.CartRepository
 import org.springframework.data.redis.core.StringRedisTemplate
+import org.springframework.data.redis.core.script.RedisScript
 import org.springframework.stereotype.Repository
 
 @Repository
@@ -37,6 +38,45 @@ class RedisCartRepository(
         redis.delete(key(userId))
     }
 
+    override fun removeSnapshotQuantity(userId: Long, productId: Long, quantity: Int): Int {
+        require(quantity > 0) { "Snapshot quantity must be positive" }
+
+        val remaining = redis.execute(
+            REMOVE_SNAPSHOT_QUANTITY,
+            listOf(key(userId)),
+            productId.toString(),
+            quantity.toString()
+        ) ?: 0L
+
+        return remaining.toInt()
+    }
+
     private fun key(userId: Long): String = "cart:$userId"
+
+    private companion object {
+        /**
+         * Read, subtract and write in one atomic step.
+         *
+         * Splitting this into HINCRBY followed by a conditional HDEL would let a
+         * concurrent add land between the two commands, and the delete would then
+         * discard the quantity the customer had just added.
+         */
+        val REMOVE_SNAPSHOT_QUANTITY: RedisScript<Long> = RedisScript.of(
+            """
+            local current = redis.call('HGET', KEYS[1], ARGV[1])
+            if not current then
+                return 0
+            end
+            local remaining = tonumber(current) - tonumber(ARGV[2])
+            if remaining <= 0 then
+                redis.call('HDEL', KEYS[1], ARGV[1])
+                return 0
+            end
+            redis.call('HSET', KEYS[1], ARGV[1], remaining)
+            return remaining
+            """.trimIndent(),
+            Long::class.java
+        )
+    }
 }
 
