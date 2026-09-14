@@ -19,6 +19,18 @@ interface PaymentAttemptRepository {
     fun findByIdempotencyKey(idempotencyKey: String): PaymentAttempt?
 
     /**
+     * The user's unsettled attempt, if any.
+     *
+     * PENDING and TIMEOUT both mean "a charge may be in flight". Starting a second
+     * checkout while one exists risks charging the customer twice, so callers use
+     * this to refuse or resume instead.
+     *
+     * Only meaningful while the caller holds the user lock taken in T1; without it
+     * two requests can both read "no active attempt".
+     */
+    fun findActiveByUserId(userId: Long): PaymentAttempt?
+
+    /**
      * Records a gateway outcome against a non-terminal attempt and returns the
      * attempt as it now stands.
      *

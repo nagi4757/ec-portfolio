@@ -31,6 +31,10 @@ enum class ApiErrorCode(
         HttpStatus.ACCEPTED,
         "Payment result is not yet confirmed"
     ),
+    PAYMENT_ATTEMPT_IN_PROGRESS(
+        HttpStatus.CONFLICT,
+        "Another payment for this account is still in progress"
+    ),
     PAYMENT_IDEMPOTENCY_CONFLICT(
         HttpStatus.CONFLICT,
         "Idempotency key was reused with a different request"

@@ -2,6 +2,14 @@ package com.nagi4757.ec.api.order.domain.model
 
 enum class OrderStatus {
     /**
+     * An order created before checkout existed, when orders could be placed without
+     * paying. It is not part of the paid lifecycle: it must never be prepared or
+     * shipped, and because no payment was ever taken, cancelling one owes nobody a
+     * refund.
+     */
+    LEGACY_UNPAID,
+
+    /**
      * Reserved: stock is held and a payment attempt exists, but the payment outcome
      * is not yet established. An order must never be prepared or shipped from here.
      */
@@ -26,6 +34,8 @@ enum class OrderStatus {
      * unresolved, so no operator decision can be correct yet.
      */
     fun canTransitionTo(target: OrderStatus): Boolean = when (this) {
+        // Never shippable: nobody paid for it.
+        LEGACY_UNPAID -> target == CANCELLED
         PAYMENT_PENDING -> false
         PENDING -> target == PREPARING
         PREPARING -> target == SHIPPED
@@ -43,15 +53,20 @@ enum class OrderStatus {
     fun canCompensateTo(target: OrderStatus): Boolean =
         this == PAYMENT_PENDING && target == CANCELLED
 
-    /** True once money has been captured for this order. */
+    /**
+     * True once money has been captured for this order.
+     *
+     * LEGACY_UNPAID is excluded on purpose: those orders predate checkout and carry
+     * no payment attempt, so the refund-required rule does not apply to them.
+     */
     fun isPaid(): Boolean = this == PENDING ||
         this == PREPARING ||
         this == SHIPPED ||
         this == DELIVERED
 
     /**
-     * Direct customer cancellation is disabled in every state: a reserved order has
-     * an unresolved payment, and a paid order needs a refund.
+     * Direct customer cancellation is only possible for an unpaid legacy order. A
+     * reserved order has an unresolved payment, and a paid order needs a refund.
      */
-    fun isUserCancellable(): Boolean = false
+    fun isUserCancellable(): Boolean = this == LEGACY_UNPAID
 }

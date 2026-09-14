@@ -40,6 +40,13 @@ class PaymentFailedException : ApplicationException(ApiErrorCode.PAYMENT_FAILED)
 class PaymentPendingConfirmationException :
     ApplicationException(ApiErrorCode.PAYMENT_PENDING_CONFIRMATION)
 
+/**
+ * A different, unsettled payment already exists for this customer. Starting another
+ * one could charge them twice, so the second request is refused rather than queued.
+ */
+class PaymentAttemptInProgressException :
+    ApplicationException(ApiErrorCode.PAYMENT_ATTEMPT_IN_PROGRESS)
+
 class PaymentIdempotencyConflictException :
     ApplicationException(ApiErrorCode.PAYMENT_IDEMPOTENCY_CONFLICT)
 

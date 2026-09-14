@@ -27,6 +27,24 @@ interface UserMapper {
     )
     fun selectByEmail(email: String): UserRecord?
 
+    /**
+     * Takes a row lock on the user for the rest of the transaction.
+     *
+     * Checkout serialises on this: without it, two requests from the same customer
+     * can each look for an in-flight payment, each find none, and each start a
+     * charge. Locking the user is enough because every reservation for that customer
+     * has to pass through here first.
+     */
+    @Select(
+        """
+        SELECT id
+        FROM users
+        WHERE id = #{id}
+        FOR UPDATE
+        """
+    )
+    fun lockById(id: Long): Long?
+
     @Insert(
         """
         INSERT INTO users (email, password_hash, name, role, created_at)

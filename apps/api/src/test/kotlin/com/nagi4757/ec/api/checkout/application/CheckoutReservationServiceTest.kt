@@ -1,5 +1,7 @@
 package com.nagi4757.ec.api.checkout.application
 
+import com.nagi4757.ec.api.auth.domain.model.User
+import com.nagi4757.ec.api.auth.domain.repository.UserRepository
 import com.nagi4757.ec.api.cart.application.CartLine
 import com.nagi4757.ec.api.cart.application.CartService
 import com.nagi4757.ec.api.cart.application.CartView
@@ -38,7 +40,7 @@ class CheckoutReservationServiceTest {
         `when`(fixture.cartService.getCart(USER_ID)).thenReturn(cartWith(quantity = 2))
         `when`(fixture.productRepository.decreaseStockIfAvailable(PRODUCT_ID, 2)).thenReturn(true)
 
-        val reserved = fixture.service.reserve(command())
+        val reserved = fixture.service.reserveOrFail(command())
 
         verify(fixture.productRepository).decreaseStockIfAvailable(PRODUCT_ID, 2)
         // The cart is only trimmed once a charge succeeds.
@@ -59,7 +61,7 @@ class CheckoutReservationServiceTest {
         `when`(fixture.cartService.getCart(USER_ID)).thenReturn(cartWith(quantity = 2))
         `when`(fixture.productRepository.decreaseStockIfAvailable(PRODUCT_ID, 2)).thenReturn(true)
 
-        val reserved = fixture.service.reserve(command())
+        val reserved = fixture.service.reserveOrFail(command())
 
         val recorded = fixture.paymentAttemptRepository.created.single()
         assertEquals(IDEMPOTENCY_KEY, recorded.idempotencyKey)
@@ -74,7 +76,7 @@ class CheckoutReservationServiceTest {
         `when`(fixture.cartService.getCart(USER_ID)).thenReturn(cartWith(quantity = 2))
         `when`(fixture.productRepository.decreaseStockIfAvailable(PRODUCT_ID, 2)).thenReturn(true)
 
-        val reserved = fixture.service.reserve(command())
+        val reserved = fixture.service.reserveOrFail(command())
 
         // A retry recomputes the fingerprint from the persisted order rather than the
         // cart, so the two derivations have to agree or every retry would 409.
@@ -94,7 +96,7 @@ class CheckoutReservationServiceTest {
         `when`(fixture.cartService.getCart(USER_ID)).thenReturn(CartView(emptyList(), 0, 0))
 
         val exception = assertThrows(ApplicationException::class.java) {
-            fixture.service.reserve(command())
+            fixture.service.reserveOrFail(command())
         }
 
         assertEquals(ApiErrorCode.EMPTY_CART, exception.errorCode)
@@ -108,7 +110,7 @@ class CheckoutReservationServiceTest {
         `when`(fixture.cartService.getCart(USER_ID)).thenReturn(cartWith(quantity = 2, available = false))
 
         val exception = assertThrows(ApplicationException::class.java) {
-            fixture.service.reserve(command())
+            fixture.service.reserveOrFail(command())
         }
 
         assertEquals(ApiErrorCode.PRODUCT_NOT_AVAILABLE, exception.errorCode)
@@ -124,7 +126,7 @@ class CheckoutReservationServiceTest {
         `when`(fixture.productRepository.findById(PRODUCT_ID)).thenReturn(product(active = true))
 
         val exception = assertThrows(ApplicationException::class.java) {
-            fixture.service.reserve(command())
+            fixture.service.reserveOrFail(command())
         }
 
         assertEquals(ApiErrorCode.INSUFFICIENT_STOCK, exception.errorCode)
@@ -140,7 +142,7 @@ class CheckoutReservationServiceTest {
         `when`(fixture.productRepository.findById(PRODUCT_ID)).thenReturn(product(active = false))
 
         val exception = assertThrows(ApplicationException::class.java) {
-            fixture.service.reserve(command())
+            fixture.service.reserveOrFail(command())
         }
 
         assertEquals(ApiErrorCode.PRODUCT_NOT_AVAILABLE, exception.errorCode)
@@ -154,7 +156,7 @@ class CheckoutReservationServiceTest {
         `when`(fixture.productRepository.findById(PRODUCT_ID)).thenReturn(null)
 
         val exception = assertThrows(ApplicationException::class.java) {
-            fixture.service.reserve(command())
+            fixture.service.reserveOrFail(command())
         }
 
         assertEquals(ApiErrorCode.PRODUCT_NOT_FOUND, exception.errorCode)
@@ -162,6 +164,7 @@ class CheckoutReservationServiceTest {
 
     private class Fixture(
         val service: CheckoutReservationService,
+        val userRepository: RecordingUserRepository,
         val cartService: CartService,
         val productRepository: ProductRepository,
         val orderRepository: RecordingOrderRepository,
@@ -173,20 +176,30 @@ class CheckoutReservationServiceTest {
         val productRepository = mock(ProductRepository::class.java)
         val orderRepository = RecordingOrderRepository()
         val paymentAttemptRepository = RecordingPaymentAttemptRepository()
+        val userRepository = RecordingUserRepository()
 
         return Fixture(
             service = CheckoutReservationService(
+                userRepository = userRepository,
                 cartService = cartService,
                 productRepository = productRepository,
                 orderRepository = orderRepository,
                 paymentAttemptRepository = paymentAttemptRepository
             ),
+            userRepository = userRepository,
             cartService = cartService,
             productRepository = productRepository,
             orderRepository = orderRepository,
             paymentAttemptRepository = paymentAttemptRepository
         )
     }
+
+    /** Unwraps the happy path; the guarded paths are asserted explicitly. */
+    private fun CheckoutReservationService.reserveOrFail(command: CheckoutCommand): ReservedCheckout =
+        when (val outcome = reserve(command)) {
+            is ReserveOutcome.Reserved -> outcome.reservation
+            is ReserveOutcome.Existing -> error("Expected a fresh reservation, got ${'$'}{outcome.attempt.idempotencyKey}")
+        }
 
     private fun command() = CheckoutCommand(
         userId = USER_ID,
@@ -285,6 +298,19 @@ class RecordingOrderRepository : OrderRepository {
     }
 }
 
+class RecordingUserRepository : UserRepository {
+    var locked: Long? = null
+
+    override fun findById(id: Long): User? = null
+    override fun findByEmail(email: String): User? = null
+    override fun create(user: User): Long = error("not used")
+
+    override fun lockForUpdate(id: Long): Boolean {
+        locked = id
+        return true
+    }
+}
+
 class RecordingPaymentAttemptRepository : PaymentAttemptRepository {
     val created = mutableListOf<PaymentAttempt>()
     private val byKey = mutableMapOf<String, PaymentAttempt>()
@@ -313,6 +339,9 @@ class RecordingPaymentAttemptRepository : PaymentAttemptRepository {
     }
 
     override fun findByIdempotencyKey(idempotencyKey: String): PaymentAttempt? = byKey[idempotencyKey]
+
+    override fun findActiveByUserId(userId: Long): PaymentAttempt? =
+        byKey.values.firstOrNull { !it.status.isTerminal() }
 
     override fun applyResult(
         id: Long,

@@ -10,6 +10,8 @@ class OrderStatusTest {
         // Cancellation is absent from every paid state: money has been captured and
         // refund orchestration does not exist yet, so those transitions fail closed.
         val allowedTransitions = setOf(
+            // Nobody paid for a legacy order, so it may be cancelled but never shipped.
+            OrderStatus.LEGACY_UNPAID to OrderStatus.CANCELLED,
             OrderStatus.PENDING to OrderStatus.PREPARING,
             OrderStatus.PREPARING to OrderStatus.SHIPPED,
             OrderStatus.SHIPPED to OrderStatus.DELIVERED
@@ -55,9 +57,19 @@ class OrderStatusTest {
     }
 
     @Test
-    fun `refuses direct customer cancellation in every state`() {
-        // A paid order needs a refund; a reserved one has an unresolved payment.
-        OrderStatus.entries.forEach { assertFalse(it.isUserCancellable(), "$it must not be user cancellable") }
+    fun `allows customer cancellation only for an unpaid legacy order`() {
+        // A paid order needs a refund; a reserved one has an unresolved payment. Only
+        // a pre-checkout order, which was never paid for, may still be cancelled.
+        assertTrue(OrderStatus.LEGACY_UNPAID.isUserCancellable())
+        OrderStatus.entries
+            .filterNot { it == OrderStatus.LEGACY_UNPAID }
+            .forEach { assertFalse(it.isUserCancellable(), "$it must not be user cancellable") }
+    }
+
+    @Test
+    fun `never treats a legacy order as paid`() {
+        // It carries no payment attempt, so the refund-required rule must not apply.
+        assertFalse(OrderStatus.LEGACY_UNPAID.isPaid())
     }
 
     @Test

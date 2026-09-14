@@ -7,6 +7,8 @@ import com.nagi4757.ec.api.checkout.application.CheckoutCoordinator
 import com.nagi4757.ec.api.checkout.application.CheckoutFinalizeService
 import com.nagi4757.ec.api.checkout.application.CheckoutOutcome
 import com.nagi4757.ec.api.checkout.application.CheckoutReservationService
+import com.nagi4757.ec.api.checkout.application.ReserveOutcome
+import com.nagi4757.ec.api.checkout.application.ReservedCheckout
 import com.nagi4757.ec.api.checkout.application.PaymentResultService
 import com.nagi4757.ec.api.common.error.ApiErrorCode
 import com.nagi4757.ec.api.common.error.ApplicationException
@@ -75,7 +77,7 @@ class CheckoutOrchestrationIntegrationTest @Autowired constructor(
         val userId = uniqueUserId()
         val productId = newProduct(stock = 5)
         cartRepository.increment(userId, productId, 1)
-        val reserved = reservationService.reserve(command(userId, "mock:success"))
+        val reserved = reserveOrFail(command(userId, "mock:success"))
 
         assertThat(reserved.order.status).isEqualTo(OrderStatus.PAYMENT_PENDING)
         val stored = jdbcTemplate.queryForObject(
@@ -91,7 +93,7 @@ class CheckoutOrchestrationIntegrationTest @Autowired constructor(
         val userId = uniqueUserId()
         val productId = newProduct(stock = 5)
         cartRepository.increment(userId, productId, 1)
-        val orderId = reservationService.reserve(command(userId, "mock:success")).order.id
+        val orderId = reserveOrFail(command(userId, "mock:success")).order.id
 
         assertThrows<DataIntegrityViolationException> {
             jdbcTemplate.update("UPDATE orders SET status = 'REFUNDED' WHERE id = ?", orderId)
@@ -105,7 +107,7 @@ class CheckoutOrchestrationIntegrationTest @Autowired constructor(
         val userId = uniqueUserId()
         val productId = newProduct(stock = 5)
         cartRepository.increment(userId, productId, 1)
-        val orderId = requireNotNull(reservationService.reserve(command(userId, "mock:success")).order.id)
+        val orderId = requireNotNull(reserveOrFail(command(userId, "mock:success")).order.id)
         val key = "fk-unique-${UUID.randomUUID()}"
 
         paymentAttemptRepository.createPending(key, FINGERPRINT, 10_000L, orderId)
@@ -130,7 +132,7 @@ class CheckoutOrchestrationIntegrationTest @Autowired constructor(
         val userId = uniqueUserId()
         val productId = newProduct(stock = 5)
         cartRepository.increment(userId, productId, 1)
-        val orderId = requireNotNull(reservationService.reserve(command(userId, "mock:success")).order.id)
+        val orderId = requireNotNull(reserveOrFail(command(userId, "mock:success")).order.id)
 
         // PENDING -> TIMEOUT is allowed, and TIMEOUT stays non-terminal.
         val pending = paymentAttemptRepository.createPending(
@@ -376,7 +378,7 @@ class CheckoutOrchestrationIntegrationTest @Autowired constructor(
 
         // A reservation whose charge never got recorded: the process died between the
         // gateway call and T2.
-        val reserved = reservationService.reserve(command)
+        val reserved = reserveOrFail(command)
         assertThat(attemptFor(reserved.order.id).status).isEqualTo(PaymentAttemptStatus.PENDING)
 
         val resumed = checkoutCoordinator.checkout(command)
@@ -400,7 +402,7 @@ class CheckoutOrchestrationIntegrationTest @Autowired constructor(
 
         // T1 and T2 run; T3 is deliberately skipped, which is what a crash between
         // them looks like.
-        val reserved = reservationService.reserve(command)
+        val reserved = reserveOrFail(command)
         paymentResultService.record(
             reserved.paymentAttemptId,
             ChargePaymentResult(ChargePaymentStatus.SUCCESS, "external-durable")
@@ -520,7 +522,7 @@ class CheckoutOrchestrationIntegrationTest @Autowired constructor(
         val command = command(userId, "mock:success")
 
         // T1, T2 and T3 run; T4 does not. That is the crash window.
-        val reserved = reservationService.reserve(command)
+        val reserved = reserveOrFail(command)
         paymentResultService.record(
             reserved.paymentAttemptId,
             ChargePaymentResult(ChargePaymentStatus.SUCCESS, "external-stale-cart")
@@ -547,7 +549,293 @@ class CheckoutOrchestrationIntegrationTest @Autowired constructor(
         cleanup(userId, productId)
     }
 
+
+    // --- E. active checkout guard (server side) ---------------------------------
+
+    @Test
+    fun `a second key is refused while the customer has an unresolved charge`() {
+        val userId = newUser()
+        val productId = newProduct(stock = 10)
+        cartRepository.increment(userId, productId, 3)
+
+        val first = checkoutCoordinator.checkout(command(userId, "mock:timeout"))
+        assertThat(first.outcome).isEqualTo(CheckoutOutcome.PENDING_CONFIRMATION)
+
+        val chargesBefore = chargeCount()
+        val refused = assertThrows<ApplicationException> {
+            checkoutCoordinator.checkout(command(userId, "mock:success"))
+        }
+
+        assertThat(refused.errorCode).isEqualTo(ApiErrorCode.PAYMENT_ATTEMPT_IN_PROGRESS)
+        // The decisive assertion: the second key never reached the gateway, so the
+        // customer cannot be charged twice.
+        assertThat(chargeCount()).isEqualTo(chargesBefore)
+        assertThat(orderCountFor(userId)).isEqualTo(1)
+
+        cleanup(userId, productId)
+    }
+
+    @Test
+    fun `simultaneous different keys start at most one charge`() {
+        val userId = newUser()
+        val productId = newProduct(stock = 20)
+        cartRepository.increment(userId, productId, 3)
+        val threads = 4
+        val start = CountDownLatch(1)
+        val executor = Executors.newFixedThreadPool(threads)
+        val chargesBefore = chargeCount()
+
+        try {
+            val futures = List(threads) { index ->
+                executor.submit<ApiErrorCode?> {
+                    start.await()
+                    try {
+                        checkoutCoordinator.checkout(
+                            command(userId, "mock:timeout", "distinct-key-$index-${UUID.randomUUID()}")
+                        )
+                        null
+                    } catch (exception: ApplicationException) {
+                        exception.errorCode
+                    }
+                }
+            }
+            start.countDown()
+            val results = futures.map { it.get(30, TimeUnit.SECONDS) }
+
+            // The charge is left unresolved on purpose: the guard is about payments
+            // that may still be in flight. Exactly one request may proceed; the rest
+            // are told a payment is already in progress, and the user row lock is what
+            // makes that decision reliable.
+            assertThat(results.count { it == null }).isEqualTo(1)
+            assertThat(results.count { it == ApiErrorCode.PAYMENT_ATTEMPT_IN_PROGRESS })
+                .isEqualTo(threads - 1)
+            assertThat(chargeCount() - chargesBefore).isEqualTo(1)
+            assertThat(orderCountFor(userId)).isEqualTo(1)
+        } finally {
+            executor.shutdownNow()
+            cleanup(userId, productId)
+        }
+    }
+
+    @Test
+    fun `the loser of a same-key race resumes the winner instead of failing on stock`() {
+        val userId = newUser()
+        // Stock is exactly what the cart holds, so a second reservation could not
+        // succeed even if one were attempted.
+        val productId = newProduct(stock = 3)
+        cartRepository.increment(userId, productId, 3)
+        val command = command(userId, "mock:success")
+        val start = CountDownLatch(1)
+        val executor = Executors.newFixedThreadPool(2)
+
+        try {
+            val futures = List(2) {
+                executor.submit<Pair<CheckoutOutcome?, ApiErrorCode?>> {
+                    start.await()
+                    try {
+                        checkoutCoordinator.checkout(command).outcome to null
+                    } catch (exception: ApplicationException) {
+                        null to exception.errorCode
+                    }
+                }
+            }
+            start.countDown()
+            val results = futures.map { it.get(30, TimeUnit.SECONDS) }
+
+            // Both see the same settled payment. Neither is told the shelf is empty:
+            // the guard resumes the winner's attempt rather than reserving again.
+            assertThat(results.map { it.second }).containsOnlyNulls()
+            assertThat(results.map { it.first }).allMatch { it == CheckoutOutcome.PAID }
+            assertThat(orderCountFor(userId)).isEqualTo(1)
+            assertThat(attemptCountFor(command.idempotencyKey)).isEqualTo(1)
+            assertThat(productRepository.findById(productId)?.stockQuantity).isZero()
+        } finally {
+            executor.shutdownNow()
+            cleanup(userId, productId)
+        }
+    }
+
+    // --- F. retry ownership and fingerprint -------------------------------------
+
+    @Test
+    fun `another account cannot use a key and learns nothing about the order`() {
+        val owner = newUser()
+        val intruder = newUser()
+        val productId = newProduct(stock = 10)
+        cartRepository.increment(owner, productId, 3)
+        val key = "owned-${UUID.randomUUID()}"
+
+        val paid = checkoutCoordinator.checkout(command(owner, "mock:success", key))
+        assertThat(paid.outcome).isEqualTo(CheckoutOutcome.PAID)
+
+        val refused = assertThrows<ApplicationException> {
+            checkoutCoordinator.checkout(command(intruder, "mock:success", key))
+        }
+
+        // A conflict, not the owner's order: the response must not leak the address,
+        // the items, or even that the key belongs to someone.
+        assertThat(refused.errorCode).isEqualTo(ApiErrorCode.PAYMENT_IDEMPOTENCY_CONFLICT)
+        assertThat(refused.message).doesNotContain(SHIPPING_ADDRESS.recipientName)
+        assertThat(refused.message).doesNotContain(SHIPPING_ADDRESS.phoneNumber)
+        assertThat(orderCountFor(intruder)).isZero()
+
+        cleanup(owner, productId)
+    }
+
+    @Test
+    fun `a changed shipping address on the same key is refused`() {
+        val userId = newUser()
+        val productId = newProduct(stock = 10)
+        cartRepository.increment(userId, productId, 3)
+        val key = "addr-${UUID.randomUUID()}"
+
+        checkoutCoordinator.checkout(command(userId, "mock:timeout", key))
+
+        val moved = CheckoutCommand(
+            userId = userId,
+            shippingAddress = SHIPPING_ADDRESS.copy(addressLine1 = "千代田9-9"),
+            paymentMethodId = "mock:timeout",
+            idempotencyKey = key
+        )
+        val refused = assertThrows<ApplicationException> { checkoutCoordinator.checkout(moved) }
+
+        assertThat(refused.errorCode).isEqualTo(ApiErrorCode.PAYMENT_IDEMPOTENCY_CONFLICT)
+
+        cleanup(userId, productId)
+    }
+
+    @Test
+    fun `a changed payment method on the same key is refused`() {
+        val userId = newUser()
+        val productId = newProduct(stock = 10)
+        cartRepository.increment(userId, productId, 3)
+        val key = "method-${UUID.randomUUID()}"
+
+        checkoutCoordinator.checkout(command(userId, "mock:timeout", key))
+
+        val refused = assertThrows<ApplicationException> {
+            checkoutCoordinator.checkout(command(userId, "mock:success", key))
+        }
+
+        assertThat(refused.errorCode).isEqualTo(ApiErrorCode.PAYMENT_IDEMPOTENCY_CONFLICT)
+
+        cleanup(userId, productId)
+    }
+
+    @Test
+    fun `a changed cart alone still resumes, because the order snapshot decides`() {
+        val userId = newUser()
+        val productId = newProduct(stock = 10)
+        val otherProductId = newProduct(stock = 10)
+        cartRepository.increment(userId, productId, 3)
+        val key = "cart-${UUID.randomUUID()}"
+
+        val first = checkoutCoordinator.checkout(command(userId, "mock:timeout", key))
+        assertThat(first.outcome).isEqualTo(CheckoutOutcome.PENDING_CONFIRMATION)
+
+        cartRepository.clear(userId)
+        cartRepository.increment(userId, otherProductId, 7)
+
+        val resumed = checkoutCoordinator.checkout(command(userId, "mock:timeout", key))
+
+        assertThat(resumed.outcome).isEqualTo(CheckoutOutcome.PENDING_CONFIRMATION)
+        assertThat(resumed.order.id).isEqualTo(first.order.id)
+
+        cleanup(userId, productId)
+        deleteProduct(otherProductId)
+    }
+
+    // --- G. SUCCESS invariant ----------------------------------------------------
+
+    @Test
+    fun `the database refuses a success without a provider reference`() {
+        val userId = newUser()
+        val productId = newProduct(stock = 10)
+        cartRepository.increment(userId, productId, 1)
+        val orderId = requireNotNull(reserveOrFail(command(userId, "mock:success")).order.id)
+        val attempt = paymentAttemptRepository.createPending(
+            "invariant-${UUID.randomUUID()}", FINGERPRINT, 10_000L, orderId
+        )
+
+        assertThrows<DataIntegrityViolationException> {
+            jdbcTemplate.update(
+                "UPDATE payment_attempts SET status = 'SUCCESS', external_payment_id = NULL WHERE id = ?",
+                attempt.id
+            )
+        }
+        assertThrows<DataIntegrityViolationException> {
+            jdbcTemplate.update(
+                "UPDATE payment_attempts SET status = 'SUCCESS', external_payment_id = '  ' WHERE id = ?",
+                attempt.id
+            )
+        }
+
+        cleanup(userId, productId)
+    }
+
+    // --- H. cart delete then re-add ----------------------------------------------
+
+    @Test
+    fun `cleanup leaves a re-added line alone rather than deleting it`() {
+        val userId = newUser()
+        val productId = newProduct(stock = 10)
+        cartRepository.increment(userId, productId, 3)
+
+        // The customer empties the line and puts two back while the payment runs.
+        cartRepository.remove(userId, productId)
+        cartRepository.increment(userId, productId, 2)
+
+        val remaining = cartRepository.removeSnapshotQuantity(userId, productId, 3)
+
+        // The two units were chosen after checkout and must survive. A stale line is
+        // the lesser evil; deleting a customer's items is not recoverable by them.
+        assertThat(remaining).isEqualTo(2)
+        assertThat(cartRepository.findAll(userId)).containsExactly(CartItem(productId, 2))
+
+        cleanup(userId, productId)
+    }
+
+    // --- I. legacy unpaid orders ---------------------------------------------------
+
+    @Test
+    fun `V11 moved pre-checkout orders out of the paid lifecycle`() {
+        val applied = jdbcTemplate.queryForList(
+            "SELECT version, success FROM flyway_schema_history WHERE version = '11'"
+        )
+        assertThat(applied).hasSize(1)
+        assertThat(applied.single()["success"].toString()).isIn("1", "true")
+
+        // A legacy order: PENDING with no payment attempt behind it.
+        val userId = newUser()
+        jdbcTemplate.update(
+            "INSERT INTO orders (user_id, status, total_amount) VALUES (?, 'LEGACY_UNPAID', ?)",
+            userId,
+            10_000L
+        )
+        val orderId = requireNotNull(
+            jdbcTemplate.queryForObject("SELECT LAST_INSERT_ID()", Long::class.java)
+        )
+
+        // It must never reach the shipping pipeline.
+        assertThat(OrderStatus.LEGACY_UNPAID.canTransitionTo(OrderStatus.PREPARING)).isFalse()
+        assertThat(OrderStatus.LEGACY_UNPAID.canTransitionTo(OrderStatus.CANCELLED)).isTrue()
+        // No payment was taken, so no refund is owed.
+        assertThat(OrderStatus.LEGACY_UNPAID.isPaid()).isFalse()
+        assertThat(OrderStatus.LEGACY_UNPAID.isUserCancellable()).isTrue()
+
+        assertThat(orderRepository.findById(orderId)?.status).isEqualTo(OrderStatus.LEGACY_UNPAID)
+
+        jdbcTemplate.update("DELETE FROM orders WHERE id = ?", orderId)
+    }
+
     // --- helpers ------------------------------------------------------------------
+
+    /** Unwraps the happy path of the guarded reservation. */
+    private fun reserveOrFail(command: CheckoutCommand): ReservedCheckout =
+        when (val outcome = reservationService.reserve(command)) {
+            is ReserveOutcome.Reserved -> outcome.reservation
+            is ReserveOutcome.Existing -> error("Expected a fresh reservation")
+        }
 
     private fun command(
         userId: Long,
@@ -605,6 +893,7 @@ class CheckoutOrchestrationIntegrationTest @Autowired constructor(
             userId
         )
         jdbcTemplate.update("DELETE FROM orders WHERE user_id = ?", userId)
+        jdbcTemplate.update("DELETE FROM users WHERE id = ?", userId)
         deleteProduct(productId)
     }
 
@@ -612,10 +901,32 @@ class CheckoutOrchestrationIntegrationTest @Autowired constructor(
         jdbcTemplate.update("DELETE FROM products WHERE id = ?", productId)
     }
 
-    private fun uniqueUserId(): Long = USER_IDS.incrementAndGet().toLong()
+    /**
+     * A real users row. Checkout locks the user FOR UPDATE, so a synthetic id would
+     * skip the serialisation the active-checkout guard depends on.
+     */
+    private fun uniqueUserId(): Long = newUser()
+
+    private fun newUser(): Long {
+        val email = "checkout-${UUID.randomUUID()}@example.test"
+        jdbcTemplate.update(
+            "INSERT INTO users (email, password_hash, name, role) VALUES (?, 'x', 'Test', 'USER')",
+            email
+        )
+        return requireNotNull(jdbcTemplate.queryForObject("SELECT LAST_INSERT_ID()", Long::class.java))
+    }
+
+    /**
+     * How many charges the gateway has settled. Counting recorded attempts is the
+     * closest observable proxy: every charge that returns writes exactly one.
+     */
+    private fun chargeCount(): Int = requireNotNull(
+        jdbcTemplate.queryForObject(
+            "SELECT COUNT(*) FROM payment_attempts WHERE status <> 'PENDING'", Int::class.java
+        )
+    )
 
     companion object {
-        private val USER_IDS = AtomicInteger(900_000)
         private val FINGERPRINT = "c".repeat(64)
 
         private val SHIPPING_ADDRESS = ShippingAddress(

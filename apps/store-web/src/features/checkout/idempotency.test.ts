@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { beforeEach, describe, expect, it } from 'vitest'
 import {
     cartSignature,
@@ -152,6 +153,17 @@ describe('checkout idempotency key lifecycle', () => {
 
         expect(key).toBeTruthy()
         expect(peekIdempotencyKey(storage)).toBe(key)
+    })
+
+    it('uses a separator that cannot appear inside any field', () => {
+        // Written as an escape, not embedded as a raw control byte in the source.
+        const source = readFileSync(
+            new URL('./idempotency.ts', import.meta.url),
+            'utf8',
+        )
+
+        expect(source).toContain(String.raw`join('\u0000')`)
+        expect(source.includes('\u0000')).toBe(false)
     })
 
     it('still returns a key when storage is unavailable', () => {

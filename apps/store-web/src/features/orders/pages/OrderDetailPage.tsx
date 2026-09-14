@@ -7,6 +7,7 @@ import { ORDER_STATUS_TRANSLATION_KEY } from '@/types/order'
 import type { Order, OrderStatus } from '@/types/order'
 
 const statusColor: Record<OrderStatus, string> = {
+    LEGACY_UNPAID: '#64748b',
     // Distinct from PENDING: the payment outcome is still unknown here.
     PAYMENT_PENDING: '#0369a1',
     PENDING: '#b7791f',
@@ -17,6 +18,11 @@ const statusColor: Record<OrderStatus, string> = {
 }
 
 type CancelFeedback = 'success' | 'invalidOrderTransition' | 'orderNotFound' | 'failed'
+
+/** Mirrors OrderStatus.isUserCancellable on the server. */
+function isCancellable(status: OrderStatus): boolean {
+    return status === 'LEGACY_UNPAID'
+}
 
 const cancelFeedbackTranslationKey: Record<CancelFeedback, string> = {
     success: 'store.order.cancel.success',
@@ -49,7 +55,9 @@ export default function OrderDetailPage() {
     }, [id, t])
 
     async function cancelOrder() {
-        if (!id || !order || order.status !== 'PENDING') return
+        // PENDING now means paid. Only an unpaid legacy order may still be
+        // cancelled; everything else needs a refund the system cannot issue yet.
+        if (!id || !order || !isCancellable(order.status)) return
         if (!window.confirm(t('store.order.cancel.confirm'))) return
 
         setCancelling(true)
@@ -137,7 +145,7 @@ export default function OrderDetailPage() {
                 </span>
             </div>
 
-            {order.status === 'PENDING' && (
+            {isCancellable(order.status) && (
                 <div style={{ marginTop: 20, textAlign: 'right' }}>
                     <button
                         type="button"

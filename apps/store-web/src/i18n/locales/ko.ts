@@ -82,6 +82,7 @@ export const storeKo = {
         order: {
             loadFailed: '주문 조회에 실패했습니다.',
             status: {
+                legacyUnpaid: '미결제 (구주문)',
                 paymentPending: '결제 확인 중',
                 pending: '주문 접수',
                 preparing: '배송 준비 중',

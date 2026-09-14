@@ -65,6 +65,30 @@
     </select>
 
     <!--
+        The caller must already hold the user row lock; this only reads what that
+        lock makes stable. PENDING and TIMEOUT are the unsettled states, so either
+        one means a charge may still be in flight for this user.
+    -->
+    <select id="selectActiveByUserId" resultMap="paymentAttemptResultMap">
+        SELECT
+            a.id,
+            a.idempotency_key,
+            a.request_fingerprint,
+            a.amount_jpy,
+            a.status,
+            a.external_payment_id,
+            a.order_id,
+            a.created_at,
+            a.updated_at
+        FROM payment_attempts a
+        JOIN orders o ON o.id = a.order_id
+        WHERE o.user_id = #{userId}
+          AND a.status IN ('PENDING', 'TIMEOUT')
+        ORDER BY a.id
+        LIMIT 1
+    </select>
+
+    <!--
         Only a non-terminal attempt may be written. Without the status guard a
         concurrent retry could overwrite a recorded SUCCESS, destroying the only
         durable evidence that money was taken. Zero affected rows is not an

@@ -9,6 +9,7 @@ import com.nagi4757.ec.api.checkout.application.CheckoutFinalizeService
 import com.nagi4757.ec.api.checkout.application.CheckoutOutcome
 import com.nagi4757.ec.api.checkout.application.CheckoutReservationService
 import com.nagi4757.ec.api.checkout.application.PaymentResultService
+import com.nagi4757.ec.api.checkout.application.ReserveOutcome
 import com.nagi4757.ec.api.common.error.ApiErrorCode
 import com.nagi4757.ec.api.common.error.ApplicationException
 import com.nagi4757.ec.api.common.logging.CorrelationIdContext
@@ -119,11 +120,13 @@ class InfrastructureIntegrationTest @Autowired constructor(
     }
 
     @Test
-    fun `applies Flyway migrations V1 through V10 and initializes existing products`() {
+    fun `applies Flyway migrations V1 through V11 and initializes existing products`() {
         val appliedVersions = flyway.info().applied()
             .mapNotNull { it.version?.version }
 
-        assertThat(appliedVersions).containsExactly("1", "2", "3", "4", "5", "6", "7", "8", "9", "10")
+        assertThat(appliedVersions).containsExactly(
+            "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11"
+        )
         val existingStock = jdbcTemplate.queryForList(
             "SELECT stock_quantity FROM products WHERE id IN (1, 2, 3) ORDER BY id",
             Int::class.java
@@ -163,7 +166,7 @@ class InfrastructureIntegrationTest @Autowired constructor(
                 .load()
                 .migrate()
 
-            assertThat(migrationResult.migrationsExecuted).isEqualTo(5)
+            assertThat(migrationResult.migrationsExecuted).isEqualTo(6)
             assertThat(legacyJdbcTemplate.queryForObject(
                 "SELECT status FROM orders LIMIT 1",
                 String::class.java
@@ -844,7 +847,7 @@ class InfrastructureIntegrationTest @Autowired constructor(
             // Reserve while the product is still sold, then withdraw it, then let the
             // charge fail. Compensation must return the stock regardless: it came from
             // this product and has to go back to it whether or not it is still listed.
-            val reserved = checkoutReservationService.reserve(
+            val reserveOutcome = checkoutReservationService.reserve(
                 CheckoutCommand(
                     userId = userId,
                     shippingAddress = shippingAddress(),
@@ -852,6 +855,7 @@ class InfrastructureIntegrationTest @Autowired constructor(
                     idempotencyKey = "inactive-declined-${UUID.randomUUID()}"
                 )
             )
+            val reserved = (reserveOutcome as ReserveOutcome.Reserved).reservation
             assertThat(productRepository.findById(productId)?.stockQuantity).isEqualTo(2)
             assertThat(productRepository.deactivate(productId)).isTrue()
 
@@ -1179,8 +1183,18 @@ class InfrastructureIntegrationTest @Autowired constructor(
         )
     }
 
-    private fun uniqueUserId(): Long =
-        ThreadLocalRandom.current().nextLong(1_000_000_000L, Long.MAX_VALUE)
+    /**
+     * A real users row. Checkout locks the user FOR UPDATE, so a synthetic id would
+     * silently skip the serialisation the guard depends on.
+     */
+    private fun uniqueUserId(): Long {
+        val email = "infra-${UUID.randomUUID()}@example.test"
+        jdbcTemplate.update(
+            "INSERT INTO users (email, password_hash, name, role) VALUES (?, 'x', 'Test', 'USER')",
+            email
+        )
+        return requireNotNull(jdbcTemplate.queryForObject("SELECT LAST_INSERT_ID()", Long::class.java))
+    }
 
     private fun deleteOrdersForUser(userId: Long) {
         val orderIds = jdbcTemplate.queryForList(
@@ -1194,6 +1208,10 @@ class InfrastructureIntegrationTest @Autowired constructor(
             jdbcTemplate.update("DELETE FROM order_items WHERE order_id = ?", orderId)
             jdbcTemplate.update("DELETE FROM orders WHERE id = ?", orderId)
         }
+    }
+
+    private fun deleteUser(userId: Long) {
+        jdbcTemplate.update("DELETE FROM users WHERE id = ?", userId)
     }
 
     private fun deleteProduct(productId: Long) {

@@ -7,6 +7,7 @@ import { ORDER_STATUS_TRANSITIONS, ORDER_STATUS_TRANSLATION_KEY } from '@/types/
 import type { Order, OrderStatus } from '@/types/order'
 
 const statusColor: Record<OrderStatus, string> = {
+    LEGACY_UNPAID: '#64748b',
     // Distinct from PENDING: the payment outcome is still unknown here.
     PAYMENT_PENDING: '#0369a1',
     PENDING: '#b7791f',

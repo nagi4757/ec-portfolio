@@ -60,6 +60,13 @@ class RedisCartRepository(
          * Splitting this into HINCRBY followed by a conditional HDEL would let a
          * concurrent add land between the two commands, and the delete would then
          * discard the quantity the customer had just added.
+         *
+         * The subtraction is skipped when the line holds fewer units than were
+         * reserved. That case means the line is no longer the one that was paid for:
+         * the customer removed it and put the product back, or reduced it, while the
+         * payment was in flight. Subtracting then would delete units they added after
+         * checking out. Leaving a stale line is recoverable by the customer; silently
+         * deleting items they chose is not, so the conservative branch wins.
          */
         val REMOVE_SNAPSHOT_QUANTITY: RedisScript<Long> = RedisScript.of(
             """
@@ -67,7 +74,12 @@ class RedisCartRepository(
             if not current then
                 return 0
             end
-            local remaining = tonumber(current) - tonumber(ARGV[2])
+            local held = tonumber(current)
+            local reserved = tonumber(ARGV[2])
+            if held < reserved then
+                return held
+            end
+            local remaining = held - reserved
             if remaining <= 0 then
                 redis.call('HDEL', KEYS[1], ARGV[1])
                 return 0

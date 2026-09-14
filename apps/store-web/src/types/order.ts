@@ -1,6 +1,8 @@
 // PAYMENT_PENDING means the payment outcome is not yet known. PENDING now means
 // the order is paid and waiting for the seller to handle it.
 export type OrderStatus =
+    // Predates checkout: created without a payment, never shippable.
+    | 'LEGACY_UNPAID'
     | 'PAYMENT_PENDING'
     | 'PENDING'
     | 'PREPARING'
@@ -9,6 +11,7 @@ export type OrderStatus =
     | 'CANCELLED'
 
 export const ORDER_STATUS_TRANSLATION_KEY: Record<OrderStatus, string> = {
+    LEGACY_UNPAID: 'store.order.status.legacyUnpaid',
     PAYMENT_PENDING: 'store.order.status.paymentPending',
     PENDING: 'store.order.status.pending',
     PREPARING: 'store.order.status.preparing',

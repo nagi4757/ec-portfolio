@@ -61,7 +61,7 @@ class MyBatisPaymentAttemptRepositoryTest {
     @Test
     fun `applies a terminal payment result and reports that it wrote it`() {
         `when`(mapper.updatePaymentAttemptResult(10L, "SUCCESS", "external-1")).thenReturn(1)
-        `when`(mapper.selectById(10L)).thenReturn(record(status = "SUCCESS"))
+        `when`(mapper.selectById(10L)).thenReturn(record(status = "SUCCESS", externalPaymentId = "external-1"))
 
         val applied = repository.applyResult(10L, PaymentAttemptStatus.SUCCESS, "external-1")
 
@@ -76,7 +76,7 @@ class MyBatisPaymentAttemptRepositoryTest {
         // settled this attempt first. Its result is authoritative and must not be
         // overwritten or turned into an error.
         `when`(mapper.updatePaymentAttemptResult(10L, "FAILED", null)).thenReturn(0)
-        `when`(mapper.selectById(10L)).thenReturn(record(status = "SUCCESS"))
+        `when`(mapper.selectById(10L)).thenReturn(record(status = "SUCCESS", externalPaymentId = "external-1"))
 
         val applied = repository.applyResult(10L, PaymentAttemptStatus.FAILED, null)
 
@@ -93,14 +93,17 @@ class MyBatisPaymentAttemptRepositoryTest {
         verify(mapper, never()).updatePaymentAttemptResult(10L, "PENDING", null)
     }
 
-    private fun record(status: String = "PENDING") = PaymentAttemptRecord(
+    private fun record(
+        status: String = "PENDING",
+        externalPaymentId: String? = null
+    ) = PaymentAttemptRecord(
         id = 10L,
         orderId = ORDER_ID,
+        externalPaymentId = externalPaymentId,
         idempotencyKey = IDEMPOTENCY_KEY,
         requestFingerprint = FINGERPRINT,
         amountJpy = 10_000L,
         status = status,
-        externalPaymentId = null,
         createdAt = LocalDateTime.of(2026, 9, 1, 10, 0),
         updatedAt = LocalDateTime.of(2026, 9, 1, 10, 0)
     )

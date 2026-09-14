@@ -76,7 +76,8 @@ describe('checkout is the only order creation path', () => {
 describe('order status presentation', () => {
     it('maps every status, including the new reserved state', () => {
         const statuses: OrderStatus[] = [
-            'PAYMENT_PENDING', 'PENDING', 'PREPARING', 'SHIPPED', 'DELIVERED', 'CANCELLED',
+            'LEGACY_UNPAID', 'PAYMENT_PENDING', 'PENDING',
+            'PREPARING', 'SHIPPED', 'DELIVERED', 'CANCELLED',
         ]
 
         statuses.forEach((status) => {
@@ -90,6 +91,36 @@ describe('order status presentation', () => {
 
         expect(lookup(storeKo, key)).toBe('결제 확인 중')
         expect(lookup(storeJa, key)).toBe('決済確認中')
+    })
+
+    it('shows the legacy unpaid state in words', () => {
+        const key = ORDER_STATUS_TRANSLATION_KEY.LEGACY_UNPAID
+
+        expect(lookup(storeKo, key)).toBeTruthy()
+        expect(lookup(storeJa, key)).toBeTruthy()
+    })
+
+    it('offers cancellation only for an unpaid legacy order', () => {
+        const detailPage = readSource('features/orders/pages/OrderDetailPage.tsx')
+
+        // PENDING now means paid, and cancelling a paid order needs a refund the
+        // system cannot issue. The button must follow the server's rule.
+        expect(detailPage).toContain("status === 'LEGACY_UNPAID'")
+        expect(detailPage).not.toContain("order.status !== 'PENDING'")
+        expect(detailPage).not.toContain("{order.status === 'PENDING' && (")
+    })
+
+    it('refreshes the cart badge from the server after a successful checkout', () => {
+        const checkoutPage = readSource('features/orders/pages/CheckoutPage.tsx')
+        const successBranch = checkoutPage.slice(
+            checkoutPage.indexOf('clearIdempotencyKey()'),
+            checkoutPage.indexOf('navigate(`/orders/'),
+        )
+
+        // Cleanup only removes the reserved lines, so anything added during the
+        // payment survives and the badge must reflect that instead of being zeroed.
+        expect(successBranch).toContain('CartAPI.get()')
+        expect(successBranch).not.toContain('setTotalQuantity(0)')
     })
 
     it('translates every demo payment method in both locales', () => {

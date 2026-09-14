@@ -199,7 +199,10 @@ class OpenApiDocumentationTest(
     fun `product cart and order schemas reflect the current API contract`() {
         val schemas = document.path("components").path("schemas")
         val expectedStatuses =
-            listOf("PAYMENT_PENDING", "PENDING", "PREPARING", "SHIPPED", "DELIVERED", "CANCELLED")
+            listOf(
+                "LEGACY_UNPAID", "PAYMENT_PENDING", "PENDING",
+                "PREPARING", "SHIPPED", "DELIVERED", "CANCELLED",
+            )
         assertEquals(expectedStatuses, schemas.path("OrderResponse").path("properties").path("status").path("enum").map { it.asText() })
         assertEquals(expectedStatuses, schemas.path("UpdateStatus").path("properties").path("status").path("enum").map { it.asText() })
 

@@ -17,6 +17,11 @@ data class PaymentAttempt(
         require(idempotencyKey.isNotBlank()) { "Idempotency key must not be blank" }
         require(FINGERPRINT_PATTERN.matches(requestFingerprint)) { "Request fingerprint must be a SHA-256 hex value" }
         require(amountJpy > 0) { "Payment amount must be positive" }
+        // A success without the provider's reference cannot be reconciled or
+        // refunded, so it is not a success we are willing to record.
+        require(status != PaymentAttemptStatus.SUCCESS || !externalPaymentId.isNullOrBlank()) {
+            "A successful payment attempt must carry an external payment id"
+        }
     }
 
     private companion object {

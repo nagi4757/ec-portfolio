@@ -82,6 +82,7 @@ export const storeJa = {
         order: {
             loadFailed: '注文の取得に失敗しました。',
             status: {
+                legacyUnpaid: '未決済（旧注文）',
                 paymentPending: '決済確認中',
                 pending: '注文受付',
                 preparing: '発送準備中',

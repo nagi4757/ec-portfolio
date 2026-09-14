@@ -89,7 +89,15 @@ export default function CheckoutPage() {
             }
 
             clearIdempotencyKey()
-            cartStore.setTotalQuantity(0)
+            // The badge is refreshed from the server rather than forced to zero:
+            // cleanup only removes the reserved lines, so anything added during the
+            // payment is still in the cart and must stay visible.
+            try {
+                const remaining = await CartAPI.get()
+                cartStore.setTotalQuantity(remaining.totalQuantity)
+            } catch {
+                // The order is paid; a stale badge must not block the confirmation.
+            }
             navigate(`/orders/${result.order.id}`, { replace: true })
         } catch (cause) {
             // Declined and failed are terminal: the next attempt is a new payment and

@@ -4,6 +4,8 @@ import com.nagi4757.ec.api.common.error.PaymentIdempotencyConflictException
 import com.nagi4757.ec.api.order.domain.model.Order
 import com.nagi4757.ec.api.order.domain.repository.OrderRepository
 import com.nagi4757.ec.api.payment.application.ChargePaymentRequest
+import com.nagi4757.ec.api.payment.application.ChargePaymentResult
+import com.nagi4757.ec.api.payment.application.ChargePaymentStatus
 import com.nagi4757.ec.api.payment.application.PaymentGateway
 import com.nagi4757.ec.api.payment.domain.model.PaymentAttempt
 import com.nagi4757.ec.api.payment.domain.model.PaymentAttemptStatus
@@ -20,11 +22,16 @@ import org.springframework.stereotype.Service
  * roll back an earlier fact. Each step lives in its own bean so the boundaries go
  * through the Spring proxy rather than being lost to self-invocation.
  *
- *   T1 reserve  -> stock held, order + attempt written
+ *   T1 reserve  -> locks the customer, holds stock, writes the order and attempt
  *   charge      -> no transaction
  *   T2 record   -> the payment outcome is made durable on its own
  *   T3 finalize -> the order leaves PAYMENT_PENDING
  *   T4 cleanup  -> the reserved cart lines are subtracted, best effort
+ *
+ * Every checkout goes through T1, including a retry, because T1 holds the per-user
+ * lock that decides whether a charge may start at all. A client-side guard cannot
+ * do that job: a second tab, a browser without session storage, or a direct API call
+ * would all bypass it.
  *
  * ## Known limitation: a crash between T3 and T4 leaves a stale cart
  *
@@ -60,7 +67,7 @@ class CheckoutCoordinator(
             return resume(command, existing)
         }
 
-        val reserved = try {
+        val outcome = try {
             reservationService.reserve(command)
         } catch (conflict: DuplicateKeyException) {
             // A concurrent first request won the unique constraint. Our whole
@@ -73,21 +80,30 @@ class CheckoutCoordinator(
             return resume(command, winner)
         }
 
-        return drive(
-            command = command,
-            attemptId = reserved.paymentAttemptId,
-            amountJpy = reserved.amountJpy,
-            order = reserved.order
-        )
+        return when (outcome) {
+            // T1 found this customer's own unsettled attempt under the lock. It is the
+            // same key, so this request continues it instead of starting a second one.
+            is ReserveOutcome.Existing -> resume(command, outcome.attempt)
+            is ReserveOutcome.Reserved -> drive(
+                command = command,
+                attemptId = outcome.reservation.paymentAttemptId,
+                amountJpy = outcome.reservation.amountJpy,
+                order = outcome.reservation.order
+            )
+        }
     }
 
     /**
      * Continues a checkout that already has an attempt.
      *
-     * The fingerprint is recomputed from the stored order snapshot, never from the
-     * live cart. By this point the cart may have been trimmed by a successful
-     * checkout, or changed by the customer while the payment was in flight, so it no
-     * longer describes the request this key stands for.
+     * The line items are taken from the stored order snapshot, never from the live
+     * cart: by this point the cart may have been trimmed by a successful checkout, or
+     * changed by the customer while the payment was in flight, so it no longer
+     * describes the request this key stands for.
+     *
+     * The payment method and shipping address come from the incoming request. A
+     * change to either is a different purchase, and reusing the key for it must be
+     * refused rather than quietly charged against the original order.
      */
     private fun resume(command: CheckoutCommand, attempt: PaymentAttempt): CheckoutResult {
         val orderId = requireNotNull(attempt.orderId) {
@@ -96,13 +112,23 @@ class CheckoutCoordinator(
         val order = orderRepository.findById(orderId)
             ?: error("Order $orderId referenced by attempt ${attempt.id} is missing")
 
+        // Ownership is checked before anything about the order is read into a
+        // response. An idempotency key is guessable, and a key belonging to another
+        // customer must never expose their order, address or items. This is reported
+        // as a plain conflict so the response cannot be used to probe for valid keys.
+        if (order.userId != command.userId) {
+            log.warn(
+                "User {} presented idempotency key belonging to another account; refusing",
+                command.userId
+            )
+            throw PaymentIdempotencyConflictException()
+        }
+
         val fingerprint = CheckoutRequestFingerprint.from(
-            userId = order.userId,
+            userId = command.userId,
             currency = CHECKOUT_CURRENCY,
             paymentMethodId = command.paymentMethodId,
-            shippingAddress = requireNotNull(order.shippingAddress) {
-                "Order $orderId has no shipping address snapshot"
-            },
+            shippingAddress = command.shippingAddress,
             lines = order.toLineSnapshots()
         )
         if (fingerprint != attempt.requestFingerprint) {
@@ -142,9 +168,28 @@ class CheckoutCoordinator(
             )
         )
 
-        val applied = paymentResultService.record(attemptId, chargeResult)
+        val applied = paymentResultService.record(attemptId, usableResult(chargeResult, attemptId))
 
         return finalizeAndReport(order, applied.attempt.status)
+    }
+
+    /**
+     * A SUCCESS without the provider's reference is not something we can act on: there
+     * would be nothing to reconcile against and nothing to refund. Rather than record
+     * an untraceable success, the attempt is left unsettled so the same key can
+     * resolve it later. The stock stays held and the order stays reserved, which is
+     * the same position a timeout leaves us in.
+     */
+    private fun usableResult(result: ChargePaymentResult, attemptId: Long): ChargePaymentResult {
+        if (result.status == ChargePaymentStatus.SUCCESS && result.externalPaymentId.isNullOrBlank()) {
+            log.error(
+                "Gateway reported SUCCESS without an external payment id for attempt {}; " +
+                    "treating the charge as unresolved so it can be reconciled",
+                attemptId
+            )
+            return ChargePaymentResult(ChargePaymentStatus.TIMEOUT)
+        }
+        return result
     }
 
     /**
