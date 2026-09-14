@@ -9,6 +9,12 @@ readonly CERTBOT_RENEWAL_CONFIG="/etc/letsencrypt/renewal/$ORIGIN_HOSTNAME.conf"
 readonly ORIGIN_CERT_FILE="$CERTBOT_LIVE_DIRECTORY/fullchain.pem"
 readonly ORIGIN_KEY_FILE="$CERTBOT_LIVE_DIRECTORY/privkey.pem"
 readonly RENEW_SCRIPT_TARGET="/usr/local/sbin/ec-portfolio-renew-origin-cert"
+readonly SYNC_SCRIPT_SOURCE="sync-origin-tls.sh"
+# Overridable so the write-back contract can be exercised against a fake
+# helper in tests, the same way DEPLOY_API_SCRIPT is overridden elsewhere.
+readonly SYNC_SCRIPT_TARGET="${ORIGIN_TLS_SYNC_SCRIPT:-/usr/local/sbin/ec-portfolio-sync-origin-tls}"
+readonly ORIGIN_TLS_ENV_DIRECTORY="/etc/ec-portfolio"
+readonly ORIGIN_TLS_ENV_FILE="$ORIGIN_TLS_ENV_DIRECTORY/origin-tls.env"
 readonly RENEW_SERVICE_NAME="ec-portfolio-certbot-renew.service"
 readonly RENEW_TIMER_NAME="ec-portfolio-certbot-renew.timer"
 readonly VENDOR_RENEW_TIMER_NAME="certbot-renew.timer"
@@ -67,6 +73,14 @@ validate_inputs() {
     [[ "$ACME_EMAIL" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,63}$ ]] ||
         fail "ACME_EMAIL must be a valid email address."
 
+    # Issuance without a durable backup is the state Phase 6B exists to remove:
+    # the certificate would live only on this host's disk and a replacement host
+    # would have to ask Let's Encrypt for a new one.
+    [[ -n "${ORIGIN_TLS_BUCKET:-}" ]] ||
+        fail "Required environment variable is missing: ORIGIN_TLS_BUCKET"
+    [[ "$ORIGIN_TLS_BUCKET" =~ ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$ ]] ||
+        fail "ORIGIN_TLS_BUCKET is not a valid bucket name."
+
     for variable_name in \
         AWS_ACCESS_KEY_ID \
         AWS_SECRET_ACCESS_KEY \
@@ -113,6 +127,8 @@ resolve_bundle_paths() {
         fail "The bundled renewal service is missing."
     [[ -f "$script_directory/$RENEW_TIMER_NAME" ]] ||
         fail "The bundled renewal timer is missing."
+    [[ -f "$script_directory/$SYNC_SCRIPT_SOURCE" && -x "$script_directory/$SYNC_SCRIPT_SOURCE" ]] ||
+        fail "The bundled origin TLS backup script is missing or not executable."
 }
 
 run_certbot() {
@@ -200,6 +216,34 @@ validate_certificate_contract() {
     validate_renewal_configuration
 }
 
+# The renewal timer runs the installed script from /usr/local/sbin, where the
+# deployment bundle is not present, so the backup helper is installed to a fixed
+# path too. The bucket name is account specific and generated, so it is written
+# to a non-secret env file the unit reads rather than baked into a committed
+# unit file.
+install_origin_tls_backup() {
+    install -o root -g root -m 755 \
+        "$script_directory/$SYNC_SCRIPT_SOURCE" "$SYNC_SCRIPT_TARGET"
+
+    install -d -o root -g root -m 755 "$ORIGIN_TLS_ENV_DIRECTORY"
+    printf 'ORIGIN_TLS_BUCKET=%s\n' "$ORIGIN_TLS_BUCKET" >"$ORIGIN_TLS_ENV_FILE.tmp"
+    install -o root -g root -m 644 "$ORIGIN_TLS_ENV_FILE.tmp" "$ORIGIN_TLS_ENV_FILE"
+    rm -f "$ORIGIN_TLS_ENV_FILE.tmp"
+}
+
+# Durability step. It never touches the certificate files or Nginx, so a failure
+# here leaves the freshly issued certificate and the running Nginx exactly as
+# they are; only the off-host copy is missing, and that is reported rather than
+# swallowed.
+#
+# A future phase will gate this on holding the origin EIP so only the active
+# host writes. That gate belongs around this call.
+back_up_origin_tls_state() {
+    log "Backing up the origin TLS state."
+    ORIGIN_TLS_BUCKET="$ORIGIN_TLS_BUCKET" "$SYNC_SCRIPT_TARGET" backup ||
+        fail "The certificate is valid and installed, but the off-host backup failed. The local certificate and Nginx are untouched; re-run the backup before relying on host replacement."
+}
+
 install_renewal_units() {
     install -o root -g root -m 755 \
         "$script_directory/renew-origin-cert.sh" "$RENEW_SCRIPT_TARGET"
@@ -226,7 +270,9 @@ main() {
     if (( EUID != 0 )); then
         require_command sudo
         log "Root privileges are required; re-running with sudo."
-        exec sudo --preserve-env=ACME_EMAIL,AWS_REGION,AWS_DEFAULT_REGION -- "$0" "$@"
+        # ORIGIN_TLS_BUCKET must survive the re-exec: validate_inputs runs after
+        # it, so dropping the variable here would fail every non-root run.
+        exec sudo --preserve-env=ACME_EMAIL,ORIGIN_TLS_BUCKET,AWS_REGION,AWS_DEFAULT_REGION -- "$0" "$@"
     fi
 
     validate_platform
@@ -255,10 +301,17 @@ main() {
         fail "Certificate issuance failed or timed out."
 
     validate_certificate_contract
+    install_origin_tls_backup
     install_renewal_units
+    back_up_origin_tls_state
 
     log "Certificate issuance and automatic renewal configuration completed successfully."
     log "The certificate paths satisfy the configure-origin.sh input contract."
 }
 
-main "$@"
+# Sourcing exposes the contract functions to the test suite without running an
+# issuance or a renewal. The same guard is used by deploy-api.sh and
+# deploy-runtime.sh.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi

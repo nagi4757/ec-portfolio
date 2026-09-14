@@ -241,3 +241,8 @@ output "runtime_cors_allowed_origins_parameter_name" {
   description = "Name of the non-secret parameter holding the Phase 5C CORS allowlist."
   value       = aws_ssm_parameter.runtime_cors_allowed_origins.name
 }
+
+output "origin_tls_backup_bucket_name" {
+  description = "Name of the private bucket holding the archived origin TLS state. Supply it to sync-origin-tls.sh as ORIGIN_TLS_BUCKET."
+  value       = aws_s3_bucket.origin_tls.bucket
+}

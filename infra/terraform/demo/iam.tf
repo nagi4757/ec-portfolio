@@ -118,6 +118,34 @@ resource "aws_iam_role_policy" "ec2_deployment_state" {
   })
 }
 
+# Phase 6B: the host backs up and restores its own certbot state.
+#
+# Scoped to the single fixed object rather than a prefix, so a compromised host
+# can neither enumerate the bucket nor reach any other key. s3:ListBucket is
+# deliberately absent: the object path is fixed, so nothing needs to discover
+# it. s3:DeleteObject is absent too, which together with bucket versioning means
+# the host can replace the archive but never destroy the history an operator
+# would recover from.
+resource "aws_iam_role_policy" "ec2_origin_tls_backup" {
+  name = "origin-tls-backup"
+  role = aws_iam_role.ec2.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "ReadWriteOriginTlsArchive"
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+          "s3:PutObject",
+        ]
+        Resource = "${aws_s3_bucket.origin_tls.arn}/origin-tls/letsencrypt.tar.gz"
+      },
+    ]
+  })
+}
+
 resource "aws_iam_role_policy" "ec2_origin_verification" {
   name = "origin-verification-read"
   role = aws_iam_role.ec2.id
