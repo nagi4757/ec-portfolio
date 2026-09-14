@@ -31,6 +31,15 @@ interface PaymentAttemptRepository {
     fun findActiveByUserId(userId: Long): PaymentAttempt?
 
     /**
+     * The settled successful charge for an order, if one exists.
+     *
+     * The refund amount and the provider's payment reference are read from here and
+     * never from the request: a client must not be able to choose how much it is
+     * refunded, or which charge is reversed.
+     */
+    fun findSuccessfulByOrderId(orderId: Long): PaymentAttempt?
+
+    /**
      * Records a gateway outcome against a non-terminal attempt and returns the
      * attempt as it now stands.
      *

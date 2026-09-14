@@ -18,6 +18,14 @@ enum class OrderStatus {
     /** Paid. Awaiting seller handling. */
     PENDING,
     PREPARING,
+
+    /**
+     * A refund has been requested and its outcome is not yet known. The order holds
+     * here so a concurrent cancellation cannot start a second refund, and so an
+     * unresolved refund never silently becomes a cancellation.
+     */
+    REFUND_PENDING,
+
     SHIPPED,
     DELIVERED,
     CANCELLED;
@@ -37,11 +45,25 @@ enum class OrderStatus {
         // Never shippable: nobody paid for it.
         LEGACY_UNPAID -> target == CANCELLED
         PAYMENT_PENDING -> false
+        // Shipping an order whose refund is in flight would send goods that are
+        // being paid back for.
+        REFUND_PENDING -> false
         PENDING -> target == PREPARING
         PREPARING -> target == SHIPPED
         SHIPPED -> target == DELIVERED
         DELIVERED, CANCELLED -> false
     }
+
+    /**
+     * Whether a full refund and cancellation may be started from this state.
+     *
+     * Limited to the states where nothing has left the warehouse. Refunding a
+     * SHIPPED or DELIVERED order and immediately restoring stock would claim goods
+     * are back on the shelf when they are in a customer's hands; returning those
+     * needs a return workflow that receives the goods first, which is out of scope
+     * here.
+     */
+    fun isRefundable(): Boolean = this == PENDING || this == PREPARING
 
     /**
      * Internal compensation, used when a charge did not succeed. Expressed as its
@@ -54,6 +76,16 @@ enum class OrderStatus {
         this == PAYMENT_PENDING && target == CANCELLED
 
     /**
+     * Where an order may go once its refund outcome is known. A refused refund puts
+     * the order back where it came from; only a completed refund cancels it.
+     *
+     * An unknown outcome has no entry here on purpose: the order stays in
+     * REFUND_PENDING for reconciliation rather than being cancelled on a guess.
+     */
+    fun canSettleRefundTo(target: OrderStatus): Boolean =
+        this == REFUND_PENDING && (target == CANCELLED || target.isRefundable())
+
+    /**
      * True once money has been captured for this order.
      *
      * LEGACY_UNPAID is excluded on purpose: those orders predate checkout and carry
@@ -61,6 +93,7 @@ enum class OrderStatus {
      */
     fun isPaid(): Boolean = this == PENDING ||
         this == PREPARING ||
+        this == REFUND_PENDING ||
         this == SHIPPED ||
         this == DELIVERED
 

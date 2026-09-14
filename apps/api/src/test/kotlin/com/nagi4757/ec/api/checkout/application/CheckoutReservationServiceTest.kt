@@ -335,6 +335,8 @@ class RecordingOrderRepository : OrderRepository {
 
     override fun findById(id: Long): Order? = stored[id]
 
+    override fun lockForUpdate(id: Long): Order? = stored[id]
+
     override fun findByIdAndUserId(id: Long, userId: Long): Order? =
         stored[id]?.takeIf { it.userId == userId }
 
@@ -429,6 +431,11 @@ class RecordingPaymentAttemptRepository : PaymentAttemptRepository {
 
     override fun findActiveByUserId(userId: Long): PaymentAttempt? =
         byKey.values.firstOrNull { !it.status.isTerminal() }
+
+    override fun findSuccessfulByOrderId(orderId: Long): PaymentAttempt? =
+        byKey.values.firstOrNull {
+            it.orderId == orderId && it.status == PaymentAttemptStatus.SUCCESS
+        }
 
     override fun applyResult(
         id: Long,

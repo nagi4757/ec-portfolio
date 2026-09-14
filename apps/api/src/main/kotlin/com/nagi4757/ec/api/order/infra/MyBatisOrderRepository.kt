@@ -33,6 +33,11 @@ class MyBatisOrderRepository(
         return orderFactory.fromOrderRecord(record, mapper.selectItemsByOrderId(id))
     }
 
+    override fun lockForUpdate(id: Long): Order? {
+        val record = mapper.selectOrderByIdForUpdate(id) ?: return null
+        return orderFactory.fromOrderRecord(record, mapper.selectItemsByOrderId(id))
+    }
+
     override fun findByIdAndUserId(id: Long, userId: Long): Order? {
         val record = mapper.selectOrderByIdAndUserId(id, userId) ?: return null
         return orderFactory.fromOrderRecord(record, mapper.selectItemsByOrderId(id))

@@ -41,10 +41,30 @@ data class RefundPaymentRequest(
 }
 
 data class RefundPaymentResult(
-    val status: RefundPaymentStatus
-)
+    val status: RefundPaymentStatus,
+    /**
+     * The provider's reference for the refund. Needed to reconcile the money that
+     * went back, and distinct from the charge's own id.
+     */
+    val externalRefundId: String? = null
+) {
+    /**
+     * False when the provider did not tell us whether the refund happened. Mirrors
+     * [ChargePaymentResult.outcomeKnown]: the caller must not treat an unknown
+     * outcome as a refusal, because the money may already have been returned.
+     */
+    val outcomeKnown: Boolean
+        get() = status != RefundPaymentStatus.REFUND_UNKNOWN
+}
 
 enum class RefundPaymentStatus {
     REFUNDED,
-    REFUND_FAILED
+    REFUND_FAILED,
+
+    /**
+     * The provider did not report an outcome. Without this, a timeout would be
+     * indistinguishable from a refusal, and an order could be left un-cancelled with
+     * no way to tell whether a retry is safe.
+     */
+    REFUND_UNKNOWN
 }

@@ -32,7 +32,8 @@ class OrderServiceTest {
     @Test
     fun `getOrder throws not found for another user's order`() {
         val orderRepository = FakeOrderRepository()
-        val orderService = OrderService(orderRepository, mock(OrderQueryRepository::class.java))
+        val productRepository = mock(ProductRepository::class.java)
+        val orderService = OrderService(orderRepository, mock(OrderQueryRepository::class.java), productRepository)
 
         val ex = assertThrows(ApplicationException::class.java) {
             orderService.getOrder(7L, 1L)
@@ -44,7 +45,8 @@ class OrderServiceTest {
     @Test
     fun `getOrderAdmin throws order not found when order does not exist`() {
         val orderRepository = FakeOrderRepository()
-        val orderService = OrderService(orderRepository, mock(OrderQueryRepository::class.java))
+        val productRepository = mock(ProductRepository::class.java)
+        val orderService = OrderService(orderRepository, mock(OrderQueryRepository::class.java), productRepository)
 
         val ex = assertThrows(ApplicationException::class.java) {
             orderService.getOrderAdmin(999L)
@@ -56,7 +58,8 @@ class OrderServiceTest {
     @Test
     fun `cancelOrder returns not found for another user order`() {
         val orderRepository = FakeOrderRepository()
-        val orderService = OrderService(orderRepository, mock(OrderQueryRepository::class.java))
+        val productRepository = mock(ProductRepository::class.java)
+        val orderService = OrderService(orderRepository, mock(OrderQueryRepository::class.java), productRepository)
         orderRepository.seed(order(status = OrderStatus.PENDING, userId = 8L))
 
         val exception = assertThrows(ApplicationException::class.java) {
@@ -69,7 +72,8 @@ class OrderServiceTest {
     @Test
     fun `updateStatus rejects an invalid admin transition`() {
         val orderRepository = FakeOrderRepository()
-        val orderService = OrderService(orderRepository, mock(OrderQueryRepository::class.java))
+        val productRepository = mock(ProductRepository::class.java)
+        val orderService = OrderService(orderRepository, mock(OrderQueryRepository::class.java), productRepository)
         orderRepository.seed(order(status = OrderStatus.PENDING))
 
         val exception = assertThrows(ApplicationException::class.java) {
@@ -83,7 +87,8 @@ class OrderServiceTest {
     @Test
     fun `updateStatus updates and returns refreshed order`() {
         val orderRepository = FakeOrderRepository()
-        val orderService = OrderService(orderRepository, mock(OrderQueryRepository::class.java))
+        val productRepository = mock(ProductRepository::class.java)
+        val orderService = OrderService(orderRepository, mock(OrderQueryRepository::class.java), productRepository)
 
         val before = Order(
             id = 10L,
@@ -104,7 +109,8 @@ class OrderServiceTest {
     @EnumSource(value = OrderStatus::class, names = ["PENDING", "PREPARING", "SHIPPED", "DELIVERED"])
     fun `cancelOrder refuses a paid order because it would need a refund`(status: OrderStatus) {
         val orderRepository = FakeOrderRepository()
-        val orderService = OrderService(orderRepository, mock(OrderQueryRepository::class.java))
+        val productRepository = mock(ProductRepository::class.java)
+        val orderService = OrderService(orderRepository, mock(OrderQueryRepository::class.java), productRepository)
         orderRepository.seed(order(status = status))
 
         val exception = assertThrows(ApplicationException::class.java) {
@@ -118,7 +124,8 @@ class OrderServiceTest {
     @Test
     fun `cancelOrder refuses a reserved order because the payment is unresolved`() {
         val orderRepository = FakeOrderRepository()
-        val orderService = OrderService(orderRepository, mock(OrderQueryRepository::class.java))
+        val productRepository = mock(ProductRepository::class.java)
+        val orderService = OrderService(orderRepository, mock(OrderQueryRepository::class.java), productRepository)
         orderRepository.seed(order(status = OrderStatus.PAYMENT_PENDING))
 
         val exception = assertThrows(ApplicationException::class.java) {
@@ -133,7 +140,8 @@ class OrderServiceTest {
     @EnumSource(value = OrderStatus::class, names = ["PENDING", "PREPARING"])
     fun `updateStatus refuses to cancel a paid order`(status: OrderStatus) {
         val orderRepository = FakeOrderRepository()
-        val orderService = OrderService(orderRepository, mock(OrderQueryRepository::class.java))
+        val productRepository = mock(ProductRepository::class.java)
+        val orderService = OrderService(orderRepository, mock(OrderQueryRepository::class.java), productRepository)
         orderRepository.seed(order(status = status))
 
         val exception = assertThrows(ApplicationException::class.java) {
@@ -147,8 +155,9 @@ class OrderServiceTest {
     @Test
     fun `getOrders uses the summary query repository`() {
         val orderRepository = mock(OrderRepository::class.java)
+        val productRepository = mock(ProductRepository::class.java)
         val orderQueryRepository = mock(OrderQueryRepository::class.java)
-        val orderService = OrderService(orderRepository, orderQueryRepository)
+        val orderService = OrderService(orderRepository, orderQueryRepository, productRepository)
         val summaries = listOf(summary(id = 2L), summary(id = 1L))
         `when`(orderQueryRepository.findSummariesByUserId(7L)).thenReturn(summaries)
 
@@ -161,8 +170,9 @@ class OrderServiceTest {
     @Test
     fun `listAllOrders uses the paged summary query repository`() {
         val orderRepository = mock(OrderRepository::class.java)
+        val productRepository = mock(ProductRepository::class.java)
         val orderQueryRepository = mock(OrderQueryRepository::class.java)
-        val orderService = OrderService(orderRepository, orderQueryRepository)
+        val orderService = OrderService(orderRepository, orderQueryRepository, productRepository)
         val page = OrderSummaryPage(listOf(summary(id = 3L)), 1, 20, 1L, 1)
         `when`(orderQueryRepository.findSummaryPage(1, 20)).thenReturn(page)
 
@@ -269,6 +279,8 @@ class OrderServiceTest {
         }
 
         override fun findById(id: Long): Order? = ordersById[id]
+
+        override fun lockForUpdate(id: Long): Order? = ordersById[id]
 
         override fun findByIdAndUserId(id: Long, userId: Long): Order? =
             ordersById[id]?.takeIf { it.userId == userId }

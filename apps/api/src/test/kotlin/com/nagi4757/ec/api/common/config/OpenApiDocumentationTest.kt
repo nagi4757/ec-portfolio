@@ -62,7 +62,7 @@ class OpenApiDocumentationTest(
     @Test
     fun `document contains exactly the business API operations without actuator paths`() {
         assertTrue(document.path("openapi").asText().matches(Regex("^3\\.1\\.\\d+$")))
-        assertEquals(29, operations().size)
+        assertEquals(31, operations().size)
         assertTrue(document.path("paths").fieldNames().asSequence().all { it.startsWith("/api/") })
         assertFalse(document.path("paths").has("/actuator/health"))
         assertFalse(document.path("paths").has("/actuator/health/liveness"))
@@ -83,9 +83,11 @@ class OpenApiDocumentationTest(
             "User - Auth",
             "User - Cart",
             "User - Orders",
+            "User - Refunds",
             "Admin - Categories",
             "Admin - Products",
-            "Admin - Orders"
+            "Admin - Orders",
+            "Admin - Refunds"
         )
         val actualTags = document.path("tags").map { it.path("name").asText() }.toSet()
         assertEquals(expectedTags, actualTags)
@@ -200,8 +202,8 @@ class OpenApiDocumentationTest(
         val schemas = document.path("components").path("schemas")
         val expectedStatuses =
             listOf(
-                "LEGACY_UNPAID", "PAYMENT_PENDING", "PENDING",
-                "PREPARING", "SHIPPED", "DELIVERED", "CANCELLED",
+                "LEGACY_UNPAID", "PAYMENT_PENDING", "PENDING", "PREPARING",
+                "REFUND_PENDING", "SHIPPED", "DELIVERED", "CANCELLED",
             )
         assertEquals(expectedStatuses, schemas.path("OrderResponse").path("properties").path("status").path("enum").map { it.asText() })
         assertEquals(expectedStatuses, schemas.path("UpdateStatus").path("properties").path("status").path("enum").map { it.asText() })

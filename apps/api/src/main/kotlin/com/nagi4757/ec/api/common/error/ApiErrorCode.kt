@@ -31,6 +31,19 @@ enum class ApiErrorCode(
         HttpStatus.ACCEPTED,
         "Payment result is not yet confirmed"
     ),
+    REFUND_NOT_ELIGIBLE(
+        HttpStatus.CONFLICT,
+        "This order cannot be refunded in its current state"
+    ),
+    REFUND_FAILED(HttpStatus.CONFLICT, "The refund was refused by the provider"),
+    REFUND_ATTEMPT_IN_PROGRESS(
+        HttpStatus.CONFLICT,
+        "A refund for this order is already in progress"
+    ),
+    REFUND_IDEMPOTENCY_CONFLICT(
+        HttpStatus.CONFLICT,
+        "Idempotency key was reused with a different refund"
+    ),
     PAYMENT_ATTEMPT_IN_PROGRESS(
         HttpStatus.CONFLICT,
         "Another payment for this account is still in progress"

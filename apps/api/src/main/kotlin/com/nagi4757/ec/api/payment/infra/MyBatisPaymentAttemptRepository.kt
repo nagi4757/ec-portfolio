@@ -42,6 +42,9 @@ class MyBatisPaymentAttemptRepository(
     override fun findActiveByUserId(userId: Long): PaymentAttempt? =
         mapper.selectActiveByUserId(userId)?.toDomain()
 
+    override fun findSuccessfulByOrderId(orderId: Long): PaymentAttempt? =
+        mapper.selectSuccessfulByOrderId(orderId)?.toDomain()
+
     override fun applyResult(
         id: Long,
         status: PaymentAttemptStatus,

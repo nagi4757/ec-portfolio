@@ -10,6 +10,7 @@ import com.nagi4757.ec.api.order.application.query.OrderSummaryPage
 import com.nagi4757.ec.api.order.domain.model.Order
 import com.nagi4757.ec.api.order.domain.model.OrderStatus
 import com.nagi4757.ec.api.order.domain.repository.OrderRepository
+import com.nagi4757.ec.api.product.domain.repository.ProductRepository
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
 
@@ -24,7 +25,8 @@ import org.springframework.transaction.annotation.Transactional
 @Service
 class OrderService(
     private val orderRepository: OrderRepository,
-    private val orderQueryRepository: OrderQueryRepository
+    private val orderQueryRepository: OrderQueryRepository,
+    private val productRepository: ProductRepository
 ) {
     /* 내 주문 목록 */
     fun getOrders(userId: Long): List<OrderSummary> = orderQueryRepository.findSummariesByUserId(userId)
@@ -43,14 +45,40 @@ class OrderService(
      * be cancelled either. The endpoint remains so clients are told precisely why,
      * rather than being given a 404.
      */
+    @Transactional
     fun cancelOrder(userId: Long, orderId: Long): Order {
         val order = orderRepository.findByIdAndUserId(orderId, userId)
             ?: throw ResourceNotFoundException(ApiErrorCode.ORDER_NOT_FOUND)
 
+        // A paid order leaves through a refund, which is orchestrated elsewhere so
+        // the money goes back before the order is cancelled.
         if (order.status.isPaid()) {
             throw OrderCancellationRequiresRefundException()
         }
-        throw InvalidOrderTransitionException()
+        // Only a legacy order reaches here: it predates checkout and was never paid
+        // for, so there is nothing to refund and it can simply be cancelled.
+        if (!order.status.isUserCancellable()) {
+            throw InvalidOrderTransitionException()
+        }
+        if (!orderRepository.transitionStatusForUser(
+                id = orderId,
+                userId = userId,
+                expectedStatus = order.status,
+                targetStatus = OrderStatus.CANCELLED
+            )) {
+            throw InvalidOrderTransitionException()
+        }
+        restoreStock(order)
+
+        return getOrder(userId, orderId)
+    }
+
+    private fun restoreStock(order: Order) {
+        order.items.forEach { item ->
+            check(productRepository.increaseStock(item.productId, item.quantity)) {
+                "Failed to restore stock for product ${item.productId}"
+            }
+        }
     }
 
     /* 어드민: 전체 주문 목록 */
