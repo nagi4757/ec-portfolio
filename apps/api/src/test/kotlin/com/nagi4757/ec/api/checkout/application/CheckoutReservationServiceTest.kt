@@ -19,13 +19,19 @@ import com.nagi4757.ec.api.product.domain.model.Product
 import com.nagi4757.ec.api.product.domain.repository.ProductRepository
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNotNull
+import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertThrows
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.mockito.Mockito.mock
 import org.mockito.Mockito.never
 import org.mockito.Mockito.verify
 import org.mockito.Mockito.verifyNoInteractions
 import org.mockito.Mockito.`when`
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Reservation behaviour, carried over from the order creation tests that used to
@@ -162,21 +168,67 @@ class CheckoutReservationServiceTest {
         assertEquals(ApiErrorCode.PRODUCT_NOT_FOUND, exception.errorCode)
     }
 
+    @Test
+    fun `reserve rechecks a key that settles while waiting for the user lock`() {
+        val lockEntered = CountDownLatch(1)
+        val releaseLock = CountDownLatch(1)
+        val userRepository = BlockingUserRepository(lockEntered, releaseLock)
+        val attemptRepository = RecordingPaymentAttemptRepository()
+        val fixture = fixture(userRepository, attemptRepository)
+        `when`(fixture.cartService.getCart(USER_ID)).thenReturn(CartView(emptyList(), 0, 0))
+
+        // Both concurrent requests observed no key in the coordinator fast path.
+        assertNull(attemptRepository.findByIdempotencyKey(IDEMPOTENCY_KEY))
+        assertNull(attemptRepository.findByIdempotencyKey(IDEMPOTENCY_KEY))
+        assertEquals(2, attemptRepository.findByKeyCalls.get())
+
+        val executor = Executors.newSingleThreadExecutor()
+        try {
+            val waitingRequest = executor.submit<ReserveOutcome> {
+                fixture.service.reserve(command())
+            }
+
+            assertTrue(lockEntered.await(5, TimeUnit.SECONDS), "reserve never reached the user lock")
+            // The same-key lookup belongs after lock acquisition, so B cannot have
+            // performed it while the test double is still holding the lock.
+            assertEquals(2, attemptRepository.findByKeyCalls.get())
+
+            // A wins the key and settles while B is waiting. Terminal attempts are
+            // deliberately invisible to findActiveByUserId(), reproducing the stale
+            // path that previously fell through to the now-empty cart.
+            val winner = terminalAttempt()
+            attemptRepository.store(winner)
+            releaseLock.countDown()
+
+            val outcome = waitingRequest.get(5, TimeUnit.SECONDS)
+            assertTrue(outcome is ReserveOutcome.Existing)
+            assertEquals(winner, (outcome as ReserveOutcome.Existing).attempt)
+            assertEquals(3, attemptRepository.findByKeyCalls.get())
+            assertEquals(0, fixture.orderRepository.savedOrders.size)
+            assertEquals(0, attemptRepository.created.size)
+            verifyNoInteractions(fixture.cartService, fixture.productRepository)
+        } finally {
+            releaseLock.countDown()
+            executor.shutdownNow()
+        }
+    }
+
     private class Fixture(
         val service: CheckoutReservationService,
-        val userRepository: RecordingUserRepository,
+        val userRepository: UserRepository,
         val cartService: CartService,
         val productRepository: ProductRepository,
         val orderRepository: RecordingOrderRepository,
         val paymentAttemptRepository: RecordingPaymentAttemptRepository
     )
 
-    private fun fixture(): Fixture {
+    private fun fixture(
+        userRepository: UserRepository = RecordingUserRepository(),
+        paymentAttemptRepository: RecordingPaymentAttemptRepository = RecordingPaymentAttemptRepository()
+    ): Fixture {
         val cartService = mock(CartService::class.java)
         val productRepository = mock(ProductRepository::class.java)
         val orderRepository = RecordingOrderRepository()
-        val paymentAttemptRepository = RecordingPaymentAttemptRepository()
-        val userRepository = RecordingUserRepository()
 
         return Fixture(
             service = CheckoutReservationService(
@@ -233,6 +285,18 @@ class CheckoutReservationServiceTest {
         imageUrl = null,
         description = null,
         active = active
+    )
+
+    private fun terminalAttempt() = PaymentAttempt(
+        id = 91L,
+        idempotencyKey = IDEMPOTENCY_KEY,
+        requestFingerprint = "a".repeat(64),
+        amountJpy = 38_000L,
+        status = PaymentAttemptStatus.SUCCESS,
+        externalPaymentId = "payment-91",
+        orderId = 81L,
+        createdAt = null,
+        updatedAt = null
     )
 
     private companion object {
@@ -311,8 +375,24 @@ class RecordingUserRepository : UserRepository {
     }
 }
 
+private class BlockingUserRepository(
+    private val lockEntered: CountDownLatch,
+    private val releaseLock: CountDownLatch
+) : UserRepository {
+    override fun findById(id: Long): User? = null
+    override fun findByEmail(email: String): User? = null
+    override fun create(user: User): Long = error("not used")
+
+    override fun lockForUpdate(id: Long): Boolean {
+        lockEntered.countDown()
+        check(releaseLock.await(5, TimeUnit.SECONDS)) { "test did not release the user lock" }
+        return true
+    }
+}
+
 class RecordingPaymentAttemptRepository : PaymentAttemptRepository {
     val created = mutableListOf<PaymentAttempt>()
+    val findByKeyCalls = AtomicInteger()
     private val byKey = mutableMapOf<String, PaymentAttempt>()
     private var nextId = 1L
 
@@ -338,7 +418,14 @@ class RecordingPaymentAttemptRepository : PaymentAttemptRepository {
         return attempt
     }
 
-    override fun findByIdempotencyKey(idempotencyKey: String): PaymentAttempt? = byKey[idempotencyKey]
+    override fun findByIdempotencyKey(idempotencyKey: String): PaymentAttempt? {
+        findByKeyCalls.incrementAndGet()
+        return byKey[idempotencyKey]
+    }
+
+    fun store(attempt: PaymentAttempt) {
+        byKey[attempt.idempotencyKey] = attempt
+    }
 
     override fun findActiveByUserId(userId: Long): PaymentAttempt? =
         byKey.values.firstOrNull { !it.status.isTerminal() }

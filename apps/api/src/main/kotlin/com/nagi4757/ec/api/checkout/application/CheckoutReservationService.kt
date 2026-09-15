@@ -46,23 +46,43 @@ class CheckoutReservationService(
         // passes through here, so a second tab, a client without session storage and a
         // direct API call are all covered.
         check(userRepository.lockForUpdate(command.userId)) {
-            // No row means no lock. Proceeding would run the guard below unserialised,
-            // so the request stops rather than silently losing its protection.
+            // No row means no lock. Proceeding would run the guards below
+            // unserialised, so the request stops rather than silently losing its
+            // protection.
             "Cannot lock user ${command.userId} for checkout; the account no longer exists"
         }
 
-        val active = paymentAttemptRepository.findActiveByUserId(command.userId)
-        if (active != null) {
-            return if (active.idempotencyKey == command.idempotencyKey) {
-                // The same attempt, retried. Resume it rather than reserving again.
-                ReserveOutcome.Existing(active)
-            } else {
-                // A different payment for this customer is still unsettled. Starting a
-                // second one risks charging them twice.
-                throw PaymentAttemptInProgressException()
-            }
+        // Re-read the key now that the lock is held. The coordinator looked it up
+        // before queuing here, and that answer goes stale while this request waits:
+        // whoever held the lock may have created the attempt, or carried it all the
+        // way to a settled outcome, in the meantime. Acting on the pre-lock answer is
+        // how a duplicate submit became a second checkout.
+        //
+        // Every status counts, not just the unsettled ones. A key whose attempt has
+        // already settled is still that key, and its result belongs to the caller.
+        val sameKey = paymentAttemptRepository.findByIdempotencyKey(command.idempotencyKey)
+        if (sameKey != null) {
+            // Returned as-is. Ownership and the request fingerprint are validated by
+            // the coordinator, which is the single place that decides whether a key
+            // may see an order at all; reading the order here would risk touching
+            // another customer's data before that decision is made.
+            return ReserveOutcome.Existing(sameKey)
         }
 
+        // Only once this key is known to be new does a different in-flight payment
+        // matter. This check is deliberately second: a retry of an existing key must
+        // never be mistaken for a competing payment.
+        val active = paymentAttemptRepository.findActiveByUserId(command.userId)
+        if (active != null) {
+            // A different payment for this customer is still unsettled. Starting a
+            // second one risks charging them twice.
+            throw PaymentAttemptInProgressException()
+        }
+
+        // Reached only for a genuinely new checkout. Idempotency is settled above and
+        // never depends on what the cart happens to hold: a duplicate submit that
+        // arrives after the original cleared the cart must replay, not report an
+        // empty basket.
         val cart = cartService.getCart(command.userId)
         if (cart.items.isEmpty()) throw EmptyCartException()
         if (cart.items.any { !it.available }) throw ProductNotAvailableException()
