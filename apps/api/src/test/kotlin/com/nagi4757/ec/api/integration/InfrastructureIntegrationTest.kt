@@ -180,7 +180,12 @@ class InfrastructureIntegrationTest @Autowired constructor(
                 )
             }
 
-            val result = Flyway.configure().dataSource(dataSource).load().migrate()
+            // This test isolates the V10 -> V11 upgrade; later migrations are covered separately.
+            val result = Flyway.configure()
+                .dataSource(dataSource)
+                .target(MigrationVersion.fromVersion("11"))
+                .load()
+                .migrate()
 
             // Before the fix this threw: V11 wrote LEGACY_UNPAID while the V10 CHECK
             // still forbade it, and Flyway reported a failed migration.
