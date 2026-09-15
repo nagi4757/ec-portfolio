@@ -62,7 +62,11 @@ class OpenApiDocumentationTest(
     @Test
     fun `document contains exactly the business API operations without actuator paths`() {
         assertTrue(document.path("openapi").asText().matches(Regex("^3\\.1\\.\\d+$")))
-        assertEquals(31, operations().size)
+        // 31 before the two refund reconcile endpoints, one for the customer and one
+        // for the operator.
+        assertEquals(33, operations().size)
+        assertTrue(document.path("paths").has("/api/user/orders/{id}/refund/reconcile"))
+        assertTrue(document.path("paths").has("/api/admin/orders/{id}/refund/reconcile"))
         assertTrue(document.path("paths").fieldNames().asSequence().all { it.startsWith("/api/") })
         assertFalse(document.path("paths").has("/actuator/health"))
         assertFalse(document.path("paths").has("/actuator/health/liveness"))

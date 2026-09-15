@@ -184,6 +184,95 @@ describe('admin refund key lifecycle in the page', () => {
     it('does not poll for an unresolved refund', () => {
         expect(page()).not.toMatch(/setInterval|setTimeout\s*\(/)
     })
+
+    it('resumes a held refund through reconcile rather than a fresh key', () => {
+        const source = page()
+
+        // Admin storage is a different origin from the storefront's, so an operator
+        // never holds the key a customer started the refund with. Minting one here
+        // would be refused as a second refund on the same order.
+        expect(source).toContain('? await RefundAdminApi.reconcile(orderId)')
+        expect(source).toContain(': await RefundAdminApi.refund(orderId, resolveRefundKey(orderId))')
+    })
+
+    it('asks for a key only inside the guarded section', () => {
+        const source = page()
+        const body = source.slice(source.indexOf('async function refundOrder()'))
+        const tryAt = body.indexOf('try {')
+        const keyAt = body.indexOf('resolveRefundKey(')
+
+        // Resolving the key before the try would strand the in-flight flag if it ever
+        // threw, leaving the button disabled with no way back.
+        expect(keyAt).toBeGreaterThan(tryAt)
+        expect(body.indexOf('setRefunding(true)')).toBeLessThan(tryAt)
+    })
+})
+
+describe('RefundAdminApi.reconcile', () => {
+    beforeEach(() => {
+        const entries = new Map<string, string>()
+        const storage = {
+            getItem: (key: string) => entries.get(key) ?? null,
+            setItem: (key: string, value: string) => void entries.set(key, value),
+            removeItem: (key: string) => void entries.delete(key),
+            clear: () => entries.clear(),
+        }
+        vi.stubGlobal('localStorage', storage)
+        vi.stubGlobal('sessionStorage', storage)
+    })
+
+    afterEach(() => {
+        vi.unstubAllGlobals()
+    })
+
+    it('calls the admin reconcile endpoint for the order', async () => {
+        const calls = stubFetch(respond(200, { outcome: 'REFUNDED', order }))
+
+        await RefundAdminApi.reconcile(30)
+
+        expect(calls[0].url).toContain('/api/admin/orders/30/refund/reconcile')
+        expect(calls[0].init.method).toBe('POST')
+    })
+
+    it('sends no Idempotency-Key', async () => {
+        const calls = stubFetch(respond(200, { outcome: 'REFUNDED', order }))
+
+        await RefundAdminApi.reconcile(30)
+
+        // The operator resumes the attempt the server already holds, using the key
+        // recorded on it. A key from admin storage would identify nothing.
+        const headers = (calls[0].init.headers ?? {}) as Record<string, string>
+        expect(headers['Idempotency-Key']).toBeUndefined()
+    })
+
+    it('sends no request body', async () => {
+        const calls = stubFetch(respond(200, { outcome: 'REFUNDED', order }))
+
+        await RefundAdminApi.reconcile(30)
+
+        expect(calls[0].init.body).toBeUndefined()
+    })
+
+    it('resumes a refund the customer started, which admin storage never saw', async () => {
+        const calls = stubFetch(respond(200, { outcome: 'REFUNDED', order }))
+
+        await RefundAdminApi.reconcile(30)
+
+        const headers = (calls[0].init.headers ?? {}) as Record<string, string>
+        expect(Object.keys(headers)).not.toContain('Idempotency-Key')
+    })
+
+    it('returns PENDING_CONFIRMATION when the refund is still unresolved', async () => {
+        stubFetch(respond(202, {
+            outcome: 'PENDING_CONFIRMATION',
+            order: { ...order, status: 'REFUND_PENDING' },
+        }))
+
+        const result = await RefundAdminApi.reconcile(30)
+
+        expect(result.outcome).toBe('PENDING_CONFIRMATION')
+        expect(result.order.status).toBe('REFUND_PENDING')
+    })
 })
 
 describe('admin status presentation', () => {

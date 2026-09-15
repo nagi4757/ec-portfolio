@@ -43,6 +43,9 @@ class MyBatisRefundAttemptRepository(
     override fun findActiveByOrderId(orderId: Long): RefundAttempt? =
         mapper.selectActiveByOrderId(orderId)?.toDomain()
 
+    override fun findLatestByOrderId(orderId: Long): RefundAttempt? =
+        mapper.selectLatestByOrderId(orderId)?.toDomain()
+
     override fun applyResult(
         id: Long,
         status: RefundAttemptStatus,

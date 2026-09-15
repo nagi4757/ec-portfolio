@@ -8,6 +8,8 @@ import com.nagi4757.ec.api.order.presentation.shared.toResponse
 import com.nagi4757.ec.api.refund.application.RefundCommand
 import com.nagi4757.ec.api.refund.application.RefundCoordinator
 import com.nagi4757.ec.api.refund.application.RefundOutcome
+import com.nagi4757.ec.api.refund.application.RefundReconcileCommand
+import com.nagi4757.ec.api.refund.application.RefundResult
 import io.swagger.v3.oas.annotations.Operation
 import io.swagger.v3.oas.annotations.responses.ApiResponse
 import io.swagger.v3.oas.annotations.responses.ApiResponses
@@ -59,13 +61,37 @@ class RefundAdminController(
         @NotBlank
         @Size(max = 255)
         idempotencyKey: String
-    ): ResponseEntity<RefundResponse> {
+    ): ResponseEntity<RefundResponse> = respond(
         // userId is null: an operator acts on any order, so the ownership check does
         // not apply to this path.
-        val result = refundCoordinator.refund(
+        refundCoordinator.refund(
             RefundCommand(orderId = id, userId = null, idempotencyKey = idempotencyKey)
         )
+    )
 
+    @PostMapping("/reconcile")
+    @Operation(
+        summary = "Resume this order's refund without an idempotency key",
+        description = "Resumes the refund already stored against the order using the key " +
+            "recorded on it, including one a customer started. Admin storage is a " +
+            "different origin from the storefront's, so an operator never has the " +
+            "customer's key. This never starts a refund."
+    )
+    @ApiResponses(
+        ApiResponse(responseCode = "200", description = "Refunded and cancelled"),
+        ApiResponse(responseCode = "202", description = "The refund is still not confirmed")
+    )
+    @ApiErrorCodes(
+        ApiErrorCode.ORDER_NOT_FOUND,
+        ApiErrorCode.REFUND_NOT_ELIGIBLE,
+        ApiErrorCode.REFUND_FAILED,
+        ApiErrorCode.REFUND_IDEMPOTENCY_CONFLICT
+    )
+    fun reconcile(@PathVariable id: Long): ResponseEntity<RefundResponse> = respond(
+        refundCoordinator.reconcile(RefundReconcileCommand(orderId = id, userId = null))
+    )
+
+    private fun respond(result: RefundResult): ResponseEntity<RefundResponse> {
         val body = RefundResponse(outcome = result.outcome.name, order = result.order.toResponse())
 
         return when (result.outcome) {

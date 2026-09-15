@@ -2,6 +2,7 @@ package com.nagi4757.ec.api.refund.application
 
 import com.nagi4757.ec.api.common.error.ApiErrorCode
 import com.nagi4757.ec.api.common.error.RefundIdempotencyConflictException
+import com.nagi4757.ec.api.common.error.RefundNotEligibleException
 import com.nagi4757.ec.api.common.error.ResourceNotFoundException
 import com.nagi4757.ec.api.order.domain.repository.OrderRepository
 import com.nagi4757.ec.api.payment.application.PaymentGateway
@@ -33,6 +34,16 @@ import org.springframework.stereotype.Service
  * and an operator request therefore contend for the same row, and only one of them
  * can start a refund.
  *
+ * ## Where the provider's idempotency key comes from
+ *
+ * Always from the persisted [RefundAttempt], never from the request. For a new
+ * refund the two are the same value, so nothing changes there. What it buys is
+ * [reconcile]: a caller who has lost the original key can still resume the refund,
+ * because the key the provider sees is read back from the row rather than supplied.
+ * The alternatives were both worse -- handing the stored key back to the client
+ * makes it a guessable handle on someone's refund, and attaching a fresh key to an
+ * existing attempt breaks the very contract the key exists to uphold.
+ *
  * ## Known design note: unresolved refunds and a real provider
  *
  * An UNKNOWN refund is re-driven with the same idempotency key, which the mock
@@ -46,6 +57,7 @@ import org.springframework.stereotype.Service
 @Service
 class RefundCoordinator(
     private val requestService: RefundRequestService,
+    private val reconcileService: RefundReconcileService,
     private val resultService: RefundResultService,
     private val finalizeService: RefundFinalizeService,
     private val refundAttemptRepository: RefundAttemptRepository,
@@ -76,8 +88,24 @@ class RefundCoordinator(
 
         return when (started) {
             is RefundStartOutcome.Existing -> resume(command, started.attempt)
-            is RefundStartOutcome.Started -> drive(command, started.attempt)
+            is RefundStartOutcome.Started -> drive(started.attempt)
         }
+    }
+
+    /**
+     * Resumes the refund an order already has, without a client key.
+     *
+     * This is recovery, not a new request: it never opens an attempt, and when the
+     * order has none it says so rather than starting one. An order sitting in
+     * REFUND_PENDING with no attempt behind it is broken data, and cancelling it on
+     * that basis would return goods for money nobody can show was refunded.
+     */
+    fun reconcile(command: RefundReconcileCommand): RefundResult {
+        // Ownership is checked inside, under the order lock.
+        val attempt = reconcileService.load(command)
+            ?: throw RefundNotEligibleException()
+
+        return continueAttempt(attempt)
     }
 
     /**
@@ -99,6 +127,14 @@ class RefundCoordinator(
             throw RefundIdempotencyConflictException()
         }
 
+        return continueAttempt(attempt)
+    }
+
+    /**
+     * The shared tail of every path that acts on an attempt that already exists,
+     * whether a keyed retry or a reconciliation reached it.
+     */
+    private fun continueAttempt(attempt: RefundAttempt): RefundResult {
         // Recompute the fingerprint from what is persisted now and compare it with
         // what was stored when the refund opened. Storing it without ever checking
         // it would document an invariant nothing enforces; this is the check that
@@ -117,16 +153,16 @@ class RefundCoordinator(
             // Settled, so the provider is not called again. Finalisation still runs:
             // a previous call may have died between R2 and R3, leaving a refunded
             // order stuck in REFUND_PENDING. It is idempotent, so an ordinary replay
-            // changes nothing.
+            // changes nothing, and a stale attempt is turned away by R3 itself.
             return finalizeAndReport(attempt)
         }
 
         // PENDING or UNKNOWN: the refund may not have been issued, or its outcome was
         // never learned. Re-driving with the same key is how it gets resolved.
-        return drive(command, attempt)
+        return drive(attempt)
     }
 
-    private fun drive(command: RefundCommand, attempt: RefundAttempt): RefundResult {
+    private fun drive(attempt: RefundAttempt): RefundResult {
         val charge = resolveCharge(attempt)
 
         val result = paymentGateway.refund(
@@ -135,7 +171,11 @@ class RefundCoordinator(
                 // from the request and never from a fresh search.
                 externalPaymentId = requireNotNull(charge.externalPaymentId),
                 amountJpy = charge.amountJpy,
-                idempotencyKey = command.idempotencyKey
+                // The stored key, not the request's. They are the same value for a
+                // keyed retry; for a reconciliation there is no request key at all,
+                // and re-driving under a different one would let the provider treat
+                // the resumed refund as a second refund.
+                idempotencyKey = attempt.idempotencyKey
             )
         )
 

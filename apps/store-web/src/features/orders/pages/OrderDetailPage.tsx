@@ -86,13 +86,25 @@ export default function OrderDetailPage() {
         const orderId = Number(id)
         setRefunding(true)
         setRefundFeedback(null)
-        // The same key is reused for every retry of this order's refund. Disabling
-        // the button is only a courtesy; the server's order lock and the refund
-        // attempt's idempotency are what actually prevent a second refund.
-        const idempotencyKey = resolveRefundKey(orderId)
 
         try {
-            const result = await RefundAPI.refund(orderId, idempotencyKey)
+            // Resuming goes through reconcile, which carries no key at all. The
+            // attempt already exists on the server and the key that identifies it
+            // lives there; asking storage for one would mint a fresh key whenever
+            // this tab is not the one that started the refund, and the server would
+            // refuse it as a second refund on the same order -- leaving the customer
+            // with no way to finish the one they already have.
+            //
+            // A first request still carries the key, and reuses it for every retry.
+            // Disabling the button is only a courtesy; the server's order lock and
+            // the attempt's idempotency are what actually prevent a second refund.
+            //
+            // resolveRefundKey never throws, so the in-flight flag below is always
+            // cleared. It sits inside the try regardless, so that stays true even if
+            // that contract is ever weakened.
+            const result = resuming
+                ? await RefundAPI.reconcile(orderId)
+                : await RefundAPI.refund(orderId, resolveRefundKey(orderId))
 
             if (result.outcome === 'PENDING_CONFIRMATION') {
                 // Not a success. The money may not have moved, so the order is not

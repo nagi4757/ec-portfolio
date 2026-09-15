@@ -16,4 +16,15 @@ export const RefundAdminApi = {
             undefined,
             { 'Idempotency-Key': idempotencyKey },
         ),
+
+    /**
+     * Resumes the refund this order already has, including one the customer started.
+     *
+     * Deliberately sends no Idempotency-Key. Admin storage is a different origin from
+     * the storefront's, so an operator never holds the customer's key; the key the
+     * provider sees is the one recorded on the stored attempt. A fresh key here would
+     * be refused anyway, because the order's existing attempt is still unsettled.
+     */
+    reconcile: (orderId: number) =>
+        api.post<RefundResponse>(`/api/admin/orders/${orderId}/refund/reconcile`, undefined),
 }

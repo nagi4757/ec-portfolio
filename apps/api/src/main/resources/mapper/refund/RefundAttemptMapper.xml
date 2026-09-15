@@ -81,6 +81,28 @@
     </select>
 
     <!--
+        The attempt that currently speaks for this order, settled or not.
+
+        No status filter on purpose: a terminal attempt still has to be visible here,
+        because the point of this query is to tell a replayed older attempt apart
+        from the newest one. Filtering to unsettled rows would hide exactly the newer
+        attempt that makes the older one stale.
+
+        id is monotonic (AUTO_INCREMENT), so DESC gives the newest row. created_at is
+        not used for ordering: two attempts opened within the same second would tie.
+
+        The caller must hold the order row lock. Attempts are only created under that
+        lock, so nothing newer can appear between this read and the caller's decision.
+    -->
+    <select id="selectLatestByOrderId" resultMap="refundAttemptResultMap">
+        SELECT <include refid="refundAttemptColumns"/>
+        FROM refund_attempts
+        WHERE order_id = #{orderId}
+        ORDER BY id DESC
+        LIMIT 1
+    </select>
+
+    <!--
         Only a legal transition may be written.
 
         A terminal attempt is never rewritten: a concurrent retry must not overwrite

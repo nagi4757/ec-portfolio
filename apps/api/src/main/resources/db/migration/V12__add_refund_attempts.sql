@@ -7,10 +7,16 @@
 -- would pollute the reconciliation query that looks for a successful charge
 -- against an unfinalised order.
 
+-- Both halves are one ALTER rather than a DROP followed by an ADD. MariaDB does not
+-- roll DDL back, so a failure between two separate statements would leave the table
+-- with no status constraint at all and the migration half-applied. Same form as V11,
+-- verified on MariaDB 10.11: accepted, leaves exactly one constraint of that name,
+-- and the new value set takes effect immediately.
+--
+-- The new set is a superset of the old one, so every existing row stays valid while
+-- the constraint is replaced.
 ALTER TABLE orders
-    DROP CONSTRAINT chk_orders_status;
-
-ALTER TABLE orders
+    DROP CONSTRAINT chk_orders_status,
     ADD CONSTRAINT chk_orders_status
         CHECK (status IN (
             'LEGACY_UNPAID',

@@ -21,6 +21,21 @@ data class RefundCommand(
     }
 }
 
+/**
+ * A request to resume the refund an order already has.
+ *
+ * Deliberately carries no idempotency key. Reconciliation never starts a refund, so
+ * there is nothing for a client-supplied key to identify; the key that goes to the
+ * provider is the one already stored on the attempt. Accepting a key here would let
+ * a caller who lost the original one attach a new key to someone else's in-flight
+ * refund, which is the opposite of what an idempotency key is for.
+ */
+data class RefundReconcileCommand(
+    val orderId: Long,
+    /** The authenticated caller, or null when an operator is acting. */
+    val userId: Long?
+)
+
 /** What R1 decided: a fresh refund, or an existing one this request continues. */
 sealed interface RefundStartOutcome {
     data class Started(val attempt: RefundAttempt, val order: Order) : RefundStartOutcome

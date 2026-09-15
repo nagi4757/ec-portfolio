@@ -88,13 +88,25 @@ export default function AdminOrderDetailPage() {
 
         const orderId = Number(id)
         setRefunding(true)
-        // The same key is reused for every retry of this order's refund. Disabling
-        // the button is a courtesy only; the server's order lock and the refund
-        // attempt's idempotency are what prevent a second refund.
-        const idempotencyKey = resolveRefundKey(orderId)
 
         try {
-            const result = await RefundAdminApi.refund(orderId, idempotencyKey)
+            // Resuming goes through reconcile, which carries no key at all. Admin
+            // storage is a different origin from the storefront's, so an operator
+            // never holds the key a customer started the refund with; asking storage
+            // for one here would mint a fresh key and the server would refuse it as a
+            // second refund on the same order. The stored attempt's own key is what
+            // the server resumes with.
+            //
+            // A first request still carries the key, and reuses it for every retry.
+            // Disabling the button is a courtesy only; the server's order lock and
+            // the attempt's idempotency are what prevent a second refund.
+            //
+            // resolveRefundKey never throws, so the in-flight flag below is always
+            // cleared. It sits inside the try regardless, so that stays true even if
+            // that contract is ever weakened.
+            const result = resuming
+                ? await RefundAdminApi.reconcile(orderId)
+                : await RefundAdminApi.refund(orderId, resolveRefundKey(orderId))
 
             if (result.outcome === 'PENDING_CONFIRMATION') {
                 // Not a success: the money may not have moved, so the order is not

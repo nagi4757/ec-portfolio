@@ -19,6 +19,7 @@ import com.nagi4757.ec.api.refund.application.RefundCommand
 import com.nagi4757.ec.api.refund.application.RefundCoordinator
 import com.nagi4757.ec.api.refund.application.RefundFinalizeService
 import com.nagi4757.ec.api.refund.application.RefundOutcome
+import com.nagi4757.ec.api.refund.application.RefundReconcileCommand
 import com.nagi4757.ec.api.refund.application.RefundRequestService
 import com.nagi4757.ec.api.refund.application.RefundResultService
 import com.nagi4757.ec.api.refund.application.RefundStartOutcome
@@ -643,9 +644,382 @@ class RefundOrchestrationIntegrationTest @Autowired constructor(
         assertThat(applied.single()["success"].toString()).isIn("1", "true")
     }
 
+    // --- 10. a stale attempt must not speak for the order -------------------------
+
+    @Test
+    fun `findLatestByOrderId returns the newest attempt including settled ones`() {
+        val fixture = paidOrder(stock = 10, quantity = 3)
+
+        // A refused refund settles as FAILED and puts the order back.
+        forceFailedRefund(fixture)
+        assertThat(refundCoordinator.refund(refundCommand(fixture)).outcome)
+            .isEqualTo(RefundOutcome.FAILED)
+        val failed = requireNotNull(attemptFor(fixture).id)
+
+        // findActiveByOrderId deliberately ignores a settled attempt; this one must
+        // not, because "which attempt owns this order" is a different question.
+        assertThat(refundAttemptRepository.findActiveByOrderId(fixture.orderId)).isNull()
+        assertThat(refundAttemptRepository.findLatestByOrderId(fixture.orderId)?.id).isEqualTo(failed)
+
+        // A second refund opens a newer attempt, which then becomes the latest.
+        forceUnknownRefund(fixture)
+        val second = fixture.copy(refundKey = "refund-${UUID.randomUUID()}")
+        refundCoordinator.refund(refundCommand(second))
+        val newer = requireNotNull(attemptFor(second).id)
+
+        assertThat(newer).isGreaterThan(failed)
+        assertThat(refundAttemptRepository.findLatestByOrderId(fixture.orderId)?.id).isEqualTo(newer)
+
+        cleanup(fixture)
+    }
+
+    @Test
+    fun `a stale FAILED attempt replayed cannot release the order a newer refund holds`() {
+        val fixture = paidOrder(stock = 10, quantity = 3)
+        val committed = 7
+
+        // A. refused. The order goes back to PENDING and stock stays committed.
+        forceFailedRefund(fixture)
+        assertThat(refundCoordinator.refund(refundCommand(fixture)).outcome)
+            .isEqualTo(RefundOutcome.FAILED)
+        assertThat(orderRepository.findById(fixture.orderId)?.status).isEqualTo(OrderStatus.PENDING)
+        assertThat(attemptFor(fixture).status).isEqualTo(RefundAttemptStatus.FAILED)
+
+        // B. a new refund under a new key, left unresolved so the order stays held.
+        forceUnknownRefund(fixture)
+        val current = fixture.copy(refundKey = "refund-${UUID.randomUUID()}")
+        assertThat(refundCoordinator.refund(refundCommand(current)).outcome)
+            .isEqualTo(RefundOutcome.PENDING_CONFIRMATION)
+        assertThat(orderRepository.findById(fixture.orderId)?.status).isEqualTo(OrderStatus.REFUND_PENDING)
+
+        // A replayed. It is terminal, so no provider call happens and only R3 runs --
+        // and R3 has to recognise that A no longer speaks for this order.
+        val callsBefore = refundCallCount()
+        val staleReplay = refundCoordinator.refund(refundCommand(fixture))
+
+        assertThat(staleReplay.outcome).isEqualTo(RefundOutcome.FAILED)
+        assertThat(refundCallCount()).isEqualTo(callsBefore)
+        assertThat(orderRepository.findById(fixture.orderId)?.status)
+            .`as`("A must not hand B's order back to PENDING")
+            .isEqualTo(OrderStatus.REFUND_PENDING)
+        assertThat(productRepository.findById(fixture.productId)?.stockQuantity).isEqualTo(committed)
+
+        // B's provider call finally lands as REFUNDED, and B finalises.
+        refundResultService.record(
+            requireNotNull(attemptFor(current).id),
+            RefundPaymentResult(RefundPaymentStatus.REFUNDED, "mock-refund:${UUID.randomUUID()}")
+        )
+        val settled = refundCoordinator.refund(refundCommand(current))
+
+        assertThat(settled.outcome).isEqualTo(RefundOutcome.REFUNDED)
+        assertThat(settled.order.status).isEqualTo(OrderStatus.CANCELLED)
+        assertThat(productRepository.findById(fixture.productId)?.stockQuantity)
+            .`as`("stock restored exactly once, by B")
+            .isEqualTo(10)
+
+        // B replayed: the order is already CANCELLED, so the conditional transition
+        // matches nothing and stock cannot grow again.
+        refundCoordinator.refund(refundCommand(current))
+        assertThat(productRepository.findById(fixture.productId)?.stockQuantity).isEqualTo(10)
+
+        // A replayed once more, now after B cancelled, still changes nothing.
+        refundCoordinator.refund(refundCommand(fixture))
+        assertThat(orderRepository.findById(fixture.orderId)?.status).isEqualTo(OrderStatus.CANCELLED)
+        assertThat(productRepository.findById(fixture.productId)?.stockQuantity).isEqualTo(10)
+
+        cleanup(fixture)
+    }
+
+    @Test
+    fun `finalising a stale attempt reports it as stale and changes nothing`() {
+        val fixture = paidOrder(stock = 10, quantity = 3)
+
+        forceFailedRefund(fixture)
+        refundCoordinator.refund(refundCommand(fixture))
+        val stale = attemptFor(fixture)
+
+        forceUnknownRefund(fixture)
+        val current = fixture.copy(refundKey = "refund-${UUID.randomUUID()}")
+        refundCoordinator.refund(refundCommand(current))
+
+        val staleOutcome = refundFinalizeService.finalize(stale)
+
+        assertThat(staleOutcome.stale).isTrue()
+        assertThat(staleOutcome.changed).isFalse()
+        assertThat(staleOutcome.order.status).isEqualTo(OrderStatus.REFUND_PENDING)
+
+        // The current attempt is not stale, even though it changes nothing yet: it is
+        // UNKNOWN, so the order is deliberately held.
+        val currentOutcome = refundFinalizeService.finalize(attemptFor(current))
+        assertThat(currentOutcome.stale).isFalse()
+        assertThat(currentOutcome.changed).isFalse()
+        assertThat(currentOutcome.order.status).isEqualTo(OrderStatus.REFUND_PENDING)
+
+        cleanup(fixture)
+    }
+
+    @Test
+    fun `R3 reads the persisted status rather than trusting a stale snapshot`() {
+        val fixture = paidOrder(stock = 10, quantity = 3)
+
+        forceUnknownRefund(fixture)
+        refundCoordinator.refund(refundCommand(fixture))
+        val snapshot = attemptFor(fixture)
+        assertThat(snapshot.status).isEqualTo(RefundAttemptStatus.UNKNOWN)
+
+        // The attempt settles as REFUNDED behind this caller's back.
+        refundResultService.record(
+            requireNotNull(snapshot.id),
+            RefundPaymentResult(RefundPaymentStatus.REFUNDED, "mock-refund:${UUID.randomUUID()}")
+        )
+
+        // Finalising with the stale UNKNOWN snapshot must still act on REFUNDED.
+        val outcome = refundFinalizeService.finalize(snapshot)
+
+        assertThat(outcome.stale).isFalse()
+        assertThat(outcome.changed).isTrue()
+        assertThat(outcome.order.status).isEqualTo(OrderStatus.CANCELLED)
+        assertThat(productRepository.findById(fixture.productId)?.stockQuantity).isEqualTo(10)
+
+        cleanup(fixture)
+    }
+
+    // --- 11. server-side reconcile ------------------------------------------------
+
+    @Test
+    fun `a PENDING attempt is resumed under its persisted idempotency key`() {
+        val fixture = paidOrder(stock = 10, quantity = 3)
+
+        // R1 only: the attempt exists as PENDING and no provider call has happened.
+        // This is the shape of a crash between R1 and the refund call.
+        val started = refundRequestService.start(refundCommand(fixture)) as RefundStartOutcome.Started
+        assertThat(started.attempt.status).isEqualTo(RefundAttemptStatus.PENDING)
+
+        val resumed = refundCoordinator.reconcile(
+            RefundReconcileCommand(orderId = fixture.orderId, userId = fixture.userId)
+        )
+
+        assertThat(resumed.outcome).isEqualTo(RefundOutcome.REFUNDED)
+        assertThat(resumed.order.status).isEqualTo(OrderStatus.CANCELLED)
+        // The mock echoes the key it was called with into the refund reference, so
+        // this is direct evidence that the provider saw the stored key and not a new
+        // one -- there was no client key on this request at all.
+        assertThat(attemptFor(fixture).externalRefundId).isEqualTo("mock-refund:${fixture.refundKey}")
+        assertThat(refundCountForOrder(fixture.orderId)).isEqualTo(1)
+        assertThat(attemptFor(fixture).id).isEqualTo(started.attempt.id)
+        assertThat(productRepository.findById(fixture.productId)?.stockQuantity).isEqualTo(10)
+
+        cleanup(fixture)
+    }
+
+    @Test
+    fun `an UNKNOWN attempt is resumed on the stored attempt without opening a new one`() {
+        val fixture = paidOrder(stock = 10, quantity = 3)
+
+        forceUnknownRefund(fixture)
+        refundCoordinator.refund(refundCommand(fixture))
+        val attempt = attemptFor(fixture)
+        assertThat(attempt.status).isEqualTo(RefundAttemptStatus.UNKNOWN)
+
+        val resumed = refundCoordinator.reconcile(
+            RefundReconcileCommand(orderId = fixture.orderId, userId = fixture.userId)
+        )
+
+        // Still unresolved, and above all no second attempt and no second key.
+        assertThat(resumed.outcome).isEqualTo(RefundOutcome.PENDING_CONFIRMATION)
+        assertThat(resumed.order.status).isEqualTo(OrderStatus.REFUND_PENDING)
+        assertThat(refundCountForOrder(fixture.orderId)).isEqualTo(1)
+        assertThat(attemptFor(fixture).id).isEqualTo(attempt.id)
+        assertThat(attemptFor(fixture).idempotencyKey).isEqualTo(fixture.refundKey)
+        assertThat(productRepository.findById(fixture.productId)?.stockQuantity).isEqualTo(7)
+
+        cleanup(fixture)
+    }
+
+    @Test
+    fun `an admin reconciles a refund the customer started`() {
+        val fixture = paidOrder(stock = 10, quantity = 3)
+
+        forceUnknownRefund(fixture)
+        refundCoordinator.refund(refundCommand(fixture))
+        val attemptId = requireNotNull(attemptFor(fixture).id)
+
+        // The operator has no access to the customer's key: admin storage is a
+        // different origin. A null userId is the operator path.
+        val resumed = refundCoordinator.reconcile(
+            RefundReconcileCommand(orderId = fixture.orderId, userId = null)
+        )
+
+        assertThat(resumed.outcome).isEqualTo(RefundOutcome.PENDING_CONFIRMATION)
+        assertThat(refundCountForOrder(fixture.orderId)).isEqualTo(1)
+        assertThat(attemptFor(fixture).id).isEqualTo(attemptId)
+
+        cleanup(fixture)
+    }
+
+    @Test
+    fun `another user cannot reconcile someone else's order`() {
+        val fixture = paidOrder(stock = 10, quantity = 3)
+        val stranger = newUser()
+
+        forceUnknownRefund(fixture)
+        refundCoordinator.refund(refundCommand(fixture))
+
+        val refused = assertThrows<ApplicationException> {
+            refundCoordinator.reconcile(
+                RefundReconcileCommand(orderId = fixture.orderId, userId = stranger)
+            )
+        }
+
+        // Reported as not found rather than forbidden: confirming the order exists
+        // would tell a stranger which order ids are real.
+        assertThat(refused.errorCode).isEqualTo(ApiErrorCode.ORDER_NOT_FOUND)
+        assertThat(orderRepository.findById(fixture.orderId)?.status).isEqualTo(OrderStatus.REFUND_PENDING)
+        assertThat(refundCountForOrder(fixture.orderId)).isEqualTo(1)
+
+        jdbcTemplate.update("DELETE FROM users WHERE id = ?", stranger)
+        cleanup(fixture)
+    }
+
+    @Test
+    fun `reconciling a REFUNDED attempt on a held order finalises without calling the provider`() {
+        val fixture = paidOrder(stock = 10, quantity = 3)
+
+        // R1 and R2 only: the money went back, the order never left REFUND_PENDING.
+        val started = refundRequestService.start(refundCommand(fixture)) as RefundStartOutcome.Started
+        refundResultService.record(
+            requireNotNull(started.attempt.id),
+            RefundPaymentResult(RefundPaymentStatus.REFUNDED, "mock-refund:${UUID.randomUUID()}")
+        )
+        assertThat(orderRepository.findById(fixture.orderId)?.status).isEqualTo(OrderStatus.REFUND_PENDING)
+
+        val callsBefore = refundCallCount()
+        val resumed = refundCoordinator.reconcile(
+            RefundReconcileCommand(orderId = fixture.orderId, userId = fixture.userId)
+        )
+
+        assertThat(refundCallCount()).isEqualTo(callsBefore)
+        assertThat(resumed.outcome).isEqualTo(RefundOutcome.REFUNDED)
+        assertThat(resumed.order.status).isEqualTo(OrderStatus.CANCELLED)
+        assertThat(productRepository.findById(fixture.productId)?.stockQuantity).isEqualTo(10)
+
+        cleanup(fixture)
+    }
+
+    @Test
+    fun `reconciling a REFUNDED attempt on a cancelled order is idempotent`() {
+        val fixture = paidOrder(stock = 10, quantity = 3)
+        refundCoordinator.refund(refundCommand(fixture))
+        assertThat(productRepository.findById(fixture.productId)?.stockQuantity).isEqualTo(10)
+
+        val callsBefore = refundCallCount()
+        val resumed = refundCoordinator.reconcile(
+            RefundReconcileCommand(orderId = fixture.orderId, userId = fixture.userId)
+        )
+
+        assertThat(refundCallCount()).isEqualTo(callsBefore)
+        assertThat(resumed.outcome).isEqualTo(RefundOutcome.REFUNDED)
+        assertThat(resumed.order.status).isEqualTo(OrderStatus.CANCELLED)
+        assertThat(productRepository.findById(fixture.productId)?.stockQuantity)
+            .`as`("a second reconcile must not restore stock again")
+            .isEqualTo(10)
+
+        cleanup(fixture)
+    }
+
+    @Test
+    fun `reconciling a FAILED attempt on a held order restores the original status`() {
+        val fixture = paidOrder(stock = 10, quantity = 3)
+
+        // R1 and R2 only: the provider refused, R3 never ran.
+        val started = refundRequestService.start(refundCommand(fixture)) as RefundStartOutcome.Started
+        refundResultService.record(
+            requireNotNull(started.attempt.id),
+            RefundPaymentResult(RefundPaymentStatus.REFUND_FAILED, null)
+        )
+        assertThat(orderRepository.findById(fixture.orderId)?.status).isEqualTo(OrderStatus.REFUND_PENDING)
+
+        val callsBefore = refundCallCount()
+        val resumed = refundCoordinator.reconcile(
+            RefundReconcileCommand(orderId = fixture.orderId, userId = fixture.userId)
+        )
+
+        assertThat(resumed.outcome).isEqualTo(RefundOutcome.FAILED)
+        assertThat(refundCallCount()).isEqualTo(callsBefore)
+        assertThat(orderRepository.findById(fixture.orderId)?.status).isEqualTo(OrderStatus.PENDING)
+        assertThat(productRepository.findById(fixture.productId)?.stockQuantity).isEqualTo(7)
+
+        cleanup(fixture)
+    }
+
+    @Test
+    fun `reconciling a FAILED attempt on an already restored order changes nothing`() {
+        val fixture = paidOrder(stock = 10, quantity = 3)
+
+        forceFailedRefund(fixture)
+        refundCoordinator.refund(refundCommand(fixture))
+        assertThat(orderRepository.findById(fixture.orderId)?.status).isEqualTo(OrderStatus.PENDING)
+
+        val callsBefore = refundCallCount()
+        val resumed = refundCoordinator.reconcile(
+            RefundReconcileCommand(orderId = fixture.orderId, userId = fixture.userId)
+        )
+
+        assertThat(resumed.outcome).isEqualTo(RefundOutcome.FAILED)
+        assertThat(refundCallCount()).isEqualTo(callsBefore)
+        assertThat(orderRepository.findById(fixture.orderId)?.status).isEqualTo(OrderStatus.PENDING)
+        assertThat(productRepository.findById(fixture.productId)?.stockQuantity).isEqualTo(7)
+        // No new attempt: starting a fresh refund is a separate, explicit request.
+        assertThat(refundCountForOrder(fixture.orderId)).isEqualTo(1)
+
+        cleanup(fixture)
+    }
+
+    @Test
+    fun `reconciling an order with no refund attempt fails closed`() {
+        val fixture = paidOrder(stock = 10, quantity = 3)
+
+        val refused = assertThrows<ApplicationException> {
+            refundCoordinator.reconcile(
+                RefundReconcileCommand(orderId = fixture.orderId, userId = fixture.userId)
+            )
+        }
+
+        // Reconciliation resumes a refund; it never starts one.
+        assertThat(refused.errorCode).isEqualTo(ApiErrorCode.REFUND_NOT_ELIGIBLE)
+        assertThat(refundCountForOrder(fixture.orderId)).isZero()
+        assertThat(orderRepository.findById(fixture.orderId)?.status).isEqualTo(OrderStatus.PENDING)
+        assertThat(productRepository.findById(fixture.productId)?.stockQuantity).isEqualTo(7)
+
+        cleanup(fixture)
+    }
+
+    @Test
+    fun `an order held in REFUND_PENDING with no attempt is not recovered by guesswork`() {
+        val fixture = paidOrder(stock = 10, quantity = 3)
+
+        // Broken data: the order claims a refund that no attempt backs.
+        jdbcTemplate.update("UPDATE orders SET status = 'REFUND_PENDING' WHERE id = ?", fixture.orderId)
+
+        val refused = assertThrows<ApplicationException> {
+            refundCoordinator.reconcile(
+                RefundReconcileCommand(orderId = fixture.orderId, userId = fixture.userId)
+            )
+        }
+
+        assertThat(refused.errorCode).isEqualTo(ApiErrorCode.REFUND_NOT_ELIGIBLE)
+        // Neither cancelled nor released: an operator has to look at this.
+        assertThat(orderRepository.findById(fixture.orderId)?.status).isEqualTo(OrderStatus.REFUND_PENDING)
+        assertThat(productRepository.findById(fixture.productId)?.stockQuantity).isEqualTo(7)
+        assertThat(refundCountForOrder(fixture.orderId)).isZero()
+
+        jdbcTemplate.update("UPDATE orders SET status = 'CANCELLED' WHERE id = ?", fixture.orderId)
+        cleanup(fixture)
+    }
+
     // --- helpers ----------------------------------------------------------------------
 
-    private class Fixture(
+    private data class Fixture(
         val userId: Long,
         val productId: Long,
         val orderId: Long,

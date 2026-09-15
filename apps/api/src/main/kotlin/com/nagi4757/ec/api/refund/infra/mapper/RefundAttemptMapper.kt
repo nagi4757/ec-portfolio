@@ -10,6 +10,7 @@ interface RefundAttemptMapper {
     fun selectByIdempotencyKey(idempotencyKey: String): RefundAttemptRecord?
     fun selectById(id: Long): RefundAttemptRecord?
     fun selectActiveByOrderId(orderId: Long): RefundAttemptRecord?
+    fun selectLatestByOrderId(orderId: Long): RefundAttemptRecord?
     fun updateRefundAttemptResult(
         @Param("id") id: Long,
         @Param("status") status: String,

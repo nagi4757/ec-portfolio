@@ -204,6 +204,102 @@ describe('order detail refund action', () => {
         // Re-checking is an explicit user action, not a loop against the provider.
         expect(page()).not.toMatch(/setInterval|setTimeout\s*\(/)
     })
+
+    it('resumes a held refund through reconcile rather than a fresh key', () => {
+        const source = page()
+
+        // REFUND_PENDING means the server already holds an attempt. Asking storage
+        // for a key here mints a new one whenever this is not the tab that started
+        // the refund, and the server refuses that as a second refund -- leaving the
+        // customer unable to finish the one they have.
+        expect(source).toContain('? await RefundAPI.reconcile(orderId)')
+        expect(source).toContain(': await RefundAPI.refund(orderId, resolveRefundKey(orderId))')
+    })
+
+    it('asks for a key only inside the guarded section', () => {
+        const source = page()
+        const body = source.slice(
+            source.indexOf('async function refundOrder()'),
+            source.indexOf('async function cancelOrder()'),
+        )
+        const tryAt = body.indexOf('try {')
+        const keyAt = body.indexOf('resolveRefundKey(')
+
+        // Resolving the key before the try would strand the in-flight flag if it ever
+        // threw, leaving the button disabled with no way back.
+        expect(keyAt).toBeGreaterThan(tryAt)
+        expect(body.indexOf('setRefunding(true)')).toBeLessThan(tryAt)
+    })
+})
+
+describe('RefundAPI.reconcile', () => {
+    beforeEach(() => {
+        const entries = new Map<string, string>()
+        const storage = {
+            getItem: (key: string) => entries.get(key) ?? null,
+            setItem: (key: string, value: string) => void entries.set(key, value),
+            removeItem: (key: string) => void entries.delete(key),
+            clear: () => entries.clear(),
+        }
+        vi.stubGlobal('localStorage', storage)
+        vi.stubGlobal('sessionStorage', storage)
+    })
+
+    afterEach(() => {
+        vi.unstubAllGlobals()
+    })
+
+    it('calls the reconcile endpoint for the order', async () => {
+        const calls = stubFetch(respond(200, { outcome: 'REFUNDED', order }))
+
+        await RefundAPI.reconcile(30)
+
+        expect(calls[0].url).toContain('/api/user/orders/30/refund/reconcile')
+        expect(calls[0].init.method).toBe('POST')
+    })
+
+    it('sends no Idempotency-Key', async () => {
+        const calls = stubFetch(respond(200, { outcome: 'REFUNDED', order }))
+
+        await RefundAPI.reconcile(30)
+
+        // The key identifying the attempt lives on the server. This is the path for a
+        // customer who no longer has their copy, so sending one defeats the point --
+        // and a fresh key would be refused as a second refund.
+        const headers = (calls[0].init.headers ?? {}) as Record<string, string>
+        expect(headers['Idempotency-Key']).toBeUndefined()
+    })
+
+    it('sends no request body', async () => {
+        const calls = stubFetch(respond(200, { outcome: 'REFUNDED', order }))
+
+        await RefundAPI.reconcile(30)
+
+        expect(calls[0].init.body).toBeUndefined()
+    })
+
+    it('returns PENDING_CONFIRMATION when the refund is still unresolved', async () => {
+        stubFetch(respond(202, {
+            outcome: 'PENDING_CONFIRMATION',
+            order: { ...order, status: 'REFUND_PENDING' },
+        }))
+
+        const result = await RefundAPI.reconcile(30)
+
+        expect(result.outcome).toBe('PENDING_CONFIRMATION')
+        expect(result.order.status).toBe('REFUND_PENDING')
+    })
+
+    it('recovers an order whose key this browser never held', async () => {
+        const calls = stubFetch(respond(200, { outcome: 'REFUNDED', order }))
+
+        // Nothing is read from storage on this path, so an empty store is not an
+        // obstacle to finishing the refund.
+        await RefundAPI.reconcile(30)
+
+        const headers = (calls[0].init.headers ?? {}) as Record<string, string>
+        expect(Object.keys(headers)).not.toContain('Idempotency-Key')
+    })
 })
 
 describe('order status presentation', () => {
