@@ -140,6 +140,86 @@ class InfrastructureIntegrationTest @Autowired constructor(
     }
 
     @Test
+    fun `migrates legacy unpaid orders on a database that already holds them`() {
+        // The whole-history migration test runs against empty tables, so the UPDATE in
+        // V11 matches nothing and the CHECK it has to satisfy is never exercised. This
+        // test stops at V10, seeds the rows a real demo database holds, and only then
+        // applies V11 -- which is the only way the ordering bug becomes visible.
+        val legacyDatabase = MariaDBContainer<Nothing>("mariadb:10.11")
+        legacyDatabase.start()
+        try {
+            val dataSource = DriverManagerDataSource(
+                legacyDatabase.jdbcUrl,
+                legacyDatabase.username,
+                legacyDatabase.password
+            )
+            Flyway.configure()
+                .dataSource(dataSource)
+                .target(MigrationVersion.fromVersion("10"))
+                .load()
+                .migrate()
+            val legacyJdbc = JdbcTemplate(dataSource)
+
+            // A pre-checkout order: PENDING with no payment attempt behind it.
+            legacyJdbc.update(
+                "INSERT INTO orders (user_id, status, total_amount) VALUES (?, 'PENDING', ?)",
+                7_001L, 10_000L
+            )
+            // Identified by its owner rather than LAST_INSERT_ID(): DriverManagerDataSource
+            // opens a fresh connection per call, and that function is per-connection.
+            val legacyOrderId = requireNotNull(
+                legacyJdbc.queryForObject(
+                    "SELECT id FROM orders WHERE user_id = ?", Long::class.java, 7_001L
+                )
+            )
+            // Orders in every other state, which must come through untouched.
+            listOf("PREPARING", "SHIPPED", "DELIVERED", "CANCELLED").forEach { status ->
+                legacyJdbc.update(
+                    "INSERT INTO orders (user_id, status, total_amount) VALUES (?, ?, ?)",
+                    7_002L, status, 2_000L
+                )
+            }
+
+            val result = Flyway.configure().dataSource(dataSource).load().migrate()
+
+            // Before the fix this threw: V11 wrote LEGACY_UNPAID while the V10 CHECK
+            // still forbade it, and Flyway reported a failed migration.
+            assertThat(result.migrationsExecuted).isEqualTo(1)
+            assertThat(result.success).isTrue()
+
+            assertThat(
+                legacyJdbc.queryForObject(
+                    "SELECT status FROM orders WHERE id = ?", String::class.java, legacyOrderId
+                )
+            ).isEqualTo("LEGACY_UNPAID")
+
+            // Everything that was not an unpaid PENDING order is left exactly as it was.
+            assertThat(
+                legacyJdbc.queryForList(
+                    "SELECT status FROM orders WHERE id <> ? ORDER BY id",
+                    String::class.java,
+                    legacyOrderId
+                )
+            ).containsExactly("PREPARING", "SHIPPED", "DELIVERED", "CANCELLED")
+
+            // The replacement constraint is in force: the new value is accepted and an
+            // unknown one is still refused.
+            legacyJdbc.update(
+                "INSERT INTO orders (user_id, status, total_amount) VALUES (?, 'LEGACY_UNPAID', ?)",
+                7_003L, 1_000L
+            )
+            org.junit.jupiter.api.assertThrows<DataIntegrityViolationException> {
+                legacyJdbc.update(
+                    "INSERT INTO orders (user_id, status, total_amount) VALUES (?, 'REFUNDED', ?)",
+                    7_003L, 1_000L
+                )
+            }
+        } finally {
+            legacyDatabase.stop()
+        }
+    }
+
+    @Test
     fun `migrates existing confirmed orders to preparing before adding status constraint`() {
         val legacyDatabase = MariaDBContainer<Nothing>("mariadb:10.11")
         legacyDatabase.start()
