@@ -125,10 +125,20 @@ jobs:
   deploy-frontends:
     name: Deploy Store and Admin frontends
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # deploy-api is a dependency so a release the API did not take cannot ship its
+    # frontend alone. A migration change fails the guard inside build-and-push-api,
+    # which skips deploy-api; without this the frontend would still go out and start
+    # calling endpoints the running backend does not have. That is not hypothetical:
+    # it is what the bdc3828 release did.
+    #
+    # An offline EC2 is deliberately not covered by this. deploy-api records the
+    # desired SHA and exits successfully so boot convergence applies it later, and
+    # the frontend follows as before -- that desired-state model is unchanged here.
     needs:
       - backend
       - frontend
       - docker
+      - deploy-api
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: demo-frontend
