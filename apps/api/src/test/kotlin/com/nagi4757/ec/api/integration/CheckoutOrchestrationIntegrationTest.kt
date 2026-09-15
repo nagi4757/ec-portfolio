@@ -492,17 +492,25 @@ class CheckoutOrchestrationIntegrationTest @Autowired constructor(
 
         try {
             val futures = List(threads) {
-                executor.submit<CheckoutOutcome?> {
+                executor.submit<CheckoutCallResult> {
                     start.await()
-                    runCatching { checkoutCoordinator.checkout(command).outcome }.getOrNull()
+                    callCheckout(command)
                 }
             }
             start.countDown()
-            val outcomes = futures.map { it.get(20, TimeUnit.SECONDS) }
+            val results = futures.map { it.get(20, TimeUnit.SECONDS) }
 
-            assertThat(outcomes).allMatch { it == CheckoutOutcome.PAID }
-            // Losers of the unique-key race roll back their reservation entirely, so
-            // only one order exists and only three units left the shelf.
+            // Every caller gets the same checkout's result. None may fail: a duplicate
+            // submit is a replay, whatever the cart looks like by the time it is
+            // served. EMPTY_CART here would mean idempotency was decided from cart
+            // state instead of from the key.
+            assertThat(results).allSatisfy { outcome ->
+                assertThat(outcome.error).isNull()
+                assertThat(outcome.thrown).isNull()
+                assertThat(outcome.outcome).isEqualTo(CheckoutOutcome.PAID)
+                assertThat(outcome.orderId).isEqualTo(results.first().orderId)
+            }
+            // One reservation: one order, one attempt, three units off the shelf.
             assertThat(orderCountFor(userId)).isEqualTo(1)
             assertThat(attemptCountFor(command.idempotencyKey)).isEqualTo(1)
             assertThat(productRepository.findById(productId)?.stockQuantity).isEqualTo(7)
@@ -826,6 +834,90 @@ class CheckoutOrchestrationIntegrationTest @Autowired constructor(
         assertThat(orderRepository.findById(orderId)?.status).isEqualTo(OrderStatus.LEGACY_UNPAID)
 
         jdbcTemplate.update("DELETE FROM orders WHERE id = ?", orderId)
+    }
+
+    // --- idempotency is decided from the key, never from cart state ---------------
+
+    /** One call's observable result, including the failure it produced if any. */
+    private data class CheckoutCallResult(
+        val outcome: CheckoutOutcome?,
+        val orderId: Long?,
+        val error: ApiErrorCode?,
+        val thrown: Throwable? = null
+    )
+
+    private fun callCheckout(command: CheckoutCommand): CheckoutCallResult = try {
+        val result = checkoutCoordinator.checkout(command)
+        CheckoutCallResult(result.outcome, result.order.id, null)
+    } catch (exception: ApplicationException) {
+        CheckoutCallResult(null, null, exception.errorCode, exception)
+    } catch (exception: RuntimeException) {
+        CheckoutCallResult(null, null, null, exception)
+    }
+
+    @Test
+    fun `reserve re-reads the key under the lock instead of trusting a stale lookup`() {
+        // This is the stale state from the race, made deterministic.
+        //
+        // The coordinator looks the key up before queuing on the user lock. A request
+        // that finds nothing there, then waits, reaches reserve() holding an answer
+        // that is already wrong: whoever held the lock may have created the attempt or
+        // carried it to a settled outcome. Calling reserve() directly is exactly that
+        // situation -- it is the state the coordinator's fast path would have skipped.
+        //
+        // Before the fix, reserve() only asked for *unsettled* attempts, so a settled
+        // same-key attempt was invisible and the request walked into a fresh checkout,
+        // failing on the cart the first request had already cleared.
+        val userId = newUser()
+        val productId = newProduct(stock = 10)
+        cartRepository.increment(userId, productId, 3)
+        val command = command(userId, "mock:success")
+
+        val first = checkoutCoordinator.checkout(command)
+        assertThat(first.outcome).isEqualTo(CheckoutOutcome.PAID)
+        assertThat(cartRepository.findAll(userId)).isEmpty()
+        assertThat(attemptFor(first.order.id).status).isEqualTo(PaymentAttemptStatus.SUCCESS)
+
+        val outcome = reservationService.reserve(command)
+
+        assertThat(outcome).isInstanceOf(ReserveOutcome.Existing::class.java)
+        assertThat((outcome as ReserveOutcome.Existing).attempt.idempotencyKey)
+            .isEqualTo(command.idempotencyKey)
+        assertThat(outcome.attempt.orderId).isEqualTo(first.order.id)
+        // No second reservation: the stock stays where the first checkout left it.
+        assertThat(orderCountFor(userId)).isEqualTo(1)
+        assertThat(attemptCountFor(command.idempotencyKey)).isEqualTo(1)
+        assertThat(productRepository.findById(productId)?.stockQuantity).isEqualTo(7)
+
+        cleanup(userId, productId)
+    }
+
+    @Test
+    fun `a refilled cart does not turn a duplicate submit into a second order`() {
+        val userId = newUser()
+        val productId = newProduct(stock = 10)
+        cartRepository.increment(userId, productId, 3)
+        val command = command(userId, "mock:success")
+
+        val first = checkoutCoordinator.checkout(command)
+        assertThat(first.outcome).isEqualTo(CheckoutOutcome.PAID)
+
+        // The customer puts the product back in the basket, then the original request
+        // is retried. A non-empty cart must not make the key look new either.
+        cartRepository.increment(userId, productId, 2)
+
+        // Directly, again: a non-empty cart must not make a known key look new.
+        val outcome = reservationService.reserve(command)
+        assertThat(outcome).isInstanceOf(ReserveOutcome.Existing::class.java)
+
+        assertThat((outcome as ReserveOutcome.Existing).attempt.orderId).isEqualTo(first.order.id)
+        assertThat(orderCountFor(userId)).isEqualTo(1)
+        assertThat(attemptCountFor(command.idempotencyKey)).isEqualTo(1)
+        // Only the original three units left the shelf, and the new line survives.
+        assertThat(productRepository.findById(productId)?.stockQuantity).isEqualTo(7)
+        assertThat(cartRepository.findAll(userId)).containsExactly(CartItem(productId, 2))
+
+        cleanup(userId, productId)
     }
 
     // --- helpers ------------------------------------------------------------------
