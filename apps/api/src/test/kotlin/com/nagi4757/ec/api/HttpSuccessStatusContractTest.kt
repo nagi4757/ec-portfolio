@@ -4,6 +4,11 @@ import com.nagi4757.ec.api.category.application.CategoryService
 import com.nagi4757.ec.api.category.application.command.CreateCategoryCommand
 import com.nagi4757.ec.api.category.domain.model.Category
 import com.nagi4757.ec.api.category.presentation.admin.CategoryAdminController
+import com.nagi4757.ec.api.checkout.application.CheckoutCommand
+import com.nagi4757.ec.api.checkout.application.CheckoutCoordinator
+import com.nagi4757.ec.api.checkout.application.CheckoutOutcome
+import com.nagi4757.ec.api.checkout.application.CheckoutResult
+import com.nagi4757.ec.api.checkout.presentation.CheckoutController
 import com.nagi4757.ec.api.common.error.GlobalExceptionHandler
 import com.nagi4757.ec.api.common.logging.CorrelationIdFilter
 import com.nagi4757.ec.api.common.security.JwtUserClaims
@@ -35,6 +40,7 @@ class HttpSuccessStatusContractTest {
     private lateinit var categoryService: CategoryService
     private lateinit var productService: ProductService
     private lateinit var orderService: OrderService
+    private lateinit var checkoutCoordinator: CheckoutCoordinator
     private lateinit var mockMvc: MockMvc
 
     @BeforeEach
@@ -42,11 +48,13 @@ class HttpSuccessStatusContractTest {
         categoryService = mock(CategoryService::class.java)
         productService = mock(ProductService::class.java)
         orderService = mock(OrderService::class.java)
+        checkoutCoordinator = mock(CheckoutCoordinator::class.java)
         mockMvc = MockMvcBuilders
             .standaloneSetup(
                 CategoryAdminController(categoryService),
                 ProductAdminController(productService),
-                OrderUserController(orderService)
+                OrderUserController(orderService),
+                CheckoutController(checkoutCoordinator)
             )
             .setControllerAdvice(GlobalExceptionHandler())
             .addFilters<StandaloneMockMvcBuilder>(CorrelationIdFilter())
@@ -133,7 +141,7 @@ class HttpSuccessStatusContractTest {
     }
 
     @Test
-    fun `order creation returns created with the existing response body`() {
+    fun `checkout returns created with the order body when the payment succeeds`() {
         val shippingAddress = ShippingAddress(
             recipientName = "Test Recipient",
             postalCode = "100-0001",
@@ -143,48 +151,60 @@ class HttpSuccessStatusContractTest {
             addressLine2 = null,
             phoneNumber = "03-1234-5678"
         )
-        `when`(orderService.placeOrder(USER_ID, shippingAddress)).thenReturn(
-            Order(
-                id = 30L,
-                userId = USER_ID,
-                status = OrderStatus.PENDING,
-                totalAmount = 2_000L,
-                createdAt = null,
-                shippingAddress = shippingAddress,
-                items = listOf(
-                    OrderItem(
-                        id = 40L,
-                        orderId = 30L,
-                        productId = 20L,
-                        name = "Product",
-                        price = 1_000L,
-                        quantity = 2,
-                        lineAmount = 2_000L
+        val expectedCommand = CheckoutCommand(
+            userId = USER_ID,
+            shippingAddress = shippingAddress,
+            paymentMethodId = "mock:success",
+            idempotencyKey = "contract-key-1"
+        )
+        `when`(checkoutCoordinator.checkout(expectedCommand)).thenReturn(
+            CheckoutResult(
+                outcome = CheckoutOutcome.PAID,
+                order = Order(
+                    id = 30L,
+                    userId = USER_ID,
+                    status = OrderStatus.PENDING,
+                    totalAmount = 2_000L,
+                    createdAt = null,
+                    shippingAddress = shippingAddress,
+                    items = listOf(
+                        OrderItem(
+                            id = 40L,
+                            orderId = 30L,
+                            productId = 20L,
+                            name = "Product",
+                            price = 1_000L,
+                            quantity = 2,
+                            lineAmount = 2_000L
+                        )
                     )
                 )
             )
         )
 
-        mockMvc.post("/api/user/orders") {
+        mockMvc.post("/api/user/checkout") {
             contentType = MediaType.APPLICATION_JSON
-            content = validOrderRequest()
+            header("Idempotency-Key", "contract-key-1")
+            content = validCheckoutRequest()
         }.andExpect {
             status { isCreated() }
             content { contentTypeCompatibleWith(MediaType.APPLICATION_JSON) }
-            jsonPath("$.id") { value(30) }
-            jsonPath("$.status") { value("PENDING") }
-            jsonPath("$.totalAmount") { value(2_000) }
-            jsonPath("$.items[0].productId") { value(20) }
-            jsonPath("$.items[0].quantity") { value(2) }
-            jsonPath("$.shippingAddress.recipientName") { value("Test Recipient") }
-            jsonPath("$.shippingAddress.postalCode") { value("100-0001") }
+            jsonPath("$.outcome") { value("PAID") }
+            jsonPath("$.order.id") { value(30) }
+            jsonPath("$.order.status") { value("PENDING") }
+            jsonPath("$.order.totalAmount") { value(2_000) }
+            jsonPath("$.order.items[0].productId") { value(20) }
+            jsonPath("$.order.items[0].quantity") { value(2) }
+            jsonPath("$.order.shippingAddress.recipientName") { value("Test Recipient") }
+            jsonPath("$.order.shippingAddress.postalCode") { value("100-0001") }
         }
     }
 
     @Test
-    fun `order creation rejects a missing shipping address`() {
-        mockMvc.post("/api/user/orders") {
+    fun `checkout rejects a missing shipping address`() {
+        mockMvc.post("/api/user/checkout") {
             contentType = MediaType.APPLICATION_JSON
+            header("Idempotency-Key", "contract-key-2")
             content = "{}"
         }.andExpect {
             status { isBadRequest() }
@@ -192,18 +212,20 @@ class HttpSuccessStatusContractTest {
     }
 
     @Test
-    fun `order creation rejects an invalid Japanese postal code`() {
-        mockMvc.post("/api/user/orders") {
+    fun `checkout rejects an invalid Japanese postal code`() {
+        mockMvc.post("/api/user/checkout") {
             contentType = MediaType.APPLICATION_JSON
-            content = validOrderRequest().replace("100-0001", "invalid")
+            header("Idempotency-Key", "contract-key-3")
+            content = validCheckoutRequest().replace("100-0001", "invalid")
         }.andExpect {
             status { isBadRequest() }
             jsonPath("$.code") { value("VALIDATION_FAILED") }
         }
     }
 
-    private fun validOrderRequest() = """
+    private fun validCheckoutRequest() = """
         {
+          "paymentMethodId": "mock:success",
           "shippingAddress": {
             "recipientName": "Test Recipient",
             "postalCode": "100-0001",

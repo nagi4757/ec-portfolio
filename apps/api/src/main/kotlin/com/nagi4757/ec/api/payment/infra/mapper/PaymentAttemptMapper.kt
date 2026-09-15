@@ -8,6 +8,8 @@ import java.time.LocalDateTime
 interface PaymentAttemptMapper {
     fun insertPaymentAttempt(record: PaymentAttemptRecord): Int
     fun selectByIdempotencyKey(idempotencyKey: String): PaymentAttemptRecord?
+    fun selectById(id: Long): PaymentAttemptRecord?
+    fun selectActiveByUserId(userId: Long): PaymentAttemptRecord?
     fun updatePaymentAttemptResult(
         @Param("id") id: Long,
         @Param("status") status: String,
@@ -22,6 +24,7 @@ data class PaymentAttemptRecord(
     val amountJpy: Long = 0,
     val status: String = "PENDING",
     val externalPaymentId: String? = null,
+    val orderId: Long? = null,
     val createdAt: LocalDateTime? = null,
     val updatedAt: LocalDateTime? = null
 )

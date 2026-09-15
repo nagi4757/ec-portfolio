@@ -18,6 +18,8 @@ class MyBatisUserRepository(
     override fun findByEmail(email: String): User? =
         mapper.selectByEmail(email)?.let(factory::fromRecord)
 
+    override fun lockForUpdate(id: Long): Boolean = mapper.lockById(id) != null
+
     @Transactional
     override fun create(user: User): Long {
         val row = factory.toRecord(user)

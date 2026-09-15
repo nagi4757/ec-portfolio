@@ -1,6 +1,18 @@
-export type OrderStatus = 'PENDING' | 'PREPARING' | 'SHIPPED' | 'DELIVERED' | 'CANCELLED'
+// PAYMENT_PENDING is set while a payment outcome is unresolved. PENDING now means
+// the order is paid and waiting to be handled.
+export type OrderStatus =
+    // Predates checkout: created without a payment, never shippable.
+    | 'LEGACY_UNPAID'
+    | 'PAYMENT_PENDING'
+    | 'PENDING'
+    | 'PREPARING'
+    | 'SHIPPED'
+    | 'DELIVERED'
+    | 'CANCELLED'
 
 export const ORDER_STATUS_TRANSLATION_KEY: Record<OrderStatus, string> = {
+    LEGACY_UNPAID: 'admin.order.status.legacyUnpaid',
+    PAYMENT_PENDING: 'admin.order.status.paymentPending',
     PENDING: 'admin.order.status.pending',
     PREPARING: 'admin.order.status.preparing',
     SHIPPED: 'admin.order.status.shipped',
@@ -8,9 +20,18 @@ export const ORDER_STATUS_TRANSLATION_KEY: Record<OrderStatus, string> = {
     CANCELLED: 'admin.order.status.cancelled',
 }
 
+// Mirrors OrderStatus.canTransitionTo on the server.
+//
+// Cancellation is absent from the paid states: the money has been captured and
+// refund orchestration does not exist yet, so the server refuses those transitions.
+// PAYMENT_PENDING is absent because the payment outcome is unresolved, and preparing
+// such an order could ship goods that were never paid for.
 export const ORDER_STATUS_TRANSITIONS: Record<OrderStatus, readonly OrderStatus[]> = {
-    PENDING: ['PREPARING', 'CANCELLED'],
-    PREPARING: ['SHIPPED', 'CANCELLED'],
+    // Nobody paid for these, so they may be cancelled but never shipped.
+    LEGACY_UNPAID: ['CANCELLED'],
+    PAYMENT_PENDING: [],
+    PENDING: ['PREPARING'],
+    PREPARING: ['SHIPPED'],
     SHIPPED: ['DELIVERED'],
     DELIVERED: [],
     CANCELLED: [],

@@ -125,7 +125,8 @@ class OpenApiDocumentationTest(
         assertErrorSchemaReference(cartConflict)
 
         val orderCancelConflict = operation("/api/user/orders/{id}/cancel", "post").path("responses").path("409")
-        assertEquals("INVALID_ORDER_TRANSITION", orderCancelConflict.path("description").asText())
+        assertTrue(orderCancelConflict.path("description").asText().contains("INVALID_ORDER_TRANSITION"))
+        assertTrue(orderCancelConflict.path("description").asText().contains("ORDER_CANCELLATION_REQUIRES_REFUND"))
 
         val productNotFound = operation("/api/public/products/{id}", "get").path("responses").path("404")
         assertEquals("PRODUCT_NOT_FOUND", productNotFound.path("description").asText())
@@ -158,13 +159,18 @@ class OpenApiDocumentationTest(
     @Test
     fun `create operations reference distinct request schemas`() {
         val schemas = document.path("components").path("schemas")
-        val orderCreateRef = requestSchemaRef("/api/user/orders", "post")
+        // Orders are created through checkout now; POST /api/user/orders is gone.
+        val checkoutRef = requestSchemaRef("/api/user/checkout", "post")
         val productCreateRef = requestSchemaRef("/api/admin/products", "post")
         val categoryCreateRef = requestSchemaRef("/api/admin/categories", "post")
-        assertEquals("#/components/schemas/CreateOrderRequest", orderCreateRef)
+        assertEquals("#/components/schemas/CheckoutRequest", checkoutRef)
         assertEquals("#/components/schemas/CreateProductRequest", productCreateRef)
         assertEquals("#/components/schemas/CreateCategoryRequest", categoryCreateRef)
-        assertTrue(schemas.path(schemaName(orderCreateRef)).path("properties").has("shippingAddress"))
+        assertTrue(schemas.path(schemaName(checkoutRef)).path("properties").has("shippingAddress"))
+        assertTrue(schemas.path(schemaName(checkoutRef)).path("properties").has("paymentMethodId"))
+        // The client must never be able to state what it pays.
+        assertFalse(schemas.path(schemaName(checkoutRef)).path("properties").has("amountJpy"))
+        assertFalse(schemas.path(schemaName(checkoutRef)).path("properties").has("totalAmount"))
         assertTrue(schemas.path(schemaName(productCreateRef)).path("properties").has("name"))
         assertTrue(schemas.path(schemaName(productCreateRef)).path("properties").has("price"))
         assertTrue(schemas.path(schemaName(productCreateRef)).path("properties").has("stockQuantity"))
@@ -192,7 +198,11 @@ class OpenApiDocumentationTest(
     @Test
     fun `product cart and order schemas reflect the current API contract`() {
         val schemas = document.path("components").path("schemas")
-        val expectedStatuses = listOf("PENDING", "PREPARING", "SHIPPED", "DELIVERED", "CANCELLED")
+        val expectedStatuses =
+            listOf(
+                "LEGACY_UNPAID", "PAYMENT_PENDING", "PENDING",
+                "PREPARING", "SHIPPED", "DELIVERED", "CANCELLED",
+            )
         assertEquals(expectedStatuses, schemas.path("OrderResponse").path("properties").path("status").path("enum").map { it.asText() })
         assertEquals(expectedStatuses, schemas.path("UpdateStatus").path("properties").path("status").path("enum").map { it.asText() })
 
@@ -205,8 +215,10 @@ class OpenApiDocumentationTest(
         assertTrue(operation("/api/admin/categories", "post").path("responses").has("201"))
         assertTrue(operation("/api/admin/categories/{id}", "delete").path("responses").has("204"))
         assertTrue(operation("/api/admin/products", "post").path("responses").has("201"))
-        assertTrue(operation("/api/user/orders", "post").path("responses").has("201"))
-        assertTrue(operation("/api/user/orders", "post").path("responses").has("400"))
+        assertTrue(operation("/api/user/checkout", "post").path("responses").has("201"))
+        // The order creation endpoint is gone: paying is the only way to create one.
+        assertTrue(operation("/api/user/orders", "post").isMissingNode)
+        assertTrue(operation("/api/user/checkout", "post").path("responses").has("400"))
         assertTrue(operation("/api/admin/products/{id}", "delete").path("responses").has("204"))
     }
 

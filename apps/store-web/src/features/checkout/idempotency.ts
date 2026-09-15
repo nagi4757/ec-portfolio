@@ -1,0 +1,146 @@
+import type { ShippingAddress } from '@/types/order'
+
+/**
+ * Idempotency key lifecycle for checkout.
+ *
+ * A key identifies one payment attempt, not one button press. Generating a fresh
+ * key after a network error or an unconfirmed result would ask the server to charge
+ * again for the same basket, so the key survives every retry of the same attempt and
+ * is only replaced once the outcome is terminal or the customer changes what they
+ * are buying.
+ *
+ * The key is kept in sessionStorage so a refresh in the same tab resumes the attempt
+ * rather than starting a second payment for it. Only the key and a short digest of
+ * the attempt's inputs are stored: no address, no token, no cart contents.
+ */
+
+const STORAGE_KEY = 'checkout.idempotency.v1'
+
+export type CheckoutIntent = {
+    paymentMethodId: string
+    shippingAddress: ShippingAddress
+    cartSignature: string
+}
+
+type StoredAttempt = {
+    key: string
+    /** Digest of the intent. The inputs themselves are never persisted. */
+    intent: string
+}
+
+export interface AttemptStorage {
+    getItem(key: string): string | null
+    setItem(key: string, value: string): void
+    removeItem(key: string): void
+}
+
+function defaultStorage(): AttemptStorage | null {
+    try {
+        return globalThis.sessionStorage ?? null
+    } catch {
+        // Storage can be unavailable or blocked. The flow still works; a refresh
+        // simply cannot resume the attempt.
+        return null
+    }
+}
+
+/**
+ * Stable signature of the cart lines the customer is paying for. Quantities and
+ * products matter; display fields do not.
+ */
+export function cartSignature(items: ReadonlyArray<{ productId: number; quantity: number }>): string {
+    return [...items]
+        .sort((left, right) => left.productId - right.productId)
+        .map((item) => `${item.productId}:${item.quantity}`)
+        .join(',')
+}
+
+/**
+ * Short non-cryptographic digest. This exists to detect a changed intent, not to
+ * protect anything, and it keeps the address out of storage.
+ */
+function digest(intent: CheckoutIntent): string {
+    const address = intent.shippingAddress
+    const canonical = [
+        intent.paymentMethodId,
+        address.recipientName,
+        address.postalCode,
+        address.prefecture,
+        address.city,
+        address.addressLine1,
+        address.addressLine2 ?? '',
+        address.phoneNumber,
+        intent.cartSignature,
+        // Separated by a byte that cannot occur in any field above, written as
+        // an escape so the source file holds no raw control character.
+    ].join('\u0000')
+
+    let hash = 5381
+    for (let index = 0; index < canonical.length; index += 1) {
+        hash = ((hash << 5) + hash + canonical.charCodeAt(index)) | 0
+    }
+    return (hash >>> 0).toString(36)
+}
+
+function read(storage: AttemptStorage | null): StoredAttempt | null {
+    if (!storage) return null
+    const raw = storage.getItem(STORAGE_KEY)
+    if (!raw) return null
+    try {
+        const parsed: unknown = JSON.parse(raw)
+        if (
+            parsed && typeof parsed === 'object' &&
+            typeof (parsed as StoredAttempt).key === 'string' &&
+            typeof (parsed as StoredAttempt).intent === 'string'
+        ) {
+            return parsed as StoredAttempt
+        }
+    } catch {
+        // Unreadable state is discarded rather than trusted.
+    }
+    storage.removeItem(STORAGE_KEY)
+    return null
+}
+
+function newKey(): string {
+    const uuid = globalThis.crypto?.randomUUID?.()
+    if (uuid) return uuid
+    return `checkout-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`
+}
+
+/**
+ * Returns the key to send.
+ *
+ * The stored key is reused when the attempt describes the same purchase, which is
+ * what makes a retry a retry. A different payment method, address or cart is a
+ * different purchase and gets a new key: reusing one there would be rejected by the
+ * server as an idempotency conflict.
+ */
+export function resolveIdempotencyKey(
+    intent: CheckoutIntent,
+    storage: AttemptStorage | null = defaultStorage(),
+): string {
+    const intentDigest = digest(intent)
+    const stored = read(storage)
+
+    if (stored && stored.intent === intentDigest) {
+        return stored.key
+    }
+
+    const key = newKey()
+    storage?.setItem(STORAGE_KEY, JSON.stringify({ key, intent: intentDigest } satisfies StoredAttempt))
+    return key
+}
+
+/**
+ * Called once the outcome is terminal: paid, declined or failed. An unconfirmed
+ * result must not clear the key, because the next attempt has to reuse it.
+ */
+export function clearIdempotencyKey(storage: AttemptStorage | null = defaultStorage()): void {
+    storage?.removeItem(STORAGE_KEY)
+}
+
+/** Exposed for tests and for diagnostics; never rendered. */
+export function peekIdempotencyKey(storage: AttemptStorage | null = defaultStorage()): string | null {
+    return read(storage)?.key ?? null
+}

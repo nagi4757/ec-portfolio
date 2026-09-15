@@ -3,6 +3,13 @@ package com.nagi4757.ec.api.integration
 import com.nagi4757.ec.api.cart.application.CartService
 import com.nagi4757.ec.api.cart.domain.model.CartItem
 import com.nagi4757.ec.api.cart.domain.repository.CartRepository
+import com.nagi4757.ec.api.checkout.application.CheckoutCommand
+import com.nagi4757.ec.api.checkout.application.CheckoutCoordinator
+import com.nagi4757.ec.api.checkout.application.CheckoutFinalizeService
+import com.nagi4757.ec.api.checkout.application.CheckoutOutcome
+import com.nagi4757.ec.api.checkout.application.CheckoutReservationService
+import com.nagi4757.ec.api.checkout.application.PaymentResultService
+import com.nagi4757.ec.api.checkout.application.ReserveOutcome
 import com.nagi4757.ec.api.common.error.ApiErrorCode
 import com.nagi4757.ec.api.common.error.ApplicationException
 import com.nagi4757.ec.api.common.logging.CorrelationIdContext
@@ -14,6 +21,8 @@ import com.nagi4757.ec.api.order.domain.model.OrderStatus
 import com.nagi4757.ec.api.order.domain.model.ShippingAddress
 import com.nagi4757.ec.api.order.domain.repository.OrderRepository
 import com.nagi4757.ec.api.payment.application.ChargePaymentRequest
+import com.nagi4757.ec.api.payment.application.ChargePaymentResult
+import com.nagi4757.ec.api.payment.application.ChargePaymentStatus
 import com.nagi4757.ec.api.payment.application.PaymentRequestFingerprint
 import com.nagi4757.ec.api.payment.domain.model.PaymentAttemptStatus
 import com.nagi4757.ec.api.payment.domain.repository.PaymentAttemptRepository
@@ -62,9 +71,30 @@ class InfrastructureIntegrationTest @Autowired constructor(
     private val cartRepository: CartRepository,
     private val cartService: CartService,
     private val orderService: OrderService,
+    private val checkoutCoordinator: CheckoutCoordinator,
+    private val checkoutReservationService: CheckoutReservationService,
+    private val paymentResultService: PaymentResultService,
+    private val checkoutFinalizeService: CheckoutFinalizeService,
     private val healthContributorRegistry: HealthContributorRegistry,
     private val mockMvc: MockMvc
 ) {
+
+    /**
+     * Creates an order the only way the application allows: by paying for the cart.
+     * Orders cannot be created without a payment any more, so every test that needs
+     * one goes through checkout.
+     */
+    private fun checkout(
+        userId: Long,
+        paymentMethodId: String = "mock:success"
+    ) = checkoutCoordinator.checkout(
+        CheckoutCommand(
+            userId = userId,
+            shippingAddress = shippingAddress(),
+            paymentMethodId = paymentMethodId,
+            idempotencyKey = "integration-${UUID.randomUUID()}"
+        )
+    )
 
     @Test
     fun `reports actual database and redis readiness without exposing infrastructure details`() {
@@ -90,11 +120,13 @@ class InfrastructureIntegrationTest @Autowired constructor(
     }
 
     @Test
-    fun `applies Flyway migrations V1 through V9 and initializes existing products`() {
+    fun `applies Flyway migrations V1 through V11 and initializes existing products`() {
         val appliedVersions = flyway.info().applied()
             .mapNotNull { it.version?.version }
 
-        assertThat(appliedVersions).containsExactly("1", "2", "3", "4", "5", "6", "7", "8", "9")
+        assertThat(appliedVersions).containsExactly(
+            "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11"
+        )
         val existingStock = jdbcTemplate.queryForList(
             "SELECT stock_quantity FROM products WHERE id IN (1, 2, 3) ORDER BY id",
             Int::class.java
@@ -105,6 +137,86 @@ class InfrastructureIntegrationTest @Autowired constructor(
             Boolean::class.java
         )
         assertThat(existingActive).containsExactly(true, true, true)
+    }
+
+    @Test
+    fun `migrates legacy unpaid orders on a database that already holds them`() {
+        // The whole-history migration test runs against empty tables, so the UPDATE in
+        // V11 matches nothing and the CHECK it has to satisfy is never exercised. This
+        // test stops at V10, seeds the rows a real demo database holds, and only then
+        // applies V11 -- which is the only way the ordering bug becomes visible.
+        val legacyDatabase = MariaDBContainer<Nothing>("mariadb:10.11")
+        legacyDatabase.start()
+        try {
+            val dataSource = DriverManagerDataSource(
+                legacyDatabase.jdbcUrl,
+                legacyDatabase.username,
+                legacyDatabase.password
+            )
+            Flyway.configure()
+                .dataSource(dataSource)
+                .target(MigrationVersion.fromVersion("10"))
+                .load()
+                .migrate()
+            val legacyJdbc = JdbcTemplate(dataSource)
+
+            // A pre-checkout order: PENDING with no payment attempt behind it.
+            legacyJdbc.update(
+                "INSERT INTO orders (user_id, status, total_amount) VALUES (?, 'PENDING', ?)",
+                7_001L, 10_000L
+            )
+            // Identified by its owner rather than LAST_INSERT_ID(): DriverManagerDataSource
+            // opens a fresh connection per call, and that function is per-connection.
+            val legacyOrderId = requireNotNull(
+                legacyJdbc.queryForObject(
+                    "SELECT id FROM orders WHERE user_id = ?", Long::class.java, 7_001L
+                )
+            )
+            // Orders in every other state, which must come through untouched.
+            listOf("PREPARING", "SHIPPED", "DELIVERED", "CANCELLED").forEach { status ->
+                legacyJdbc.update(
+                    "INSERT INTO orders (user_id, status, total_amount) VALUES (?, ?, ?)",
+                    7_002L, status, 2_000L
+                )
+            }
+
+            val result = Flyway.configure().dataSource(dataSource).load().migrate()
+
+            // Before the fix this threw: V11 wrote LEGACY_UNPAID while the V10 CHECK
+            // still forbade it, and Flyway reported a failed migration.
+            assertThat(result.migrationsExecuted).isEqualTo(1)
+            assertThat(result.success).isTrue()
+
+            assertThat(
+                legacyJdbc.queryForObject(
+                    "SELECT status FROM orders WHERE id = ?", String::class.java, legacyOrderId
+                )
+            ).isEqualTo("LEGACY_UNPAID")
+
+            // Everything that was not an unpaid PENDING order is left exactly as it was.
+            assertThat(
+                legacyJdbc.queryForList(
+                    "SELECT status FROM orders WHERE id <> ? ORDER BY id",
+                    String::class.java,
+                    legacyOrderId
+                )
+            ).containsExactly("PREPARING", "SHIPPED", "DELIVERED", "CANCELLED")
+
+            // The replacement constraint is in force: the new value is accepted and an
+            // unknown one is still refused.
+            legacyJdbc.update(
+                "INSERT INTO orders (user_id, status, total_amount) VALUES (?, 'LEGACY_UNPAID', ?)",
+                7_003L, 1_000L
+            )
+            org.junit.jupiter.api.assertThrows<DataIntegrityViolationException> {
+                legacyJdbc.update(
+                    "INSERT INTO orders (user_id, status, total_amount) VALUES (?, 'REFUNDED', ?)",
+                    7_003L, 1_000L
+                )
+            }
+        } finally {
+            legacyDatabase.stop()
+        }
     }
 
     @Test
@@ -134,7 +246,7 @@ class InfrastructureIntegrationTest @Autowired constructor(
                 .load()
                 .migrate()
 
-            assertThat(migrationResult.migrationsExecuted).isEqualTo(4)
+            assertThat(migrationResult.migrationsExecuted).isEqualTo(6)
             assertThat(legacyJdbcTemplate.queryForObject(
                 "SELECT status FROM orders LIMIT 1",
                 String::class.java
@@ -167,7 +279,10 @@ class InfrastructureIntegrationTest @Autowired constructor(
         )
         val fingerprint = PaymentRequestFingerprint.from(request)
 
-        val created = paymentAttemptRepository.createPending(idempotencyKey, fingerprint, request.amountJpy)
+        val orderId = insertOrderRow()
+        val created = paymentAttemptRepository.createPending(
+            idempotencyKey, fingerprint, request.amountJpy, orderId
+        )
 
         assertThat(created.id).isPositive()
         assertThat(created.idempotencyKey).isEqualTo(idempotencyKey)
@@ -187,22 +302,24 @@ class InfrastructureIntegrationTest @Autowired constructor(
             .noneMatch { it.contains(paymentMethodId) }
 
         val attemptId = requireNotNull(created.id)
-        assertThat(paymentAttemptRepository.updateResult(
+        assertThat(paymentAttemptRepository.applyResult(
             attemptId,
             PaymentAttemptStatus.SUCCESS,
             "external-payment-${UUID.randomUUID()}"
-        )).isTrue()
+        ).applied).isTrue()
         val succeeded = requireNotNull(paymentAttemptRepository.findByIdempotencyKey(idempotencyKey))
         assertThat(succeeded.status).isEqualTo(PaymentAttemptStatus.SUCCESS)
         assertThat(succeeded.externalPaymentId).startsWith("external-payment-")
 
         val timeoutKey = "payment-timeout-${UUID.randomUUID()}"
-        val timeout = paymentAttemptRepository.createPending(timeoutKey, fingerprint, request.amountJpy)
-        assertThat(paymentAttemptRepository.updateResult(
+        val timeout = paymentAttemptRepository.createPending(
+            timeoutKey, fingerprint, request.amountJpy, orderId
+        )
+        assertThat(paymentAttemptRepository.applyResult(
             requireNotNull(timeout.id),
             PaymentAttemptStatus.TIMEOUT,
             null
-        )).isTrue()
+        ).applied).isTrue()
         assertThat(paymentAttemptRepository.findByIdempotencyKey(timeoutKey)?.status)
             .isEqualTo(PaymentAttemptStatus.TIMEOUT)
     }
@@ -212,10 +329,11 @@ class InfrastructureIntegrationTest @Autowired constructor(
     fun `database enforces payment attempt idempotency and persisted status constraints`() {
         val idempotencyKey = "payment-constraint-${UUID.randomUUID()}"
         val fingerprint = "a".repeat(64)
-        paymentAttemptRepository.createPending(idempotencyKey, fingerprint, 10_000L)
+        val orderId = insertOrderRow()
+        paymentAttemptRepository.createPending(idempotencyKey, fingerprint, 10_000L, orderId)
 
         org.junit.jupiter.api.assertThrows<DataIntegrityViolationException> {
-            paymentAttemptRepository.createPending(idempotencyKey, fingerprint, 10_000L)
+            paymentAttemptRepository.createPending(idempotencyKey, fingerprint, 10_000L, orderId)
         }
         org.junit.jupiter.api.assertThrows<DataIntegrityViolationException> {
             jdbcTemplate.update(
@@ -235,6 +353,7 @@ class InfrastructureIntegrationTest @Autowired constructor(
     fun `database allows only one concurrent payment attempt per idempotency key`() {
         val idempotencyKey = "payment-concurrent-${UUID.randomUUID()}"
         val fingerprint = "b".repeat(64)
+        val concurrentOrderId = insertOrderRow()
         val ready = CountDownLatch(2)
         val start = CountDownLatch(1)
         val executor = Executors.newFixedThreadPool(2)
@@ -245,7 +364,7 @@ class InfrastructureIntegrationTest @Autowired constructor(
                     ready.countDown()
                     start.await()
                     try {
-                        paymentAttemptRepository.createPending(idempotencyKey, fingerprint, 20_000L)
+                        paymentAttemptRepository.createPending(idempotencyKey, fingerprint, 20_000L, concurrentOrderId)
                         true
                     } catch (_: DataIntegrityViolationException) {
                         false
@@ -543,7 +662,7 @@ class InfrastructureIntegrationTest @Autowired constructor(
             assertThat(updateFailure.errorCode).isEqualTo(ApiErrorCode.PRODUCT_NOT_AVAILABLE)
 
             val orderFailure = org.junit.jupiter.api.assertThrows<ApplicationException> {
-                orderService.placeOrder(userId, shippingAddress())
+                checkout(userId).order
             }
             assertThat(orderFailure.errorCode).isEqualTo(ApiErrorCode.PRODUCT_NOT_AVAILABLE)
 
@@ -655,7 +774,7 @@ class InfrastructureIntegrationTest @Autowired constructor(
 
         try {
             val exception = org.junit.jupiter.api.assertThrows<ApplicationException> {
-                orderService.placeOrder(userId, shippingAddress())
+                checkout(userId).order
             }
 
             assertThat(exception.errorCode).isEqualTo(ApiErrorCode.INSUFFICIENT_STOCK)
@@ -699,7 +818,7 @@ class InfrastructureIntegrationTest @Autowired constructor(
                 executor.submit<Pair<Long, ApiErrorCode?>> {
                     start.await()
                     try {
-                        orderService.placeOrder(userId, shippingAddress())
+                        checkout(userId).order
                         userId to null
                     } catch (exception: ApplicationException) {
                         userId to exception.errorCode
@@ -736,23 +855,24 @@ class InfrastructureIntegrationTest @Autowired constructor(
     }
 
     @Test
-    fun `places and cancels an order while restoring exact stock`() {
+    fun `declined payment restores exact stock and leaves the cart untouched`() {
         val userId = uniqueUserId()
         val productId = productRepository.create(
-            product(stockQuantity = 5, namePrefix = "cancel-restore")
+            product(stockQuantity = 5, namePrefix = "declined-restore")
         )
         cartRepository.clear(userId)
         cartRepository.increment(userId, productId, 3)
 
         try {
-            val order = orderService.placeOrder(userId, shippingAddress())
-            assertThat(productRepository.findById(productId)?.stockQuantity).isEqualTo(2)
+            val result = checkout(userId, paymentMethodId = "mock:declined")
 
-            val cancelled = orderService.cancelOrder(userId, requireNotNull(order.id))
-
-            assertThat(cancelled.status).isEqualTo(OrderStatus.CANCELLED)
+            assertThat(result.outcome).isEqualTo(CheckoutOutcome.DECLINED)
+            assertThat(result.order.status).isEqualTo(OrderStatus.CANCELLED)
+            // The reservation is fully undone: no payment was established, so
+            // compensating needs no refund.
             assertThat(productRepository.findById(productId)?.stockQuantity).isEqualTo(5)
-            assertThat(cartRepository.findAll(userId)).isEmpty()
+            // The customer keeps their basket so they can retry with another card.
+            assertThat(cartRepository.findAll(userId)).containsExactly(CartItem(productId, 3))
         } finally {
             cartRepository.clear(userId)
             deleteOrdersForUser(userId)
@@ -761,22 +881,75 @@ class InfrastructureIntegrationTest @Autowired constructor(
     }
 
     @Test
-    fun `cancels existing order after deactivation and restores stock while remaining inactive`() {
+    fun `successful payment confirms the order and removes only the reserved cart lines`() {
+        val userId = uniqueUserId()
+        val reservedId = productRepository.create(
+            product(stockQuantity = 5, namePrefix = "paid-reserved")
+        )
+        val addedLaterId = productRepository.create(
+            product(stockQuantity = 5, namePrefix = "paid-added-later")
+        )
+        cartRepository.clear(userId)
+        cartRepository.increment(userId, reservedId, 3)
+
+        try {
+            val result = checkout(userId)
+
+            assertThat(result.outcome).isEqualTo(CheckoutOutcome.PAID)
+            assertThat(result.order.status).isEqualTo(OrderStatus.PENDING)
+            assertThat(productRepository.findById(reservedId)?.stockQuantity).isEqualTo(2)
+            assertThat(cartRepository.findAll(userId)).isEmpty()
+
+            // A paid order cannot be cancelled: doing so would owe the customer money.
+            val refused = org.junit.jupiter.api.assertThrows<ApplicationException> {
+                orderService.cancelOrder(userId, requireNotNull(result.order.id))
+            }
+            assertThat(refused.errorCode).isEqualTo(ApiErrorCode.ORDER_CANCELLATION_REQUIRES_REFUND)
+            assertThat(productRepository.findById(reservedId)?.stockQuantity).isEqualTo(2)
+        } finally {
+            cartRepository.clear(userId)
+            deleteOrdersForUser(userId)
+            deleteProduct(reservedId)
+            deleteProduct(addedLaterId)
+        }
+    }
+
+    @Test
+    fun `declined payment restores stock of a product deactivated meanwhile`() {
         val userId = uniqueUserId()
         val productId = productRepository.create(
-            product(stockQuantity = 5, namePrefix = "inactive-cancel-restore")
+            product(stockQuantity = 5, namePrefix = "inactive-declined-restore")
         )
         cartRepository.clear(userId)
         cartRepository.increment(userId, productId, 3)
 
         try {
-            val order = orderService.placeOrder(userId, shippingAddress())
+            // Reserve while the product is still sold, then withdraw it, then let the
+            // charge fail. Compensation must return the stock regardless: it came from
+            // this product and has to go back to it whether or not it is still listed.
+            val reserveOutcome = checkoutReservationService.reserve(
+                CheckoutCommand(
+                    userId = userId,
+                    shippingAddress = shippingAddress(),
+                    paymentMethodId = "mock:declined",
+                    idempotencyKey = "inactive-declined-${UUID.randomUUID()}"
+                )
+            )
+            val reserved = (reserveOutcome as ReserveOutcome.Reserved).reservation
             assertThat(productRepository.findById(productId)?.stockQuantity).isEqualTo(2)
             assertThat(productRepository.deactivate(productId)).isTrue()
 
-            val cancelled = orderService.cancelOrder(userId, requireNotNull(order.id))
+            paymentResultService.record(
+                reserved.paymentAttemptId,
+                ChargePaymentResult(ChargePaymentStatus.DECLINED)
+            )
+            val finalized = checkoutFinalizeService.finalize(
+                requireNotNull(reserved.order.id),
+                PaymentAttemptStatus.DECLINED
+            )
 
-            assertThat(cancelled.status).isEqualTo(OrderStatus.CANCELLED)
+            assertThat(finalized.changed).isTrue()
+            assertThat(finalized.order.status).isEqualTo(OrderStatus.CANCELLED)
             val stored = requireNotNull(productRepository.findById(productId))
             assertThat(stored.stockQuantity).isEqualTo(5)
             assertThat(stored.active).isFalse()
@@ -806,7 +979,7 @@ class InfrastructureIntegrationTest @Autowired constructor(
             val orderFuture = executor.submit<ApiErrorCode?> {
                 start.await()
                 try {
-                    orderService.placeOrder(userId, shippingAddress())
+                    checkout(userId).order
                     null
                 } catch (exception: ApplicationException) {
                     exception.errorCode
@@ -844,36 +1017,49 @@ class InfrastructureIntegrationTest @Autowired constructor(
     }
 
     @Test
-    fun `allows only one concurrent cancellation and restores stock once`() {
+    fun `concurrent declined checkouts for one key never double restore stock`() {
         val userId = uniqueUserId()
         val productId = productRepository.create(
-            product(stockQuantity = 2, namePrefix = "concurrent-cancel")
+            product(stockQuantity = 2, namePrefix = "concurrent-declined")
         )
         cartRepository.clear(userId)
         cartRepository.increment(userId, productId, 2)
-        val orderId = requireNotNull(orderService.placeOrder(userId, shippingAddress()).id)
+        val idempotencyKey = "concurrent-declined-${UUID.randomUUID()}"
+        val command = CheckoutCommand(
+            userId = userId,
+            shippingAddress = shippingAddress(),
+            paymentMethodId = "mock:declined",
+            idempotencyKey = idempotencyKey
+        )
         val start = CountDownLatch(1)
         val executor = Executors.newFixedThreadPool(2)
 
         try {
             val futures = List(2) {
-                executor.submit<ApiErrorCode?> {
+                executor.submit<CheckoutOutcome?> {
                     start.await()
                     try {
-                        orderService.cancelOrder(userId, orderId)
+                        checkoutCoordinator.checkout(command).outcome
+                    } catch (_: ApplicationException) {
                         null
-                    } catch (exception: ApplicationException) {
-                        exception.errorCode
                     }
                 }
             }
             start.countDown()
-            val attempts = futures.map { it.get(10, TimeUnit.SECONDS) }
+            val outcomes = futures.map { it.get(10, TimeUnit.SECONDS) }
 
-            assertThat(attempts.count { it == null }).isEqualTo(1)
-            assertThat(attempts.count { it == ApiErrorCode.INVALID_ORDER_TRANSITION }).isEqualTo(1)
-            assertThat(orderRepository.findById(orderId)?.status).isEqualTo(OrderStatus.CANCELLED)
+            // With stock exactly equal to the cart, the loser of the idempotency-key
+            // race may instead fail earlier on stock, because a reservation is taken
+            // before the key is claimed. Either way at least one caller settles, and
+            // the invariants below must hold regardless of which path each took.
+            assertThat(outcomes.filterNotNull()).isNotEmpty.allMatch { it == CheckoutOutcome.DECLINED }
             assertThat(productRepository.findById(productId)?.stockQuantity).isEqualTo(2)
+            val attempts = jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM payment_attempts WHERE idempotency_key = ?",
+                Int::class.java,
+                idempotencyKey
+            )
+            assertThat(attempts).isEqualTo(1)
         } finally {
             executor.shutdownNow()
             cartRepository.clear(userId)
@@ -883,14 +1069,14 @@ class InfrastructureIntegrationTest @Autowired constructor(
     }
 
     @Test
-    fun `keeps order and stock consistent when admin transition races with user cancellation`() {
+    fun `refuses user cancellation while an admin transition proceeds`() {
         val userId = uniqueUserId()
         val productId = productRepository.create(
             product(stockQuantity = 1, namePrefix = "admin-user-race")
         )
         cartRepository.clear(userId)
         cartRepository.increment(userId, productId, 1)
-        val orderId = requireNotNull(orderService.placeOrder(userId, shippingAddress()).id)
+        val orderId = requireNotNull(checkout(userId).order.id)
         val start = CountDownLatch(1)
         val executor = Executors.newFixedThreadPool(2)
 
@@ -920,13 +1106,12 @@ class InfrastructureIntegrationTest @Autowired constructor(
             val finalOrder = requireNotNull(orderRepository.findById(orderId))
             val finalStock = productRepository.findById(productId)?.stockQuantity
 
-            assertThat(attempts.count { it == null }).isEqualTo(1)
-            assertThat(attempts.count { it == ApiErrorCode.INVALID_ORDER_TRANSITION }).isEqualTo(1)
-            when (finalOrder.status) {
-                OrderStatus.PREPARING -> assertThat(finalStock).isZero()
-                OrderStatus.CANCELLED -> assertThat(finalStock).isEqualTo(1)
-                else -> throw AssertionError("Unexpected final order status: ${finalOrder.status}")
-            }
+            // Cancelling a paid order is closed until refunds exist, so the race the
+            // old contract had is gone: the admin transition is the only one that can
+            // win, and the stock stays with the order.
+            assertThat(attempts).containsExactly(null, ApiErrorCode.ORDER_CANCELLATION_REQUIRES_REFUND)
+            assertThat(finalOrder.status).isEqualTo(OrderStatus.PREPARING)
+            assertThat(finalStock).isZero()
         } finally {
             executor.shutdownNow()
             cartRepository.clear(userId)
@@ -943,7 +1128,7 @@ class InfrastructureIntegrationTest @Autowired constructor(
         )
         cartRepository.clear(userId)
         cartRepository.increment(userId, productId, 1)
-        orderService.placeOrder(userId, shippingAddress())
+        checkout(userId).order
 
         try {
             org.junit.jupiter.api.assertThrows<DataIntegrityViolationException> {
@@ -1061,8 +1246,35 @@ class InfrastructureIntegrationTest @Autowired constructor(
         phoneNumber = "03-1234-5678"
     )
 
-    private fun uniqueUserId(): Long =
-        ThreadLocalRandom.current().nextLong(1_000_000_000L, Long.MAX_VALUE)
+    /**
+     * A bare order row for tests that only care about payment_attempts constraints.
+     * These tests run inside a transaction, so a real checkout is not an option: its
+     * REQUIRES_NEW steps run on another connection and could not see the order.
+     */
+    private fun insertOrderRow(): Long {
+        val userId = uniqueUserId()
+        jdbcTemplate.update(
+            "INSERT INTO orders (user_id, status, total_amount) VALUES (?, 'PAYMENT_PENDING', ?)",
+            userId,
+            10_000L
+        )
+        return requireNotNull(
+            jdbcTemplate.queryForObject("SELECT LAST_INSERT_ID()", Long::class.java)
+        )
+    }
+
+    /**
+     * A real users row. Checkout locks the user FOR UPDATE, so a synthetic id would
+     * silently skip the serialisation the guard depends on.
+     */
+    private fun uniqueUserId(): Long {
+        val email = "infra-${UUID.randomUUID()}@example.test"
+        jdbcTemplate.update(
+            "INSERT INTO users (email, password_hash, name, role) VALUES (?, 'x', 'Test', 'USER')",
+            email
+        )
+        return requireNotNull(jdbcTemplate.queryForObject("SELECT LAST_INSERT_ID()", Long::class.java))
+    }
 
     private fun deleteOrdersForUser(userId: Long) {
         val orderIds = jdbcTemplate.queryForList(
@@ -1071,9 +1283,15 @@ class InfrastructureIntegrationTest @Autowired constructor(
             userId
         )
         orderIds.forEach { orderId ->
+            // payment_attempts references orders since V10, so it has to go first.
+            jdbcTemplate.update("DELETE FROM payment_attempts WHERE order_id = ?", orderId)
             jdbcTemplate.update("DELETE FROM order_items WHERE order_id = ?", orderId)
             jdbcTemplate.update("DELETE FROM orders WHERE id = ?", orderId)
         }
+    }
+
+    private fun deleteUser(userId: Long) {
+        jdbcTemplate.update("DELETE FROM users WHERE id = ?", userId)
     }
 
     private fun deleteProduct(productId: Long) {

@@ -10,6 +10,7 @@
         <result property="amountJpy" column="amount_jpy"/>
         <result property="status" column="status"/>
         <result property="externalPaymentId" column="external_payment_id"/>
+        <result property="orderId" column="order_id"/>
         <result property="createdAt" column="created_at"/>
         <result property="updatedAt" column="updated_at"/>
     </resultMap>
@@ -20,14 +21,16 @@
             request_fingerprint,
             amount_jpy,
             status,
-            external_payment_id
+            external_payment_id,
+            order_id
         )
         VALUES (
             #{idempotencyKey},
             #{requestFingerprint},
             #{amountJpy},
             #{status},
-            #{externalPaymentId}
+            #{externalPaymentId},
+            #{orderId}
         )
     </insert>
 
@@ -39,17 +42,65 @@
             amount_jpy,
             status,
             external_payment_id,
+            order_id,
             created_at,
             updated_at
         FROM payment_attempts
         WHERE idempotency_key = #{idempotencyKey}
     </select>
 
+    <select id="selectById" resultMap="paymentAttemptResultMap">
+        SELECT
+            id,
+            idempotency_key,
+            request_fingerprint,
+            amount_jpy,
+            status,
+            external_payment_id,
+            order_id,
+            created_at,
+            updated_at
+        FROM payment_attempts
+        WHERE id = #{id}
+    </select>
+
+    <!--
+        The caller must already hold the user row lock; this only reads what that
+        lock makes stable. PENDING and TIMEOUT are the unsettled states, so either
+        one means a charge may still be in flight for this user.
+    -->
+    <select id="selectActiveByUserId" resultMap="paymentAttemptResultMap">
+        SELECT
+            a.id,
+            a.idempotency_key,
+            a.request_fingerprint,
+            a.amount_jpy,
+            a.status,
+            a.external_payment_id,
+            a.order_id,
+            a.created_at,
+            a.updated_at
+        FROM payment_attempts a
+        JOIN orders o ON o.id = a.order_id
+        WHERE o.user_id = #{userId}
+          AND a.status IN ('PENDING', 'TIMEOUT')
+        ORDER BY a.id
+        LIMIT 1
+    </select>
+
+    <!--
+        Only a non-terminal attempt may be written. Without the status guard a
+        concurrent retry could overwrite a recorded SUCCESS, destroying the only
+        durable evidence that money was taken. Zero affected rows is not an
+        error: it means another writer already settled this attempt, and the
+        caller reloads to find out what it decided.
+    -->
     <update id="updatePaymentAttemptResult">
         UPDATE payment_attempts
         SET status = #{status},
             external_payment_id = #{externalPaymentId}
         WHERE id = #{id}
+          AND status IN ('PENDING', 'TIMEOUT')
     </update>
 
 </mapper>
