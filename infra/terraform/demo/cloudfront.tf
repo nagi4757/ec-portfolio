@@ -21,6 +21,7 @@ resource "aws_cloudfront_origin_request_policy" "api" {
         "Access-Control-Request-Method",
         "Authorization",
         "Content-Type",
+        "Idempotency-Key",
         "Origin",
         "X-Correlation-ID",
       ]
