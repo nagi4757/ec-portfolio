@@ -6,6 +6,8 @@ export type OrderStatus =
     | 'PAYMENT_PENDING'
     | 'PENDING'
     | 'PREPARING'
+    // A refund is in flight and its outcome is not yet known.
+    | 'REFUND_PENDING'
     | 'SHIPPED'
     | 'DELIVERED'
     | 'CANCELLED'
@@ -15,6 +17,7 @@ export const ORDER_STATUS_TRANSLATION_KEY: Record<OrderStatus, string> = {
     PAYMENT_PENDING: 'store.order.status.paymentPending',
     PENDING: 'store.order.status.pending',
     PREPARING: 'store.order.status.preparing',
+    REFUND_PENDING: 'store.order.status.refundPending',
     SHIPPED: 'store.order.status.shipped',
     DELIVERED: 'store.order.status.delivered',
     CANCELLED: 'store.order.status.cancelled',

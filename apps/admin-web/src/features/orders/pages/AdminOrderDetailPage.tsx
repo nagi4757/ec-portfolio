@@ -2,9 +2,12 @@ import { useCallback, useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { OrderAdminApi } from '@/features/orders/api'
+import { RefundAdminApi } from '@/features/refund/api'
+import { clearRefundKey, resolveRefundKey } from '@/features/refund/idempotency'
 import { isApiErrorCode } from '@/lib/api'
 import { ORDER_STATUS_TRANSITIONS, ORDER_STATUS_TRANSLATION_KEY } from '@/types/order'
 import type { Order, OrderStatus } from '@/types/order'
+import { isRefundable } from '@/types/refund'
 
 const statusColor: Record<OrderStatus, string> = {
     LEGACY_UNPAID: '#64748b',
@@ -12,6 +15,7 @@ const statusColor: Record<OrderStatus, string> = {
     PAYMENT_PENDING: '#0369a1',
     PENDING: '#b7791f',
     PREPARING: '#2b6cb0',
+    REFUND_PENDING: '#0369a1',
     SHIPPED: '#6b46c1',
     DELIVERED: '#276749',
     CANCELLED: '#c53030',
@@ -25,6 +29,7 @@ export default function AdminOrderDetailPage() {
     const [loading, setLoading] = useState(true)
     const [error, setError] = useState<string | null>(null)
     const [updating, setUpdating] = useState(false)
+    const [refunding, setRefunding] = useState(false)
 
     const loadOrder = useCallback(async () => {
         if (!id) {
@@ -70,6 +75,69 @@ export default function AdminOrderDetailPage() {
             }
         } finally {
             setUpdating(false)
+        }
+    }
+
+    async function refundOrder() {
+        if (!id || !order) return
+        // REFUND_PENDING is included: that is the re-check path for a refund whose
+        // outcome was never confirmed, and it continues the same attempt.
+        const resuming = order.status === 'REFUND_PENDING'
+        if (!resuming && !isRefundable(order.status)) return
+        if (!resuming && !confirm(t('admin.order.refund.confirm'))) return
+
+        const orderId = Number(id)
+        setRefunding(true)
+
+        try {
+            // Resuming goes through reconcile, which carries no key at all. Admin
+            // storage is a different origin from the storefront's, so an operator
+            // never holds the key a customer started the refund with; asking storage
+            // for one here would mint a fresh key and the server would refuse it as a
+            // second refund on the same order. The stored attempt's own key is what
+            // the server resumes with.
+            //
+            // A first request still carries the key, and reuses it for every retry.
+            // Disabling the button is a courtesy only; the server's order lock and
+            // the attempt's idempotency are what prevent a second refund.
+            //
+            // resolveRefundKey never throws, so the in-flight flag below is always
+            // cleared. It sits inside the try regardless, so that stays true even if
+            // that contract is ever weakened.
+            const result = resuming
+                ? await RefundAdminApi.reconcile(orderId)
+                : await RefundAdminApi.refund(orderId, resolveRefundKey(orderId))
+
+            if (result.outcome === 'PENDING_CONFIRMATION') {
+                // Not a success: the money may not have moved, so the order is not
+                // cancelled and the key is kept for an explicit re-check.
+                setOrder(result.order)
+                alert(t('admin.order.refund.pendingNotice'))
+                return
+            }
+
+            clearRefundKey(orderId)
+            await loadOrder()
+            alert(t('admin.order.refund.success'))
+        } catch (cause) {
+            if (isApiErrorCode(cause, 'REFUND_FAILED')) {
+                // A known refusal is terminal: a further attempt is a new refund.
+                clearRefundKey(orderId)
+                alert(t('admin.order.refund.failed'))
+                await loadOrder()
+            } else if (isApiErrorCode(cause, 'REFUND_ATTEMPT_IN_PROGRESS')) {
+                // Minting a new key here would be the double refund this stops.
+                alert(t('admin.order.refund.inProgress'))
+            } else if (isApiErrorCode(cause, 'REFUND_NOT_ELIGIBLE')) {
+                alert(t('admin.order.refund.notEligible'))
+                await loadOrder()
+            } else {
+                // Network and unknown failures keep the key: the refund may have
+                // reached the server, so a retry must be the same attempt.
+                alert(t('admin.order.refund.error'))
+            }
+        } finally {
+            setRefunding(false)
         }
     }
 
@@ -132,6 +200,32 @@ export default function AdminOrderDetailPage() {
                         </span>
                     )}
                 </div>
+
+                {(isRefundable(order.status) || order.status === 'REFUND_PENDING') && (
+                    <div>
+                        <div style={label}>{t('admin.order.refund.action')}</div>
+                        <button
+                            type="button"
+                            disabled={refunding || updating}
+                            onClick={refundOrder}
+                            style={{
+                                border: 'none',
+                                borderRadius: 6,
+                                padding: '8px 14px',
+                                background: refunding ? '#a0aec0' : '#c53030',
+                                color: '#fff',
+                                cursor: refunding ? 'not-allowed' : 'pointer',
+                                fontWeight: 600,
+                            }}
+                        >
+                            {refunding
+                                ? t('admin.order.refund.refunding')
+                                : order.status === 'REFUND_PENDING'
+                                    ? t('admin.order.refund.recheck')
+                                    : t('admin.order.refund.action')}
+                        </button>
+                    </div>
+                )}
             </div>
 
             <section style={shippingBox}>

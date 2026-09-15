@@ -6,6 +6,8 @@ export type OrderStatus =
     | 'PAYMENT_PENDING'
     | 'PENDING'
     | 'PREPARING'
+    // A refund is in flight and its outcome is not yet known.
+    | 'REFUND_PENDING'
     | 'SHIPPED'
     | 'DELIVERED'
     | 'CANCELLED'
@@ -15,6 +17,7 @@ export const ORDER_STATUS_TRANSLATION_KEY: Record<OrderStatus, string> = {
     PAYMENT_PENDING: 'admin.order.status.paymentPending',
     PENDING: 'admin.order.status.pending',
     PREPARING: 'admin.order.status.preparing',
+    REFUND_PENDING: 'admin.order.status.refundPending',
     SHIPPED: 'admin.order.status.shipped',
     DELIVERED: 'admin.order.status.delivered',
     CANCELLED: 'admin.order.status.cancelled',
@@ -32,6 +35,9 @@ export const ORDER_STATUS_TRANSITIONS: Record<OrderStatus, readonly OrderStatus[
     PAYMENT_PENDING: [],
     PENDING: ['PREPARING'],
     PREPARING: ['SHIPPED'],
+    // Shipping an order whose refund is in flight would send goods that are being
+    // paid back for. It leaves this state only when the refund settles.
+    REFUND_PENDING: [],
     SHIPPED: ['DELIVERED'],
     DELIVERED: [],
     CANCELLED: [],

@@ -73,6 +73,15 @@
         SELECT * FROM orders WHERE id = #{id}
     </select>
 
+    <!--
+        Serialises everything that decides an order's fate. Refund contends here so
+        a customer request and an admin request cannot both start a refund for the
+        same order.
+    -->
+    <select id="selectOrderByIdForUpdate" resultMap="orderResultMap">
+        SELECT * FROM orders WHERE id = #{id} FOR UPDATE
+    </select>
+
     <select id="selectOrderByIdAndUserId" resultMap="orderResultMap">
         SELECT * FROM orders WHERE id = #{id} AND user_id = #{userId}
     </select>

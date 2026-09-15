@@ -43,10 +43,23 @@ export const adminJa = {
             reactivating: '再開中...',
         },
         order: {
+            refund: {
+                action: 'キャンセルして返金',
+                refunding: '返金処理中...',
+                confirm: 'この注文をキャンセルして返金しますか？',
+                success: '注文をキャンセルし返金しました。',
+                pendingNotice: '返金結果をまだ確認できていません。注文はキャンセルされていません。',
+                recheck: '返金結果を再確認',
+                failed: '返金が拒否されました。注文はそのまま維持されます。',
+                inProgress: 'この注文の返金はすでに進行中です。',
+                notEligible: 'この注文は現在の状態では返金できません。',
+                error: '返金に失敗しました。',
+            },
             status: {
                 legacyUnpaid: '未決済（旧注文）',
                 paymentPending: '決済確認中',
                 pending: '注文受付',
+                refundPending: '返金確認中',
                 preparing: '発送準備中',
                 shipped: '発送済み',
                 delivered: '配送完了',

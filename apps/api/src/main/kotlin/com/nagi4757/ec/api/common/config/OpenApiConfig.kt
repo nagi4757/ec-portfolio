@@ -51,9 +51,11 @@ class OpenApiConfig {
                 Tag().name("User - Auth").description("Authenticated user APIs."),
                 Tag().name("User - Cart").description("Authenticated user cart APIs."),
                 Tag().name("User - Orders").description("Authenticated user order APIs."),
+                Tag().name("User - Refunds").description("Authenticated user refund APIs."),
                 Tag().name("Admin - Categories").description("Category administration APIs. ADMIN role is required."),
                 Tag().name("Admin - Products").description("Product administration APIs. ADMIN role is required."),
-                Tag().name("Admin - Orders").description("Order administration APIs. ADMIN role is required.")
+                Tag().name("Admin - Orders").description("Order administration APIs. ADMIN role is required."),
+                Tag().name("Admin - Refunds").description("Refund administration APIs. ADMIN role is required.")
             )
         )
         .components(apiComponents())

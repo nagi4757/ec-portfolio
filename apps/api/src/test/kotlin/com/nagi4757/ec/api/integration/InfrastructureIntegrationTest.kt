@@ -120,12 +120,12 @@ class InfrastructureIntegrationTest @Autowired constructor(
     }
 
     @Test
-    fun `applies Flyway migrations V1 through V11 and initializes existing products`() {
+    fun `applies Flyway migrations V1 through V13 and initializes existing products`() {
         val appliedVersions = flyway.info().applied()
             .mapNotNull { it.version?.version }
 
         assertThat(appliedVersions).containsExactly(
-            "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11"
+            "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13"
         )
         val existingStock = jdbcTemplate.queryForList(
             "SELECT stock_quantity FROM products WHERE id IN (1, 2, 3) ORDER BY id",
@@ -180,7 +180,12 @@ class InfrastructureIntegrationTest @Autowired constructor(
                 )
             }
 
-            val result = Flyway.configure().dataSource(dataSource).load().migrate()
+            // This test isolates the V10 -> V11 upgrade; later migrations are covered separately.
+            val result = Flyway.configure()
+                .dataSource(dataSource)
+                .target(MigrationVersion.fromVersion("11"))
+                .load()
+                .migrate()
 
             // Before the fix this threw: V11 wrote LEGACY_UNPAID while the V10 CHECK
             // still forbade it, and Flyway reported a failed migration.
@@ -220,6 +225,162 @@ class InfrastructureIntegrationTest @Autowired constructor(
     }
 
     @Test
+    fun `upgrades a populated V11 database through V12 and V13`() {
+        // The whole-history test migrates empty tables, so V12's constraint swap and
+        // V13's uniqueness index never meet rows that could violate them. This stops
+        // at V11, seeds a database shaped like the deployed one, and only then applies
+        // V12 and V13.
+        val v11Database = MariaDBContainer<Nothing>("mariadb:10.11")
+        v11Database.start()
+        try {
+            val dataSource = DriverManagerDataSource(
+                v11Database.jdbcUrl,
+                v11Database.username,
+                v11Database.password
+            )
+            Flyway.configure()
+                .dataSource(dataSource)
+                .target(MigrationVersion.fromVersion("11"))
+                .load()
+                .migrate()
+            val v11Jdbc = JdbcTemplate(dataSource)
+
+            // Valid V11 data: every status the V11 constraint allows, plus a paid order
+            // carrying a settled charge, which is what V13's uniqueness applies to.
+            listOf("LEGACY_UNPAID", "PAYMENT_PENDING", "PREPARING", "SHIPPED", "DELIVERED", "CANCELLED")
+                .forEach { status ->
+                    v11Jdbc.update(
+                        "INSERT INTO orders (user_id, status, total_amount) VALUES (?, ?, ?)",
+                        9_001L, status, 3_000L
+                    )
+                }
+            v11Jdbc.update(
+                "INSERT INTO orders (user_id, status, total_amount) VALUES (?, 'PENDING', ?)",
+                9_002L, 5_000L
+            )
+            val paidOrderId = requireNotNull(
+                v11Jdbc.queryForObject(
+                    "SELECT id FROM orders WHERE user_id = ?", Long::class.java, 9_002L
+                )
+            )
+            v11Jdbc.update(
+                """
+                INSERT INTO payment_attempts
+                    (idempotency_key, request_fingerprint, order_id, amount_jpy, status, external_payment_id)
+                VALUES (?, ?, ?, ?, 'SUCCESS', 'mock-payment:v11-seed')
+                """.trimIndent(),
+                "v11-seed-key", "a".repeat(64), paidOrderId, 5_000L
+            )
+            val chargeId = requireNotNull(
+                v11Jdbc.queryForObject(
+                    "SELECT id FROM payment_attempts WHERE idempotency_key = ?",
+                    Long::class.java,
+                    "v11-seed-key"
+                )
+            )
+
+            val result = Flyway.configure()
+                .dataSource(dataSource)
+                .target(MigrationVersion.fromVersion("13"))
+                .load()
+                .migrate()
+
+            assertThat(result.migrationsExecuted).isEqualTo(2)
+            assertThat(result.success).isTrue()
+
+            // Existing rows came through untouched.
+            assertThat(
+                v11Jdbc.queryForObject(
+                    "SELECT status FROM orders WHERE id = ?", String::class.java, paidOrderId
+                )
+            ).isEqualTo("PENDING")
+            assertThat(
+                v11Jdbc.queryForObject(
+                    "SELECT COUNT(*) FROM orders WHERE user_id = ?", Int::class.java, 9_001L
+                )
+            ).isEqualTo(6)
+
+            // Exactly one orders status constraint survives the V12 swap. A DROP with a
+            // separate ADD could leave none at all if the ADD failed, because MariaDB
+            // does not roll DDL back.
+            assertThat(
+                v11Jdbc.queryForObject(
+                    """
+                    SELECT COUNT(*) FROM information_schema.CHECK_CONSTRAINTS
+                    WHERE CONSTRAINT_SCHEMA = DATABASE() AND CONSTRAINT_NAME = 'chk_orders_status'
+                    """.trimIndent(),
+                    Int::class.java
+                )
+            ).isEqualTo(1)
+
+            // V12 widened it to admit the refund state, and still refuses anything else.
+            v11Jdbc.update(
+                "INSERT INTO orders (user_id, status, total_amount) VALUES (?, 'REFUND_PENDING', ?)",
+                9_003L, 1_000L
+            )
+            org.junit.jupiter.api.assertThrows<DataIntegrityViolationException> {
+                v11Jdbc.update(
+                    "INSERT INTO orders (user_id, status, total_amount) VALUES (?, 'REFUNDED', ?)",
+                    9_003L, 1_000L
+                )
+            }
+
+            // V12's own invariant: a completed refund must carry a provider reference.
+            org.junit.jupiter.api.assertThrows<DataIntegrityViolationException> {
+                v11Jdbc.update(
+                    """
+                    INSERT INTO refund_attempts
+                        (idempotency_key, request_fingerprint, order_id, payment_attempt_id,
+                         amount_jpy, status, order_status_before)
+                    VALUES (?, ?, ?, ?, ?, 'REFUNDED', 'PENDING')
+                    """.trimIndent(),
+                    "v12-no-reference", "b".repeat(64), paidOrderId, chargeId, 5_000L
+                )
+            }
+
+            // V13: a second successful charge against the same order is refused, which
+            // is what makes "the order's settled charge" a single thing a refund can
+            // name. The first one was seeded before V13 ran, so this proves the index
+            // took against real data rather than an empty table.
+            org.junit.jupiter.api.assertThrows<DataIntegrityViolationException> {
+                v11Jdbc.update(
+                    """
+                    INSERT INTO payment_attempts
+                        (idempotency_key, request_fingerprint, order_id, amount_jpy, status, external_payment_id)
+                    VALUES (?, ?, ?, ?, 'SUCCESS', 'mock-payment:second')
+                    """.trimIndent(),
+                    "v13-second-success", "c".repeat(64), paidOrderId, 5_000L
+                )
+            }
+
+            // Non-SUCCESS attempts for the same order stay legal: a retry produces them.
+            v11Jdbc.update(
+                """
+                INSERT INTO payment_attempts
+                    (idempotency_key, request_fingerprint, order_id, amount_jpy, status)
+                VALUES (?, ?, ?, ?, 'FAILED')
+                """.trimIndent(),
+                "v13-failed-retry", "d".repeat(64), paidOrderId, 5_000L
+            )
+
+            // V13's other invariant: a refund may only start from a refundable status.
+            org.junit.jupiter.api.assertThrows<DataIntegrityViolationException> {
+                v11Jdbc.update(
+                    """
+                    INSERT INTO refund_attempts
+                        (idempotency_key, request_fingerprint, order_id, payment_attempt_id,
+                         amount_jpy, status, order_status_before)
+                    VALUES (?, ?, ?, ?, ?, 'PENDING', 'SHIPPED')
+                    """.trimIndent(),
+                    "v13-bad-before", "e".repeat(64), paidOrderId, chargeId, 5_000L
+                )
+            }
+        } finally {
+            v11Database.stop()
+        }
+    }
+
+    @Test
     fun `migrates existing confirmed orders to preparing before adding status constraint`() {
         val legacyDatabase = MariaDBContainer<Nothing>("mariadb:10.11")
         legacyDatabase.start()
@@ -246,7 +407,7 @@ class InfrastructureIntegrationTest @Autowired constructor(
                 .load()
                 .migrate()
 
-            assertThat(migrationResult.migrationsExecuted).isEqualTo(6)
+            assertThat(migrationResult.migrationsExecuted).isEqualTo(8)
             assertThat(legacyJdbcTemplate.queryForObject(
                 "SELECT status FROM orders LIMIT 1",
                 String::class.java

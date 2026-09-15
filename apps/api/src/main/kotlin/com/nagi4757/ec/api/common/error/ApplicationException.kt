@@ -44,6 +44,21 @@ class PaymentPendingConfirmationException :
  * A different, unsettled payment already exists for this customer. Starting another
  * one could charge them twice, so the second request is refused rather than queued.
  */
+/**
+ * Only an order that is paid and still in the warehouse can be refunded here.
+ * Shipped and delivered orders need the goods back first, which is a return
+ * workflow rather than a refund.
+ */
+class RefundNotEligibleException : ApplicationException(ApiErrorCode.REFUND_NOT_ELIGIBLE)
+
+class RefundFailedException : ApplicationException(ApiErrorCode.REFUND_FAILED)
+
+class RefundAttemptInProgressException :
+    ApplicationException(ApiErrorCode.REFUND_ATTEMPT_IN_PROGRESS)
+
+class RefundIdempotencyConflictException :
+    ApplicationException(ApiErrorCode.REFUND_IDEMPOTENCY_CONFLICT)
+
 class PaymentAttemptInProgressException :
     ApplicationException(ApiErrorCode.PAYMENT_ATTEMPT_IN_PROGRESS)
 

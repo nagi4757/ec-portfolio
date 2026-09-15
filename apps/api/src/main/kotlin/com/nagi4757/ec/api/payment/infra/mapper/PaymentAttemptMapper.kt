@@ -10,6 +10,7 @@ interface PaymentAttemptMapper {
     fun selectByIdempotencyKey(idempotencyKey: String): PaymentAttemptRecord?
     fun selectById(id: Long): PaymentAttemptRecord?
     fun selectActiveByUserId(userId: Long): PaymentAttemptRecord?
+    fun selectSuccessfulByOrderId(orderId: Long): PaymentAttemptRecord?
     fun updatePaymentAttemptResult(
         @Param("id") id: Long,
         @Param("status") status: String,

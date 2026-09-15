@@ -1,0 +1,131 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.nagi4757.ec.api.refund.infra.mapper.RefundAttemptMapper">
+
+    <resultMap id="refundAttemptResultMap" type="com.nagi4757.ec.api.refund.infra.mapper.RefundAttemptRecord">
+        <id property="id" column="id"/>
+        <result property="idempotencyKey" column="idempotency_key"/>
+        <result property="requestFingerprint" column="request_fingerprint"/>
+        <result property="orderId" column="order_id"/>
+        <result property="paymentAttemptId" column="payment_attempt_id"/>
+        <result property="amountJpy" column="amount_jpy"/>
+        <result property="status" column="status"/>
+        <result property="externalRefundId" column="external_refund_id"/>
+        <result property="orderStatusBefore" column="order_status_before"/>
+        <result property="createdAt" column="created_at"/>
+        <result property="updatedAt" column="updated_at"/>
+    </resultMap>
+
+    <sql id="refundAttemptColumns">
+        id,
+        idempotency_key,
+        request_fingerprint,
+        order_id,
+        payment_attempt_id,
+        amount_jpy,
+        status,
+        external_refund_id,
+        order_status_before,
+        created_at,
+        updated_at
+    </sql>
+
+    <insert id="insertRefundAttempt" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO refund_attempts (
+            idempotency_key,
+            request_fingerprint,
+            order_id,
+            payment_attempt_id,
+            amount_jpy,
+            status,
+            external_refund_id,
+            order_status_before
+        )
+        VALUES (
+            #{idempotencyKey},
+            #{requestFingerprint},
+            #{orderId},
+            #{paymentAttemptId},
+            #{amountJpy},
+            #{status},
+            #{externalRefundId},
+            #{orderStatusBefore}
+        )
+    </insert>
+
+    <select id="selectByIdempotencyKey" resultMap="refundAttemptResultMap">
+        SELECT <include refid="refundAttemptColumns"/>
+        FROM refund_attempts
+        WHERE idempotency_key = #{idempotencyKey}
+    </select>
+
+    <select id="selectById" resultMap="refundAttemptResultMap">
+        SELECT <include refid="refundAttemptColumns"/>
+        FROM refund_attempts
+        WHERE id = #{id}
+    </select>
+
+    <!--
+        The caller must already hold the order row lock; this only reads what that
+        lock makes stable. PENDING and UNKNOWN are the unsettled states, so either
+        one means a refund may still be in flight for this order.
+    -->
+    <select id="selectActiveByOrderId" resultMap="refundAttemptResultMap">
+        SELECT <include refid="refundAttemptColumns"/>
+        FROM refund_attempts
+        WHERE order_id = #{orderId}
+          AND status IN ('PENDING', 'UNKNOWN')
+        ORDER BY id
+        LIMIT 1
+    </select>
+
+    <!--
+        The attempt that currently speaks for this order, settled or not.
+
+        No status filter on purpose: a terminal attempt still has to be visible here,
+        because the point of this query is to tell a replayed older attempt apart
+        from the newest one. Filtering to unsettled rows would hide exactly the newer
+        attempt that makes the older one stale.
+
+        id is monotonic (AUTO_INCREMENT), so DESC gives the newest row. created_at is
+        not used for ordering: two attempts opened within the same second would tie.
+
+        The caller must hold the order row lock. Attempts are only created under that
+        lock, so nothing newer can appear between this read and the caller's decision.
+    -->
+    <select id="selectLatestByOrderId" resultMap="refundAttemptResultMap">
+        SELECT <include refid="refundAttemptColumns"/>
+        FROM refund_attempts
+        WHERE order_id = #{orderId}
+        ORDER BY id DESC
+        LIMIT 1
+    </select>
+
+    <!--
+        Only a legal transition may be written.
+
+        A terminal attempt is never rewritten: a concurrent retry must not overwrite
+        a recorded REFUNDED and destroy the only durable evidence that money was
+        returned. UNKNOWN additionally may not become FAILED, because the original
+        refund may have succeeded and a later failure describes the retry rather than
+        the original.
+
+        external_refund_id is only replaced by a non-blank value, so an UNKNOWN reply
+        carrying nothing cannot erase a reference an earlier reply supplied.
+
+        Zero affected rows is not an error: another writer settled it first, or the
+        transition is not allowed, and the caller reloads to adopt the stored state.
+    -->
+    <update id="updateRefundAttemptResult">
+        UPDATE refund_attempts
+        SET status = #{status},
+            external_refund_id = COALESCE(NULLIF(TRIM(#{externalRefundId}), ''), external_refund_id)
+        WHERE id = #{id}
+          AND (
+              status = 'PENDING'
+              OR (status = 'UNKNOWN' AND #{status} IN ('REFUNDED', 'UNKNOWN'))
+          )
+    </update>
+
+</mapper>

@@ -12,6 +12,7 @@ const statusColor: Record<OrderStatus, string> = {
     PAYMENT_PENDING: '#0369a1',
     PENDING: '#b7791f',
     PREPARING: '#2b6cb0',
+    REFUND_PENDING: '#0369a1',
     SHIPPED: '#6b46c1',
     DELIVERED: '#276749',
     CANCELLED: '#c53030',

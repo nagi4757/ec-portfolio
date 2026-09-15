@@ -352,6 +352,34 @@ for required_suite in "infra/runtime/demo/deploy-api.test.sh" \
         "The deploy-api job must run $required_suite"
 done
 
+# --- the frontend must not ship a release the API did not take ----------------
+# A Flyway migration change fails the guard inside build-and-push-api, which skips
+# deploy-api. While deploy-frontends depended only on the build jobs it went out
+# regardless, so the storefront began calling endpoints the running backend did not
+# have. The bdc3828 release did exactly that. The job's own needs block is read
+# rather than grepping the whole file, so a mention of deploy-api anywhere else
+# cannot satisfy this.
+read_job_needs() {
+    awk -v job="  ${1}:" '
+        $0 == job { inside = 1; next }
+        inside && /^  [a-z]/ { exit }
+        inside && /^    needs:/ { collecting = 1; next }
+        collecting && /^      - / { sub(/^      - /, ""); print; next }
+        collecting && !/^      - / { exit }
+    ' "$WORKFLOW_FILE"
+}
+
+frontend_deploy_needs="$(read_job_needs deploy-frontends)"
+[[ -n "$frontend_deploy_needs" ]] ||
+    fail "Could not read the needs of deploy-frontends in $WORKFLOW_FILE"
+assert_contains "$frontend_deploy_needs" "deploy-api" \
+    "deploy-frontends must depend on deploy-api so a blocked API release cannot ship its frontend alone."
+
+# deploy-api must itself stay downstream of the guard, or the dependency above
+# proves nothing.
+assert_contains "$(read_job_needs deploy-api)" "build-and-push-api" \
+    "deploy-api must depend on build-and-push-api, which is where the migration guard runs."
+
 # --- the checksum gate is verified by running the generated remote payload ---
 # A static grep proves the text is present, not that the gate actually stops a
 # tampered payload. Render the real command list and execute it against a local

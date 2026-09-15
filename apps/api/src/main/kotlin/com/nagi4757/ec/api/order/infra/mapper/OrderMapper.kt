@@ -9,6 +9,7 @@ interface OrderMapper {
     fun insertOrder(record: OrderRecord): Int
     fun insertOrderItem(record: OrderItemRecord): Int
     fun selectOrderById(id: Long): OrderRecord?
+    fun selectOrderByIdForUpdate(id: Long): OrderRecord?
     fun selectOrderByIdAndUserId(@Param("id") id: Long, @Param("userId") userId: Long): OrderRecord?
     fun selectOrdersByUserId(userId: Long): List<OrderRecord>
     fun selectAllOrders(@Param("offset") offset: Int, @Param("limit") limit: Int): List<OrderRecord>

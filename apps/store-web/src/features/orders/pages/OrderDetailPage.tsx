@@ -2,9 +2,12 @@ import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Link, useParams } from 'react-router-dom'
 import { OrderAPI } from '@/features/orders/api'
+import { RefundAPI } from '@/features/refund/api'
+import { clearRefundKey, resolveRefundKey } from '@/features/refund/idempotency'
 import { isApiErrorCode } from '@/lib/api'
 import { ORDER_STATUS_TRANSLATION_KEY } from '@/types/order'
 import type { Order, OrderStatus } from '@/types/order'
+import { isDirectlyCancellable, isRefundable } from '@/types/refund'
 
 const statusColor: Record<OrderStatus, string> = {
     LEGACY_UNPAID: '#64748b',
@@ -12,6 +15,8 @@ const statusColor: Record<OrderStatus, string> = {
     PAYMENT_PENDING: '#0369a1',
     PENDING: '#b7791f',
     PREPARING: '#2b6cb0',
+    // A refund is in flight; the order is neither paid-and-ready nor cancelled.
+    REFUND_PENDING: '#0369a1',
     SHIPPED: '#6b46c1',
     DELIVERED: '#276749',
     CANCELLED: '#c53030',
@@ -19,9 +24,21 @@ const statusColor: Record<OrderStatus, string> = {
 
 type CancelFeedback = 'success' | 'invalidOrderTransition' | 'orderNotFound' | 'failed'
 
-/** Mirrors OrderStatus.isUserCancellable on the server. */
-function isCancellable(status: OrderStatus): boolean {
-    return status === 'LEGACY_UNPAID'
+type RefundFeedback =
+    | 'success'
+    | 'pendingConfirmation'
+    | 'failed'
+    | 'inProgress'
+    | 'notEligible'
+    | 'error'
+
+const refundFeedbackTranslationKey: Record<RefundFeedback, string> = {
+    success: 'store.order.refund.success',
+    pendingConfirmation: 'store.order.refund.pendingNotice',
+    failed: 'store.order.refund.failed',
+    inProgress: 'store.order.refund.inProgress',
+    notEligible: 'store.order.refund.notEligible',
+    error: 'store.order.cancel.failed',
 }
 
 const cancelFeedbackTranslationKey: Record<CancelFeedback, string> = {
@@ -39,6 +56,8 @@ export default function OrderDetailPage() {
     const [error, setError] = useState<string | null>(null)
     const [cancelling, setCancelling] = useState(false)
     const [cancelFeedback, setCancelFeedback] = useState<CancelFeedback | null>(null)
+    const [refunding, setRefunding] = useState(false)
+    const [refundFeedback, setRefundFeedback] = useState<RefundFeedback | null>(null)
 
     useEffect(() => {
         if (!id) return
@@ -54,10 +73,79 @@ export default function OrderDetailPage() {
             .finally(() => setLoading(false))
     }, [id, t])
 
+    async function refundOrder() {
+        if (!id || !order) return
+        // REFUND_PENDING is included: that is the re-check path for a refund whose
+        // outcome was never confirmed, and it continues the same attempt.
+        const resuming = order.status === 'REFUND_PENDING'
+        if (!resuming && !isRefundable(order.status)) return
+        // Only a first request asks for confirmation; re-checking an unresolved
+        // refund is not a new decision.
+        if (!resuming && !window.confirm(t('store.order.refund.confirm'))) return
+
+        const orderId = Number(id)
+        setRefunding(true)
+        setRefundFeedback(null)
+
+        try {
+            // Resuming goes through reconcile, which carries no key at all. The
+            // attempt already exists on the server and the key that identifies it
+            // lives there; asking storage for one would mint a fresh key whenever
+            // this tab is not the one that started the refund, and the server would
+            // refuse it as a second refund on the same order -- leaving the customer
+            // with no way to finish the one they already have.
+            //
+            // A first request still carries the key, and reuses it for every retry.
+            // Disabling the button is only a courtesy; the server's order lock and
+            // the attempt's idempotency are what actually prevent a second refund.
+            //
+            // resolveRefundKey never throws, so the in-flight flag below is always
+            // cleared. It sits inside the try regardless, so that stays true even if
+            // that contract is ever weakened.
+            const result = resuming
+                ? await RefundAPI.reconcile(orderId)
+                : await RefundAPI.refund(orderId, resolveRefundKey(orderId))
+
+            if (result.outcome === 'PENDING_CONFIRMATION') {
+                // Not a success. The money may not have moved, so the order is not
+                // cancelled and the key is kept for an explicit re-check.
+                setOrder(result.order)
+                setRefundFeedback('pendingConfirmation')
+                return
+            }
+
+            clearRefundKey(orderId)
+            // Re-read rather than trusting the response alone, so the page shows the
+            // order exactly as the server now holds it.
+            setOrder(await OrderAPI.get(orderId).catch(() => result.order))
+            setRefundFeedback('success')
+        } catch (cause) {
+            if (isApiErrorCode(cause, 'REFUND_FAILED')) {
+                // A known refusal is terminal: the next attempt is a new refund.
+                clearRefundKey(orderId)
+                setRefundFeedback('failed')
+                OrderAPI.get(orderId).then(setOrder).catch(() => undefined)
+            } else if (isApiErrorCode(cause, 'REFUND_ATTEMPT_IN_PROGRESS')) {
+                // Another refund for this order is unsettled. Minting a new key here
+                // would be exactly the double-refund this guard exists to stop.
+                setRefundFeedback('inProgress')
+            } else if (isApiErrorCode(cause, 'REFUND_NOT_ELIGIBLE')) {
+                setRefundFeedback('notEligible')
+                OrderAPI.get(orderId).then(setOrder).catch(() => undefined)
+            } else {
+                // Network and unknown failures leave the key in place: the refund may
+                // have reached the server, so a retry must be the same attempt.
+                setRefundFeedback('error')
+            }
+        } finally {
+            setRefunding(false)
+        }
+    }
+
     async function cancelOrder() {
         // PENDING now means paid. Only an unpaid legacy order may still be
         // cancelled; everything else needs a refund the system cannot issue yet.
-        if (!id || !order || !isCancellable(order.status)) return
+        if (!id || !order || !isDirectlyCancellable(order.status)) return
         if (!window.confirm(t('store.order.cancel.confirm'))) return
 
         setCancelling(true)
@@ -145,7 +233,63 @@ export default function OrderDetailPage() {
                 </span>
             </div>
 
-            {isCancellable(order.status) && (
+            {isRefundable(order.status) && (
+                <div style={{ marginTop: 20, textAlign: 'right' }}>
+                    <button
+                        type="button"
+                        disabled={refunding}
+                        onClick={refundOrder}
+                        style={{
+                            border: 'none',
+                            borderRadius: 6,
+                            padding: '9px 16px',
+                            background: refunding ? '#a0aec0' : '#c53030',
+                            color: '#fff',
+                            cursor: refunding ? 'not-allowed' : 'pointer',
+                            fontWeight: 600,
+                        }}
+                    >
+                        {refunding
+                            ? t('store.order.actions.refunding')
+                            : t('store.order.actions.refund')}
+                    </button>
+                </div>
+            )}
+            {order.status === 'REFUND_PENDING' && (
+                <div style={{ marginTop: 20, textAlign: 'right' }}>
+                    <button
+                        type="button"
+                        disabled={refunding}
+                        onClick={refundOrder}
+                        style={{
+                            border: '1px solid #0369a1',
+                            borderRadius: 6,
+                            padding: '9px 16px',
+                            background: '#fff',
+                            color: '#0369a1',
+                            cursor: refunding ? 'not-allowed' : 'pointer',
+                            fontWeight: 600,
+                        }}
+                    >
+                        {refunding
+                            ? t('store.order.actions.refunding')
+                            : t('store.order.refund.recheck')}
+                    </button>
+                </div>
+            )}
+            {refundFeedback && (
+                <div
+                    role={refundFeedback === 'success' ? 'status' : 'alert'}
+                    style={{
+                        marginTop: 12,
+                        color: refundFeedback === 'success' ? '#276749' : '#c53030',
+                    }}
+                >
+                    {t(refundFeedbackTranslationKey[refundFeedback])}
+                </div>
+            )}
+
+            {isDirectlyCancellable(order.status) && (
                 <div style={{ marginTop: 20, textAlign: 'right' }}>
                     <button
                         type="button"

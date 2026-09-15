@@ -89,6 +89,28 @@
     </select>
 
     <!--
+        The settled charge behind an order. Refund reads the amount and the
+        provider's payment reference from here, never from the request.
+    -->
+    <select id="selectSuccessfulByOrderId" resultMap="paymentAttemptResultMap">
+        SELECT
+            id,
+            idempotency_key,
+            request_fingerprint,
+            amount_jpy,
+            status,
+            external_payment_id,
+            order_id,
+            created_at,
+            updated_at
+        FROM payment_attempts
+        WHERE order_id = #{orderId}
+          AND status = 'SUCCESS'
+        ORDER BY id
+        LIMIT 1
+    </select>
+
+    <!--
         Only a non-terminal attempt may be written. Without the status guard a
         concurrent retry could overwrite a recorded SUCCESS, destroying the only
         durable evidence that money was taken. Zero affected rows is not an

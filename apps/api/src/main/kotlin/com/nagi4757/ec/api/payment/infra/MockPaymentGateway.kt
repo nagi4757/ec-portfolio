@@ -62,9 +62,14 @@ class MockPaymentGateway : PaymentGateway {
     }
 
     private fun refundResult(request: RefundPaymentRequest): RefundPaymentResult = when {
+        request.externalPaymentId == MOCK_REFUND_UNKNOWN_PAYMENT_ID ->
+            RefundPaymentResult(RefundPaymentStatus.REFUND_UNKNOWN)
         request.externalPaymentId == MOCK_REFUNDED_PAYMENT_ID ||
             request.externalPaymentId.startsWith("mock-payment:") ->
-            RefundPaymentResult(RefundPaymentStatus.REFUNDED)
+            RefundPaymentResult(
+                status = RefundPaymentStatus.REFUNDED,
+                externalRefundId = "mock-refund:${request.idempotencyKey}"
+            )
         else -> RefundPaymentResult(RefundPaymentStatus.REFUND_FAILED)
     }
 
@@ -81,3 +86,4 @@ internal const val MOCK_TIMEOUT_PAYMENT_METHOD = "mock:timeout"
 internal const val MOCK_DUPLICATE_PAYMENT_METHOD = "mock:duplicate"
 internal const val MOCK_REFUNDED_PAYMENT_ID = "mock:refunded"
 internal const val MOCK_REFUND_FAILED_PAYMENT_ID = "mock:refund-failed"
+internal const val MOCK_REFUND_UNKNOWN_PAYMENT_ID = "mock:refund-unknown"
