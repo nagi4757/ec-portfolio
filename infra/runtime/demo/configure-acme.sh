@@ -9,6 +9,12 @@ readonly CERTBOT_RENEWAL_CONFIG="/etc/letsencrypt/renewal/$ORIGIN_HOSTNAME.conf"
 readonly ORIGIN_CERT_FILE="$CERTBOT_LIVE_DIRECTORY/fullchain.pem"
 readonly ORIGIN_KEY_FILE="$CERTBOT_LIVE_DIRECTORY/privkey.pem"
 readonly RENEW_SCRIPT_TARGET="/usr/local/sbin/ec-portfolio-renew-origin-cert"
+readonly SYNC_SCRIPT_SOURCE="sync-origin-tls.sh"
+# Overridable so the write-back contract can be exercised against a fake
+# helper in tests, the same way DEPLOY_API_SCRIPT is overridden elsewhere.
+readonly SYNC_SCRIPT_TARGET="${ORIGIN_TLS_SYNC_SCRIPT:-/usr/local/sbin/ec-portfolio-sync-origin-tls}"
+readonly ORIGIN_TLS_ENV_DIRECTORY="/etc/ec-portfolio"
+readonly ORIGIN_TLS_ENV_FILE="$ORIGIN_TLS_ENV_DIRECTORY/origin-tls.env"
 readonly RENEW_SERVICE_NAME="ec-portfolio-certbot-renew.service"
 readonly RENEW_TIMER_NAME="ec-portfolio-certbot-renew.timer"
 readonly VENDOR_RENEW_TIMER_NAME="certbot-renew.timer"
@@ -67,6 +73,14 @@ validate_inputs() {
     [[ "$ACME_EMAIL" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,63}$ ]] ||
         fail "ACME_EMAIL must be a valid email address."
 
+    # Issuance without a durable backup is the state Phase 6B exists to remove:
+    # the certificate would live only on this host's disk and a replacement host
+    # would have to ask Let's Encrypt for a new one.
+    [[ -n "${ORIGIN_TLS_BUCKET:-}" ]] ||
+        fail "Required environment variable is missing: ORIGIN_TLS_BUCKET"
+    [[ "$ORIGIN_TLS_BUCKET" =~ ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$ ]] ||
+        fail "ORIGIN_TLS_BUCKET is not a valid bucket name."
+
     for variable_name in \
         AWS_ACCESS_KEY_ID \
         AWS_SECRET_ACCESS_KEY \
@@ -113,10 +127,72 @@ resolve_bundle_paths() {
         fail "The bundled renewal service is missing."
     [[ -f "$script_directory/$RENEW_TIMER_NAME" ]] ||
         fail "The bundled renewal timer is missing."
+    [[ -f "$script_directory/$SYNC_SCRIPT_SOURCE" && -x "$script_directory/$SYNC_SCRIPT_SOURCE" ]] ||
+        fail "The bundled origin TLS backup script is missing or not executable."
+}
+
+# Certbot loads two configuration files automatically, before any flag on the
+# command line is considered (certbot/_internal/constants.py, CLI_DEFAULTS
+# "config_files"; configargparse globs each through os.path.expanduser):
+#
+#   /etc/letsencrypt/cli.ini
+#   ${XDG_CONFIG_HOME:-~/.config}/letsencrypt/cli.ini
+#
+# Either may declare pre-hook, post-hook or deploy-hook, which certbot runs as
+# root, and either may override --server, --authenticator or --config-dir.
+# --no-directory-hooks does not help: it disables renewal-hooks/ directories and
+# nothing else.
+#
+# The second path is caller controlled, and its resolution has edges that are
+# not worth reproducing in shell. Measured against certbot directly:
+#
+#   XDG unset, HOME=/root        -> /root/.config/letsencrypt/cli.ini
+#   XDG unset, HOME=/tmp/x       -> /tmp/x/.config/letsencrypt/cli.ini
+#   XDG=""                       -> $PWD/letsencrypt/cli.ini
+#   XDG="rel"                    -> $PWD/rel/letsencrypt/cli.ini
+#   XDG=/tmp/x                   -> /tmp/x/letsencrypt/cli.ini
+#
+# os.environ.get() returns its default only when the name is absent, so an empty
+# XDG_CONFIG_HOME is joined as an empty segment and the path becomes relative to
+# the working directory. A preflight that tried to predict all of this would
+# disagree with certbot in exactly the cases an attacker picks.
+#
+# So the environment is pinned instead of predicted: run_certbot clears
+# XDG_CONFIG_HOME and sets HOME to CERTBOT_HOME, which fixes the lookup to the
+# two paths below no matter what the caller exported. The same constant builds
+# both, so the path this checks and the path certbot reads cannot drift apart.
+readonly CERTBOT_HOME="/root"
+
+# Test seam. Empty in production, so the entries below are the literal canonical
+# paths; the suite sets it to a sandbox root to exercise the contract without
+# touching the host.
+readonly CERTBOT_CONFIG_PREFIX="${CERTBOT_CONFIG_PREFIX:-}"
+
+readonly GLOBAL_CERTBOT_CONFIG_FILES=(
+    "${CERTBOT_CONFIG_PREFIX}/etc/letsencrypt/cli.ini"
+    "${CERTBOT_CONFIG_PREFIX}${CERTBOT_HOME}/.config/letsencrypt/cli.ini"
+)
+
+# Iterates a literal array rather than calling a resolver. A helper would have to
+# report its own failures, and `for candidate in "$(helper)"` swallows them: the
+# fail() runs inside the command substitution, the subshell dies, and the loop
+# continues over an empty value while this function still returns 0 -- a guard
+# that reports success precisely when it could not do its job.
+verify_no_global_certbot_config() {
+    local candidate
+
+    # -L as well as -e: a dangling symlink is still a path certbot would read
+    # once its target appeared.
+    for candidate in "${GLOBAL_CERTBOT_CONFIG_FILES[@]}"; do
+        if [[ -e "$candidate" || -L "$candidate" ]]; then
+            fail "A Certbot global configuration file exists: $candidate. This project configures Certbot entirely on the command line and does not use one. Confirm it is not needed and move it aside before re-running; this script will not modify it."
+        fi
+    done
 }
 
 run_certbot() {
     run_with_timeout "$CERTBOT_TIMEOUT_SECONDS" env \
+        -u XDG_CONFIG_HOME \
         -u AWS_ACCESS_KEY_ID \
         -u AWS_SECRET_ACCESS_KEY \
         -u AWS_SESSION_TOKEN \
@@ -137,6 +213,7 @@ run_certbot() {
         -u REQUESTS_CA_BUNDLE \
         -u SSL_CERT_FILE \
         -u SSL_CERT_DIR \
+        HOME="$CERTBOT_HOME" \
         AWS_SHARED_CREDENTIALS_FILE=/dev/null \
         AWS_CONFIG_FILE=/dev/null \
         BOTO_CONFIG=/dev/null \
@@ -200,6 +277,34 @@ validate_certificate_contract() {
     validate_renewal_configuration
 }
 
+# The renewal timer runs the installed script from /usr/local/sbin, where the
+# deployment bundle is not present, so the backup helper is installed to a fixed
+# path too. The bucket name is account specific and generated, so it is written
+# to a non-secret env file the unit reads rather than baked into a committed
+# unit file.
+install_origin_tls_backup() {
+    install -o root -g root -m 755 \
+        "$script_directory/$SYNC_SCRIPT_SOURCE" "$SYNC_SCRIPT_TARGET"
+
+    install -d -o root -g root -m 755 "$ORIGIN_TLS_ENV_DIRECTORY"
+    printf 'ORIGIN_TLS_BUCKET=%s\n' "$ORIGIN_TLS_BUCKET" >"$ORIGIN_TLS_ENV_FILE.tmp"
+    install -o root -g root -m 644 "$ORIGIN_TLS_ENV_FILE.tmp" "$ORIGIN_TLS_ENV_FILE"
+    rm -f "$ORIGIN_TLS_ENV_FILE.tmp"
+}
+
+# Durability step. It never touches the certificate files or Nginx, so a failure
+# here leaves the freshly issued certificate and the running Nginx exactly as
+# they are; only the off-host copy is missing, and that is reported rather than
+# swallowed.
+#
+# A future phase will gate this on holding the origin EIP so only the active
+# host writes. That gate belongs around this call.
+back_up_origin_tls_state() {
+    log "Backing up the origin TLS state."
+    ORIGIN_TLS_BUCKET="$ORIGIN_TLS_BUCKET" "$SYNC_SCRIPT_TARGET" backup ||
+        fail "The certificate is valid and installed, but the off-host backup failed. The local certificate and Nginx are untouched; re-run the backup before relying on host replacement."
+}
+
 install_renewal_units() {
     install -o root -g root -m 755 \
         "$script_directory/renew-origin-cert.sh" "$RENEW_SCRIPT_TARGET"
@@ -226,11 +331,14 @@ main() {
     if (( EUID != 0 )); then
         require_command sudo
         log "Root privileges are required; re-running with sudo."
-        exec sudo --preserve-env=ACME_EMAIL,AWS_REGION,AWS_DEFAULT_REGION -- "$0" "$@"
+        # ORIGIN_TLS_BUCKET must survive the re-exec: validate_inputs runs after
+        # it, so dropping the variable here would fail every non-root run.
+        exec sudo --preserve-env=ACME_EMAIL,ORIGIN_TLS_BUCKET,AWS_REGION,AWS_DEFAULT_REGION -- "$0" "$@"
     fi
 
     validate_platform
     validate_inputs "$@"
+    verify_no_global_certbot_config
     resolve_bundle_paths
     umask 077
 
@@ -255,10 +363,17 @@ main() {
         fail "Certificate issuance failed or timed out."
 
     validate_certificate_contract
+    install_origin_tls_backup
     install_renewal_units
+    back_up_origin_tls_state
 
     log "Certificate issuance and automatic renewal configuration completed successfully."
     log "The certificate paths satisfy the configure-origin.sh input contract."
 }
 
-main "$@"
+# Sourcing exposes the contract functions to the test suite without running an
+# issuance or a renewal. The same guard is used by deploy-api.sh and
+# deploy-runtime.sh.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi
