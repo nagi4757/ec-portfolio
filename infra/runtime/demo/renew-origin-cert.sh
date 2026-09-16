@@ -98,9 +98,9 @@ validate_inputs() {
         fail "AWS credential or config files are prohibited; use the EC2 instance role."
 }
 
-# Certbot loads these two configuration files automatically, before any flag on
-# the command line is considered (certbot/_internal/constants.py, CLI_DEFAULTS
-# "config_files"):
+# Certbot loads two configuration files automatically, before any flag on the
+# command line is considered (certbot/_internal/constants.py, CLI_DEFAULTS
+# "config_files"; configargparse globs each through os.path.expanduser):
 #
 #   /etc/letsencrypt/cli.ini
 #   ${XDG_CONFIG_HOME:-~/.config}/letsencrypt/cli.ini
@@ -110,40 +110,47 @@ validate_inputs() {
 # --no-directory-hooks does not help: it disables renewal-hooks/ directories and
 # nothing else.
 #
-# This script passes every option explicitly, so the contract is that neither
-# file exists. One that does is reported and the run stops before certbot is
-# invoked. It is never deleted or edited: it is operator state this script does
-# not own, and silently removing it would destroy a deliberate change.
-readonly GLOBAL_CERTBOT_CONFIG_FILE="${CERTBOT_GLOBAL_CONFIG_FILE:-/etc/letsencrypt/cli.ini}"
+# The second path is caller controlled, and its resolution has edges that are
+# not worth reproducing in shell. Measured against certbot directly:
+#
+#   XDG unset, HOME=/root        -> /root/.config/letsencrypt/cli.ini
+#   XDG unset, HOME=/tmp/x       -> /tmp/x/.config/letsencrypt/cli.ini
+#   XDG=""                       -> $PWD/letsencrypt/cli.ini
+#   XDG="rel"                    -> $PWD/rel/letsencrypt/cli.ini
+#   XDG=/tmp/x                   -> /tmp/x/letsencrypt/cli.ini
+#
+# os.environ.get() returns its default only when the name is absent, so an empty
+# XDG_CONFIG_HOME is joined as an empty segment and the path becomes relative to
+# the working directory. A preflight that tried to predict all of this would
+# disagree with certbot in exactly the cases an attacker picks.
+#
+# So the environment is pinned instead of predicted: run_certbot clears
+# XDG_CONFIG_HOME and sets HOME to CERTBOT_HOME, which fixes the lookup to the
+# two paths below no matter what the caller exported. The same constant builds
+# both, so the path this checks and the path certbot reads cannot drift apart.
+readonly CERTBOT_HOME="/root"
 
-# Resolved the way certbot resolves it. XDG_CONFIG_HOME wins; otherwise Python's
-# os.path.expanduser prefers HOME and falls back to the passwd entry for the
-# effective user, which is what this reproduces. An unresolvable home is a
-# failure rather than a skipped check.
-certbot_user_config_file() {
-    local config_home="${XDG_CONFIG_HOME:-}"
-    local home_directory="${HOME:-}"
+# Test seam. Empty in production, so the entries below are the literal canonical
+# paths; the suite sets it to a sandbox root to exercise the contract without
+# touching the host.
+readonly CERTBOT_CONFIG_PREFIX="${CERTBOT_CONFIG_PREFIX:-}"
 
-    if [[ -z "$config_home" ]]; then
-        if [[ -z "$home_directory" ]]; then
-            command -v getent >/dev/null 2>&1 ||
-                fail "Unable to resolve the home directory Certbot would search: getent is not available."
-            home_directory="$(getent passwd "$(id -u)" | cut -d: -f6)"
-        fi
-        [[ -n "$home_directory" ]] ||
-            fail "Unable to resolve the home directory Certbot would search for a global configuration."
-        config_home="$home_directory/.config"
-    fi
+readonly GLOBAL_CERTBOT_CONFIG_FILES=(
+    "${CERTBOT_CONFIG_PREFIX}/etc/letsencrypt/cli.ini"
+    "${CERTBOT_CONFIG_PREFIX}${CERTBOT_HOME}/.config/letsencrypt/cli.ini"
+)
 
-    printf '%s/letsencrypt/cli.ini' "$config_home"
-}
-
+# Iterates a literal array rather than calling a resolver. A helper would have to
+# report its own failures, and `for candidate in "$(helper)"` swallows them: the
+# fail() runs inside the command substitution, the subshell dies, and the loop
+# continues over an empty value while this function still returns 0 -- a guard
+# that reports success precisely when it could not do its job.
 verify_no_global_certbot_config() {
     local candidate
 
     # -L as well as -e: a dangling symlink is still a path certbot would read
     # once its target appeared.
-    for candidate in "$GLOBAL_CERTBOT_CONFIG_FILE" "$(certbot_user_config_file)"; do
+    for candidate in "${GLOBAL_CERTBOT_CONFIG_FILES[@]}"; do
         if [[ -e "$candidate" || -L "$candidate" ]]; then
             fail "A Certbot global configuration file exists: $candidate. This project configures Certbot entirely on the command line and does not use one. Confirm it is not needed and move it aside before re-running; this script will not modify it."
         fi
@@ -152,6 +159,7 @@ verify_no_global_certbot_config() {
 
 run_certbot() {
     run_with_timeout "$CERTBOT_TIMEOUT_SECONDS" env \
+        -u XDG_CONFIG_HOME \
         -u AWS_ACCESS_KEY_ID \
         -u AWS_SECRET_ACCESS_KEY \
         -u AWS_SESSION_TOKEN \
@@ -172,6 +180,7 @@ run_certbot() {
         -u REQUESTS_CA_BUNDLE \
         -u SSL_CERT_FILE \
         -u SSL_CERT_DIR \
+        HOME="$CERTBOT_HOME" \
         AWS_SHARED_CREDENTIALS_FILE=/dev/null \
         AWS_CONFIG_FILE=/dev/null \
         BOTO_CONFIG=/dev/null \

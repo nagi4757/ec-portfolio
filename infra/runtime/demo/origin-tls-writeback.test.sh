@@ -256,94 +256,183 @@ assert_contains "$acme_contents" 'install -o root -g root -m 755 \' \
 assert_contains "$acme_contents" "ORIGIN_TLS_ENV_FILE" \
     "The bucket name must be persisted for the renewal timer."
 
-# --- 13. a Certbot global configuration stops the run before certbot --------
-# Certbot loads /etc/letsencrypt/cli.ini, and ${XDG_CONFIG_HOME:-~/.config}/
-# letsencrypt/cli.ini, before any command-line flag. Either can declare
-# pre-hook, post-hook or deploy-hook, which certbot runs as root, so both
-# scripts must refuse to invoke certbot at all while one exists.
+# --- 13. the Certbot configuration lookup is pinned, not predicted ----------
+# Certbot reads /etc/letsencrypt/cli.ini and ${XDG_CONFIG_HOME:-~/.config}/
+# letsencrypt/cli.ini before any command-line flag, and either may declare
+# pre-hook, post-hook or deploy-hook, which run as root.
 #
-# A fake certbot is placed first on PATH for the whole section. Nothing here may
-# execute it: the marker file is asserted absent at the end, which is what
-# "failed before the certbot invocation" means in practice.
+# The second path follows the caller's environment. Measured against certbot:
+# XDG unset with HOME=/root gives /root/.config/letsencrypt/cli.ini; an empty or
+# relative XDG_CONFIG_HOME resolves against the working directory; an absolute
+# one is taken as given. The scripts therefore pin the environment rather than
+# predict it, and these tests hold them to that.
+
 certbot_marker="$work_directory/certbot-invoked"
 fake_bin="$work_directory/fake-bin"
 mkdir -p "$fake_bin"
+
+# Records the environment certbot is actually handed, so the pinning is checked
+# by observation rather than by grepping the source.
 cat >"$fake_bin/certbot" <<FAKE
 #!/usr/bin/env bash
-printf 'certbot invoked: %s\n' "\$*" >>"$certbot_marker"
+{
+    printf 'certbot invoked: %s\n' "\$*"
+    printf 'HOME=%s\n' "\${HOME-<unset>}"
+    printf 'XDG_CONFIG_HOME=%s\n' "\${XDG_CONFIG_HOME-<unset>}"
+} >>"$certbot_marker"
 exit 0
 FAKE
 chmod 755 "$fake_bin/certbot"
 
-# Runs the script's real verify_no_global_certbot_config() in its own process,
-# with both searched locations pointed at the sandbox.
-# $1 script, $2 /etc candidate path, $3 XDG_CONFIG_HOME
-run_global_config_check() {
-    PATH="$fake_bin:$PATH" \
-        CERTBOT_GLOBAL_CONFIG_FILE="$2" \
-        XDG_CONFIG_HOME="$3" \
-        bash -c 'source "$1"; verify_no_global_certbot_config' _ "$1" 2>&1
+# The scripts wrap certbot in `timeout`. A fake keeps this suite independent of
+# whether the host has GNU coreutils.
+cat >"$fake_bin/timeout" <<'FAKETIMEOUT'
+#!/usr/bin/env bash
+while [[ "$1" == --* ]]; do shift; done
+shift
+exec "$@"
+FAKETIMEOUT
+chmod 755 "$fake_bin/timeout"
+
+# Runs the script's real verify_no_global_certbot_config() in its own process.
+# $1 script, $2 sandbox prefix, rest: caller environment to expose
+run_preflight() {
+    local script="$1" prefix="$2"
+    shift 2
+    env "$@" PATH="$fake_bin:$PATH" CERTBOT_CONFIG_PREFIX="$prefix" \
+        bash -c 'source "$1"; verify_no_global_certbot_config' _ "$script" 2>&1
 }
 
-empty_xdg="$work_directory/xdg-empty"
-mkdir -p "$empty_xdg"
-absent_config="$work_directory/absent-cli.ini"
+# Runs the real guard and then the real run_certbot, which is the order main()
+# uses. The sourced script sets `set -e`, so a failing guard aborts before
+# certbot -- that is the property under test, and the marker proves it.
+# $1 script, $2 sandbox prefix, rest: caller environment to expose
+run_guard_then_certbot() {
+    local script="$1" prefix="$2"
+    shift 2
+    env "$@" PATH="$fake_bin:$PATH" CERTBOT_CONFIG_PREFIX="$prefix" \
+        bash -c 'source "$1"; verify_no_global_certbot_config; run_certbot certbot plugins' \
+        _ "$script" 2>&1
+}
+
+# $1 sandbox prefix, $2 path under it, $3 contents
+seed_config() {
+    mkdir -p "$1/$(dirname "$2")"
+    printf '%s\n' "$3" >"$1/$2"
+}
+
+hostile_xdg="$work_directory/hostile-xdg"
+hostile_home="$work_directory/hostile-home"
+mkdir -p "$hostile_xdg/letsencrypt" "$hostile_home/.config/letsencrypt"
+printf 'pre-hook = /tmp/evil.sh\n' >"$hostile_xdg/letsencrypt/cli.ini"
+printf 'pre-hook = /tmp/evil.sh\n' >"$hostile_home/.config/letsencrypt/cli.ini"
 
 for script in "$ACME_SCRIPT" "$RENEW_SCRIPT"; do
     script_name="${script##*/}"
 
-    # Baseline: neither location exists, so the check passes and the run
-    # continues. Without this the failing cases below could pass for the wrong
-    # reason.
-    run_global_config_check "$script" "$absent_config" "$empty_xdg" >/dev/null ||
-        fail "$script_name must accept a host with no Certbot global configuration."
+    # Both canonical locations are refused.
+    for canonical in "etc/letsencrypt/cli.ini" "root/.config/letsencrypt/cli.ini"; do
+        prefix="$work_directory/sandbox-${script_name}-${canonical//\//-}"
+        mkdir -p "$prefix"
+        seed_config "$prefix" "$canonical" 'pre-hook = /tmp/evil.sh'
+        if run_preflight "$script" "$prefix" >/dev/null 2>&1; then
+            fail "$script_name must refuse /$canonical."
+        fi
+        output="$(run_preflight "$script" "$prefix" || true)"
+        assert_contains "$output" "Certbot global configuration file" \
+            "$script_name must name the refused configuration file (/$canonical)."
 
-    # The global location.
-    etc_config="$work_directory/etc-cli-$script_name.ini"
-    printf 'pre-hook = /tmp/evil.sh\n' >"$etc_config"
-    check_output="$(run_global_config_check "$script" "$etc_config" "$empty_xdg" || true)"
-    assert_contains "$check_output" "Certbot global configuration file" \
-        "$script_name must refuse to run while /etc/letsencrypt/cli.ini exists."
-    if run_global_config_check "$script" "$etc_config" "$empty_xdg" >/dev/null 2>&1; then
-        fail "$script_name must fail closed when a global Certbot configuration exists."
-    fi
+        # Refusal must not touch operator state.
+        [[ -f "$prefix/$canonical" ]] ||
+            fail "$script_name must not delete the configuration it refuses."
+        assert_contains "$(cat "$prefix/$canonical")" "pre-hook = /tmp/evil.sh" \
+            "$script_name must not rewrite the configuration it refuses."
+    done
 
-    # A benign one is refused too: the contract bans the file, not a directive
+    # A benign file is refused too: the contract bans the file, not a directive
     # list, which is what also removes --server and --authenticator override.
-    benign_config="$work_directory/etc-benign-$script_name.ini"
-    printf 'rsa-key-size = 4096\n' >"$benign_config"
-    if run_global_config_check "$script" "$benign_config" "$empty_xdg" >/dev/null 2>&1; then
+    benign_prefix="$work_directory/sandbox-benign-$script_name"
+    mkdir -p "$benign_prefix"
+    seed_config "$benign_prefix" "etc/letsencrypt/cli.ini" 'rsa-key-size = 4096'
+    if run_preflight "$script" "$benign_prefix" >/dev/null 2>&1; then
         fail "$script_name must refuse any global Certbot configuration, hooks or not."
     fi
 
-    # The XDG location certbot searches second.
-    xdg_home="$work_directory/xdg-$script_name"
-    mkdir -p "$xdg_home/letsencrypt"
-    printf 'deploy-hook = /tmp/evil.sh\n' >"$xdg_home/letsencrypt/cli.ini"
-    if run_global_config_check "$script" "$absent_config" "$xdg_home" >/dev/null 2>&1; then
-        fail "$script_name must also refuse the XDG_CONFIG_HOME Certbot configuration."
-    fi
-
     # A dangling symlink is a path certbot would read once its target appeared.
-    dangling_config="$work_directory/etc-dangling-$script_name.ini"
-    ln -s "$work_directory/no-such-cli.ini" "$dangling_config"
-    if run_global_config_check "$script" "$dangling_config" "$empty_xdg" >/dev/null 2>&1; then
-        fail "$script_name must refuse a dangling symlink at the global configuration path."
+    dangling_prefix="$work_directory/sandbox-dangling-$script_name"
+    mkdir -p "$dangling_prefix/etc/letsencrypt"
+    ln -s "$work_directory/no-such-cli.ini" "$dangling_prefix/etc/letsencrypt/cli.ini"
+    if run_preflight "$script" "$dangling_prefix" >/dev/null 2>&1; then
+        fail "$script_name must refuse a dangling symlink at a canonical path."
     fi
 
-    # The check must never remove or rewrite operator state.
-    [[ -f "$etc_config" ]] ||
-        fail "$script_name must not delete the global Certbot configuration it refuses."
-    assert_contains "$(cat "$etc_config")" "pre-hook = /tmp/evil.sh" \
-        "$script_name must not rewrite the global Certbot configuration it refuses."
+    # A clean host passes. Without this the refusals above could hold for the
+    # wrong reason, and it is also what proves the guard does not report failure
+    # from a resolver that quietly died in a command substitution.
+    clean_prefix="$work_directory/sandbox-clean-$script_name"
+    mkdir -p "$clean_prefix"
+    run_preflight "$script" "$clean_prefix" >/dev/null ||
+        fail "$script_name must accept a host with no Certbot global configuration."
+
+    # The caller's environment cannot move the checked paths. Every hostile
+    # shape from the measured table is offered; the canonical locations under
+    # the sandbox stay empty, so the guard must still pass.
+    for hostile_env in \
+        "XDG_CONFIG_HOME=$hostile_xdg" \
+        "XDG_CONFIG_HOME=" \
+        "XDG_CONFIG_HOME=relative-path" \
+        "HOME=$hostile_home" \
+        "HOME="
+    do
+        run_preflight "$script" "$clean_prefix" "$hostile_env" >/dev/null ||
+            fail "$script_name preflight must not depend on the caller's ${hostile_env%%=*}."
+    done
+
+    # And a configuration at a canonical path is still caught while the caller
+    # points the environment elsewhere.
+    hostile_prefix="$work_directory/sandbox-hostile-$script_name"
+    mkdir -p "$hostile_prefix"
+    seed_config "$hostile_prefix" "root/.config/letsencrypt/cli.ini" 'deploy-hook = /tmp/evil.sh'
+    if run_preflight "$script" "$hostile_prefix" \
+        "XDG_CONFIG_HOME=$hostile_xdg" "HOME=$hostile_home" >/dev/null 2>&1; then
+        fail "$script_name must still refuse a canonical configuration under a hostile environment."
+    fi
+
+    # End to end, through the real run_certbot: a refused configuration must
+    # stop the run before certbot is executed.
+    rm -f "$certbot_marker"
+    if run_guard_then_certbot "$script" "$hostile_prefix" >/dev/null 2>&1; then
+        fail "$script_name must not reach certbot while a global configuration exists."
+    fi
+    [[ ! -e "$certbot_marker" ]] ||
+        fail "$script_name invoked certbot despite a prohibited Certbot configuration."
+
+    # Positive control: on a clean host the same path does reach certbot, which
+    # is what makes the assertion above meaningful rather than vacuous. The fake
+    # records the environment it was handed, so the pinning is observed.
+    rm -f "$certbot_marker"
+    run_guard_then_certbot "$script" "$clean_prefix" \
+        "XDG_CONFIG_HOME=$hostile_xdg" "HOME=$hostile_home" >/dev/null ||
+        fail "$script_name must reach certbot on a host with no global configuration."
+    [[ -e "$certbot_marker" ]] ||
+        fail "The certbot harness is not wired: $script_name never reached certbot."
+    marker_contents="$(cat "$certbot_marker")"
+    assert_contains "$marker_contents" "HOME=/root" \
+        "$script_name must hand certbot a pinned HOME, whatever the caller exported."
+    assert_contains "$marker_contents" "XDG_CONFIG_HOME=<unset>" \
+        "$script_name must clear XDG_CONFIG_HOME before invoking certbot."
+    assert_absent "$marker_contents" "$hostile_home" \
+        "The caller's HOME must not reach certbot."
+    assert_absent "$marker_contents" "$hostile_xdg" \
+        "The caller's XDG_CONFIG_HOME must not reach certbot."
 done
 
-[[ ! -e "$certbot_marker" ]] ||
-    fail "certbot was invoked while a global Certbot configuration existed."
+rm -f "$certbot_marker"
 
 # --- 14. the preflight precedes the certbot invocation in both scripts ------
-# The functional check above proves the guard fails. This proves it is reached
-# before certbot runs, which is what keeps a hostile cli.ini from being loaded.
+# The end-to-end check above proves the guard stops the run. This proves the
+# call sits before certbot in main() as well, so the ordering is not an accident
+# of how the tests drive the functions.
 # $1 script contents, $2 script name
 assert_guard_precedes_certbot() {
     local body guard certbot_call
@@ -365,10 +454,19 @@ assert_guard_precedes_certbot() {
 assert_guard_precedes_certbot "$acme_contents" "configure-acme.sh"
 assert_guard_precedes_certbot "$renew_contents" "renew-origin-cert.sh"
 
-# --directory-hooks flags disable renewal-hooks/ only, so they must not be
-# presented as covering the global configuration path.
+# The guard must not reintroduce a resolver whose failure disappears into a
+# command substitution: fail() would run in the subshell, the loop would iterate
+# over nothing, and the function would return 0 on a host it could not check.
 for script_contents in "$acme_contents" "$renew_contents"; do
-    assert_contains "$script_contents" "--no-directory-hooks" \
+    assert_absent "$script_contents" 'for candidate in "$GLOBAL_CERTBOT_CONFIG_FILE" "$(' \
+        "The guard must not resolve a candidate path in a command substitution."
+    assert_contains "$script_contents" 'for candidate in "${GLOBAL_CERTBOT_CONFIG_FILES[@]}"' \
+        "The guard must iterate the literal canonical path list."
+    assert_contains "$script_contents" '-u XDG_CONFIG_HOME' \
+        "certbot must be invoked with XDG_CONFIG_HOME cleared."
+    assert_contains "$script_contents" 'HOME="$CERTBOT_HOME"' \
+        "certbot must be invoked with HOME pinned to the constant the guard uses."
+    assert_contains "$script_contents" '--no-directory-hooks' \
         "The certbot invocation must keep disabling renewal-hooks/ directories."
 done
 
