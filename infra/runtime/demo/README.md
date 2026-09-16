@@ -34,7 +34,7 @@ CloudFrontからEC2 originへの通信はHTTPS `443`だけを使用します。N
 | `origin-smoke-check.sh` | HTTPS、証明書、origin verification、非公開portの検証 |
 | `configure-acme.sh` | Certbot/Route 53 DNS-01によるorigin certificate発行とrenewal timer設定 |
 | `renew-origin-cert.sh` | 対象certificateだけを更新し、変更時にNginxを安全にreload |
-| `sync-origin-tls.sh` | `/etc/letsencrypt`をS3へtar退避・復元するorigin TLS state永続化（Phase 6B） |
+| `sync-origin-tls.sh` | Certbot durable state（package所有の`cli.ini`を除く`/etc/letsencrypt`）をS3へtar退避・復元するorigin TLS state永続化（Phase 6B） |
 | `ec-portfolio-certbot-renew.service` | bounded certificate renewalを実行するsystemd oneshot unit |
 | `ec-portfolio-certbot-renew.timer` | missed runを補完する永続systemd timer |
 
@@ -316,7 +316,7 @@ NginxまたはDemo origin設定がまだ存在しない場合、certificate rene
 
 ### origin TLS state の永続化（Phase 6B）
 
-`sync-origin-tls.sh` が `/etc/letsencrypt` を専用 S3 bucket へ退避し、別 host で復元できるようにします。bucket 名は Terraform output `origin_tls_backup_bucket_name` から取得します。
+`sync-origin-tls.sh` が Certbot durable state を専用 S3 bucket へ退避し、別 host で復元できるようにします。bucket 名は Terraform output `origin_tls_backup_bucket_name` から取得します。
 
 ```bash
 ORIGIN_TLS_BUCKET=<bucket> sudo -E ./sync-origin-tls.sh backup
@@ -339,7 +339,11 @@ replacement host が毎回 certificate を新規発行すると、Let's Encrypt 
 
 `aws s3 sync` は symlink を追跡して実体を複製し、ownership と permission を失います。その結果 `live/` が symlink ではなく通常ファイルの集合になり、**その日は serving できても renewal ができない host** が出来上がります。`tar` は symlink・所有者・permission を保持するため archive 形式を採用しています。
 
-archive は `/etc/letsencrypt` 配下を選別せず全体を格納します。certbot が必要とするファイルは version により異なり、選別すると取りこぼす可能性があるためです。上表の directory は archive 生成後の**検証項目**として使用します。
+archive は `/etc/letsencrypt` 配下を原則として選別せず格納します。certbot が必要とするファイルは version により異なり、選別すると取りこぼす可能性があるためです。上表の directory は archive 生成後の**検証項目**として使用します。
+
+例外は `/etc/letsencrypt/cli.ini` ただ一つで、これは archive に含めません。Amazon Linux 2023 では certbot RPM が所有する package file（`preconfigured-renewal` と `max-log-backups` のみ）であり、deployment の durable state ではありません。置換 host は `dnf install certbot` で自分自身の cli.ini を得るため、旧 host のものを復元すると package が書いた設定を上書きしてしまいます。
+
+除外は allowlist ではありません。archive 側の contract は変更しておらず、`letsencrypt/cli.ini` を含む archive は metadata 検証と staged tree 検証の両方で従来どおり拒否されます。つまり「archive に cli.ini がある」＝「誰かが入れた」であり、fail-closed のままです。
 
 #### 安全性の契約
 
