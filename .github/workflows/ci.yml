@@ -122,6 +122,28 @@ jobs:
           ! docker history --no-trunc --format '{{.CreatedBy}}' ec-api:ci \
             | grep -Eq 'DB_PASSWORD|REDIS_PASSWORD|APP_AUTH_JWT_SECRET'
 
+  # Runtime contract suites that gate a deployment run inside the deploy jobs, so
+  # they are skipped on a pull request and again whenever the migration guard
+  # stops deploy-api. The origin TLS suites verify the archive restore contract --
+  # path traversal, symlink escape, device entries, setuid bits, key permissions --
+  # which is a correctness property of the scripts themselves, not of a release.
+  # It has to hold before review, on every pull request, so it is checked here
+  # rather than behind a deployment.
+  runtime-tests:
+    name: Runtime shell tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Test origin TLS persistence contract
+        run: |
+          set -euo pipefail
+          infra/runtime/demo/sync-origin-tls.test.sh
+          infra/runtime/demo/origin-tls-writeback.test.sh
+
   deploy-frontends:
     name: Deploy Store and Admin frontends
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
