@@ -44,6 +44,20 @@ readonly PRIVATE_STATE_NAMES=(
 readonly HOOK_DIRECTIVE_PATTERN='^[[:space:]]*(pre_hook|post_hook|renew_hook|deploy_hook)[[:space:]]*='
 readonly HOOK_DIRECTORY_NAME="renewal-hooks"
 
+# Certbot loads /etc/letsencrypt/cli.ini as global configuration before any flag
+# on the command line is considered, and a configuration file may declare
+# pre-hook, post-hook and deploy-hook. Those run as root at renewal time, so a
+# restored cli.ini is arbitrary code execution by another route --
+# --no-directory-hooks does not cover it, because it disables renewal-hooks/
+# directories and nothing else.
+#
+# The file is refused outright rather than parsed for hook directives. This
+# project passes every option explicitly on the command line and has no use for
+# a global configuration, so there is no benign cli.ini to preserve; refusing
+# the whole file also removes --server, --authenticator and --config-dir
+# override, which a hook-only filter would leave reachable.
+readonly GLOBAL_CONFIG_FILE_NAME="cli.ini"
+
 readonly LETSENCRYPT_PARENT="/etc"
 readonly LETSENCRYPT_DIRECTORY_NAME="letsencrypt"
 readonly LETSENCRYPT_DIRECTORY="$LETSENCRYPT_PARENT/$LETSENCRYPT_DIRECTORY_NAME"
@@ -150,6 +164,12 @@ verify_archive() {
     # certbot creates them itself.
     if grep -qE "^$LETSENCRYPT_DIRECTORY_NAME/$HOOK_DIRECTORY_NAME/.+[^/]$" <<<"$listing"; then
         fail "The archive contains a Certbot hook script."
+    fi
+
+    # Refused here, before a single byte is unpacked, so the file never reaches
+    # disk even in the staging directory.
+    if grep -qE "^$LETSENCRYPT_DIRECTORY_NAME/$GLOBAL_CONFIG_FILE_NAME$" <<<"$listing"; then
+        fail "The archive contains a Certbot global configuration file."
     fi
 
     for directory in "${REQUIRED_DIRECTORIES[@]}"; do
@@ -305,6 +325,13 @@ verify_no_certbot_hooks() {
         head -n 1 || true)"
     [[ -z "$hook_file" ]] ||
         fail "The restored tree contains a Certbot hook script."
+
+    # Defence in depth. verify_archive already refuses this entry from the
+    # metadata, so reaching here means the name check was bypassed rather than
+    # that a cli.ini is acceptable. -e is not used on purpose: a dangling
+    # symlink is still a file certbot would follow once its target existed.
+    [[ ! -e "$root/$GLOBAL_CONFIG_FILE_NAME" && ! -L "$root/$GLOBAL_CONFIG_FILE_NAME" ]] ||
+        fail "The restored tree contains a Certbot global configuration file."
 
     while IFS= read -r configuration_file; do
         [[ -n "$configuration_file" ]] || continue

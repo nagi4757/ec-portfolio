@@ -660,6 +660,61 @@ sweep_calls="$(printf '%s\n' "$script_body" | grep -c 'verify_staged_tree_safety
 (( sweep_calls == 2 )) ||
     fail "Both restore and verify must sweep the staged tree (found $sweep_calls)."
 
+# --- 8g. a Certbot global configuration is refused ---------------------------
+# Certbot reads /etc/letsencrypt/cli.ini before any command-line flag, and a
+# configuration file may declare pre-hook, post-hook and deploy-hook, which run
+# as root. --no-directory-hooks does not cover this path: it disables
+# renewal-hooks/ directories only. A restored cli.ini would therefore be root
+# command execution that every other check in this suite lets through.
+
+# A hostile one, carrying the hook that would run.
+cli_hook_parent="$work_directory/cli-ini-hook"
+mkdir -p "$cli_hook_parent"
+cp -R "$fixture_parent/letsencrypt" "$cli_hook_parent/letsencrypt"
+printf 'pre-hook = /tmp/evil.sh\n' >"$cli_hook_parent/letsencrypt/cli.ini"
+archive_fixture "$cli_hook_parent" "$work_directory/cli-ini-hook.tar.gz"
+if verify_archive_ok "$work_directory/cli-ini-hook.tar.gz"; then
+    fail "An archive carrying a Certbot cli.ini with a hook must be rejected."
+fi
+
+# A benign one is refused just the same. The contract bans the file, not a list
+# of directives: a filter that only caught hooks would still let cli.ini
+# override --server, --authenticator or --config-dir.
+cli_benign_parent="$work_directory/cli-ini-benign"
+mkdir -p "$cli_benign_parent"
+cp -R "$fixture_parent/letsencrypt" "$cli_benign_parent/letsencrypt"
+printf 'rsa-key-size = 4096\n' >"$cli_benign_parent/letsencrypt/cli.ini"
+archive_fixture "$cli_benign_parent" "$work_directory/cli-ini-benign.tar.gz"
+if verify_archive_ok "$work_directory/cli-ini-benign.tar.gz"; then
+    fail "An archive carrying any Certbot cli.ini must be rejected, hooks or not."
+fi
+
+# Defence in depth: the staged filesystem is checked too, so bypassing the
+# metadata name check is not enough.
+cli_staged_root="$work_directory/cli-ini-staged"
+mkdir -p "$cli_staged_root"
+cp -R "$restore_root/letsencrypt" "$cli_staged_root/letsencrypt"
+printf 'pre-hook = /tmp/evil.sh\n' >"$cli_staged_root/letsencrypt/cli.ini"
+if verify_staged_tree_safety_ok "$cli_staged_root"; then
+    fail "A staged tree containing a Certbot cli.ini must be rejected."
+fi
+
+# A dangling symlink is still a path certbot would read once its target existed,
+# so -e alone would not catch it.
+cli_link_root="$work_directory/cli-ini-dangling"
+mkdir -p "$cli_link_root"
+cp -R "$restore_root/letsencrypt" "$cli_link_root/letsencrypt"
+ln -s /tmp/does-not-exist-cli.ini "$cli_link_root/letsencrypt/cli.ini"
+if verify_staged_tree_safety_ok "$cli_link_root"; then
+    fail "A staged tree whose cli.ini is a dangling symlink must be rejected."
+fi
+
+# The valid fixture is unaffected by the new rule.
+verify_archive_ok "$good_archive" ||
+    fail "A tree with no cli.ini must remain acceptable."
+verify_restored_tree_ok "$restore_root/letsencrypt" ||
+    fail "A restored tree with no cli.ini must remain acceptable."
+
 # --- 9. static contract: the script must not leak key material or delete ----
 script_contents="$(cat "$SYNC_SCRIPT")"
 for forbidden in "s3:DeleteObject" "rm -rf /etc" "cat \$key_file" "--recursive"; do

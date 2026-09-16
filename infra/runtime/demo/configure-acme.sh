@@ -131,6 +131,58 @@ resolve_bundle_paths() {
         fail "The bundled origin TLS backup script is missing or not executable."
 }
 
+# Certbot loads these two configuration files automatically, before any flag on
+# the command line is considered (certbot/_internal/constants.py, CLI_DEFAULTS
+# "config_files"):
+#
+#   /etc/letsencrypt/cli.ini
+#   ${XDG_CONFIG_HOME:-~/.config}/letsencrypt/cli.ini
+#
+# Either may declare pre-hook, post-hook or deploy-hook, which certbot runs as
+# root, and either may override --server, --authenticator or --config-dir.
+# --no-directory-hooks does not help: it disables renewal-hooks/ directories and
+# nothing else.
+#
+# This script passes every option explicitly, so the contract is that neither
+# file exists. One that does is reported and the run stops before certbot is
+# invoked. It is never deleted or edited: it is operator state this script does
+# not own, and silently removing it would destroy a deliberate change.
+readonly GLOBAL_CERTBOT_CONFIG_FILE="${CERTBOT_GLOBAL_CONFIG_FILE:-/etc/letsencrypt/cli.ini}"
+
+# Resolved the way certbot resolves it. XDG_CONFIG_HOME wins; otherwise Python's
+# os.path.expanduser prefers HOME and falls back to the passwd entry for the
+# effective user, which is what this reproduces. An unresolvable home is a
+# failure rather than a skipped check.
+certbot_user_config_file() {
+    local config_home="${XDG_CONFIG_HOME:-}"
+    local home_directory="${HOME:-}"
+
+    if [[ -z "$config_home" ]]; then
+        if [[ -z "$home_directory" ]]; then
+            command -v getent >/dev/null 2>&1 ||
+                fail "Unable to resolve the home directory Certbot would search: getent is not available."
+            home_directory="$(getent passwd "$(id -u)" | cut -d: -f6)"
+        fi
+        [[ -n "$home_directory" ]] ||
+            fail "Unable to resolve the home directory Certbot would search for a global configuration."
+        config_home="$home_directory/.config"
+    fi
+
+    printf '%s/letsencrypt/cli.ini' "$config_home"
+}
+
+verify_no_global_certbot_config() {
+    local candidate
+
+    # -L as well as -e: a dangling symlink is still a path certbot would read
+    # once its target appeared.
+    for candidate in "$GLOBAL_CERTBOT_CONFIG_FILE" "$(certbot_user_config_file)"; do
+        if [[ -e "$candidate" || -L "$candidate" ]]; then
+            fail "A Certbot global configuration file exists: $candidate. This project configures Certbot entirely on the command line and does not use one. Confirm it is not needed and move it aside before re-running; this script will not modify it."
+        fi
+    done
+}
+
 run_certbot() {
     run_with_timeout "$CERTBOT_TIMEOUT_SECONDS" env \
         -u AWS_ACCESS_KEY_ID \
@@ -277,6 +329,7 @@ main() {
 
     validate_platform
     validate_inputs "$@"
+    verify_no_global_certbot_config
     resolve_bundle_paths
     umask 077
 

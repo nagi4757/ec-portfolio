@@ -37,13 +37,18 @@ fail() {
     exit 1
 }
 
+# Matched with a glob rather than `printf | grep -Fq`. grep -q exits on its
+# first match, printf then dies of SIGPIPE, and under `set -o pipefail` the
+# pipeline reports 141 -- so a haystack whose match comes early and whose
+# remainder is still being written fails the assertion it just satisfied. That
+# race is a function of file size and scheduling, which made it intermittent.
+# sync-origin-tls.test.sh already uses this form.
 assert_contains() {
-    printf '%s' "$1" | grep -Fq -- "$2" || fail "$3 (expected to find: $2)"
+    [[ "$1" == *"$2"* ]] || fail "$3 (expected to find: $2)"
 }
 
 assert_absent() {
-    printf '%s' "$1" | grep -Fq -- "$2" && fail "$3 (unexpectedly found: $2)"
-    return 0
+    [[ "$1" != *"$2"* ]] || fail "$3 (unexpectedly found: $2)"
 }
 
 work_directory="$(mktemp -d /tmp/ec-portfolio-writeback-test.XXXXXX)"
@@ -180,8 +185,13 @@ printf '%s\n' "$sync_code" |
     grep -qE '(^|[;&|(]|\bthen\b|\bdo\b|\bexec\b)[[:space:]]*(sudo[[:space:]]+)?(certbot|nginx|systemctl)\b' &&
     fail "The backup helper must not run certbot, Nginx or systemctl."
 
-printf '%s\n' "$sync_code" | grep -qE 'rm[[:space:]].*/etc/letsencrypt' &&
+# Here-string, not a pipe, for the same SIGPIPE reason as assert_contains -- and
+# here the failure mode is the dangerous direction: a pipeline that reports 141
+# makes the `&&` skip fail(), so a helper that really did delete /etc/letsencrypt
+# would pass this check.
+if grep -qE 'rm[[:space:]].*/etc/letsencrypt' <<<"$sync_code"; then
     fail "The backup helper must not delete the certbot tree."
+fi
 
 # The only removal in the helper is its own scratch directory, and it is fenced
 # by the path it created.
@@ -245,5 +255,121 @@ assert_contains "$acme_contents" 'install -o root -g root -m 755 \' \
     "The installed helper must be root owned and executable."
 assert_contains "$acme_contents" "ORIGIN_TLS_ENV_FILE" \
     "The bucket name must be persisted for the renewal timer."
+
+# --- 13. a Certbot global configuration stops the run before certbot --------
+# Certbot loads /etc/letsencrypt/cli.ini, and ${XDG_CONFIG_HOME:-~/.config}/
+# letsencrypt/cli.ini, before any command-line flag. Either can declare
+# pre-hook, post-hook or deploy-hook, which certbot runs as root, so both
+# scripts must refuse to invoke certbot at all while one exists.
+#
+# A fake certbot is placed first on PATH for the whole section. Nothing here may
+# execute it: the marker file is asserted absent at the end, which is what
+# "failed before the certbot invocation" means in practice.
+certbot_marker="$work_directory/certbot-invoked"
+fake_bin="$work_directory/fake-bin"
+mkdir -p "$fake_bin"
+cat >"$fake_bin/certbot" <<FAKE
+#!/usr/bin/env bash
+printf 'certbot invoked: %s\n' "\$*" >>"$certbot_marker"
+exit 0
+FAKE
+chmod 755 "$fake_bin/certbot"
+
+# Runs the script's real verify_no_global_certbot_config() in its own process,
+# with both searched locations pointed at the sandbox.
+# $1 script, $2 /etc candidate path, $3 XDG_CONFIG_HOME
+run_global_config_check() {
+    PATH="$fake_bin:$PATH" \
+        CERTBOT_GLOBAL_CONFIG_FILE="$2" \
+        XDG_CONFIG_HOME="$3" \
+        bash -c 'source "$1"; verify_no_global_certbot_config' _ "$1" 2>&1
+}
+
+empty_xdg="$work_directory/xdg-empty"
+mkdir -p "$empty_xdg"
+absent_config="$work_directory/absent-cli.ini"
+
+for script in "$ACME_SCRIPT" "$RENEW_SCRIPT"; do
+    script_name="${script##*/}"
+
+    # Baseline: neither location exists, so the check passes and the run
+    # continues. Without this the failing cases below could pass for the wrong
+    # reason.
+    run_global_config_check "$script" "$absent_config" "$empty_xdg" >/dev/null ||
+        fail "$script_name must accept a host with no Certbot global configuration."
+
+    # The global location.
+    etc_config="$work_directory/etc-cli-$script_name.ini"
+    printf 'pre-hook = /tmp/evil.sh\n' >"$etc_config"
+    check_output="$(run_global_config_check "$script" "$etc_config" "$empty_xdg" || true)"
+    assert_contains "$check_output" "Certbot global configuration file" \
+        "$script_name must refuse to run while /etc/letsencrypt/cli.ini exists."
+    if run_global_config_check "$script" "$etc_config" "$empty_xdg" >/dev/null 2>&1; then
+        fail "$script_name must fail closed when a global Certbot configuration exists."
+    fi
+
+    # A benign one is refused too: the contract bans the file, not a directive
+    # list, which is what also removes --server and --authenticator override.
+    benign_config="$work_directory/etc-benign-$script_name.ini"
+    printf 'rsa-key-size = 4096\n' >"$benign_config"
+    if run_global_config_check "$script" "$benign_config" "$empty_xdg" >/dev/null 2>&1; then
+        fail "$script_name must refuse any global Certbot configuration, hooks or not."
+    fi
+
+    # The XDG location certbot searches second.
+    xdg_home="$work_directory/xdg-$script_name"
+    mkdir -p "$xdg_home/letsencrypt"
+    printf 'deploy-hook = /tmp/evil.sh\n' >"$xdg_home/letsencrypt/cli.ini"
+    if run_global_config_check "$script" "$absent_config" "$xdg_home" >/dev/null 2>&1; then
+        fail "$script_name must also refuse the XDG_CONFIG_HOME Certbot configuration."
+    fi
+
+    # A dangling symlink is a path certbot would read once its target appeared.
+    dangling_config="$work_directory/etc-dangling-$script_name.ini"
+    ln -s "$work_directory/no-such-cli.ini" "$dangling_config"
+    if run_global_config_check "$script" "$dangling_config" "$empty_xdg" >/dev/null 2>&1; then
+        fail "$script_name must refuse a dangling symlink at the global configuration path."
+    fi
+
+    # The check must never remove or rewrite operator state.
+    [[ -f "$etc_config" ]] ||
+        fail "$script_name must not delete the global Certbot configuration it refuses."
+    assert_contains "$(cat "$etc_config")" "pre-hook = /tmp/evil.sh" \
+        "$script_name must not rewrite the global Certbot configuration it refuses."
+done
+
+[[ ! -e "$certbot_marker" ]] ||
+    fail "certbot was invoked while a global Certbot configuration existed."
+
+# --- 14. the preflight precedes the certbot invocation in both scripts ------
+# The functional check above proves the guard fails. This proves it is reached
+# before certbot runs, which is what keeps a hostile cli.ini from being loaded.
+# $1 script contents, $2 script name
+assert_guard_precedes_certbot() {
+    local body guard certbot_call
+    body="$(main_body "$1")"
+    # `|| true` on both: under set -e with pipefail a grep that matches nothing
+    # fails the pipeline, the assignment fails with it, and the script dies
+    # before reaching the checks below -- reporting a bare exit 1 instead of
+    # saying which contract was broken.
+    guard="$(printf '%s\n' "$body" | grep -n "^    verify_no_global_certbot_config$" | head -n 1 | cut -d: -f1 || true)"
+    certbot_call="$(printf '%s\n' "$body" | grep -n "^    run_certbot certbot" | head -n 1 | cut -d: -f1 || true)"
+    [[ -n "$guard" ]] ||
+        fail "$2 must call verify_no_global_certbot_config in main()."
+    [[ -n "$certbot_call" ]] ||
+        fail "Unable to locate the certbot invocation in $2 main()."
+    (( guard < certbot_call )) ||
+        fail "$2 must check for a global Certbot configuration before invoking certbot."
+}
+
+assert_guard_precedes_certbot "$acme_contents" "configure-acme.sh"
+assert_guard_precedes_certbot "$renew_contents" "renew-origin-cert.sh"
+
+# --directory-hooks flags disable renewal-hooks/ only, so they must not be
+# presented as covering the global configuration path.
+for script_contents in "$acme_contents" "$renew_contents"; do
+    assert_contains "$script_contents" "--no-directory-hooks" \
+        "The certbot invocation must keep disabling renewal-hooks/ directories."
+done
 
 printf '[origin-tls-writeback-test] PASS\n'
