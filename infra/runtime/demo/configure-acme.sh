@@ -143,8 +143,8 @@ resolve_bundle_paths() {
 # --no-directory-hooks does not help: it disables renewal-hooks/ directories and
 # nothing else.
 #
-# The second path is caller controlled, and its resolution has edges that are
-# not worth reproducing in shell. Measured against certbot directly:
+# The second path is caller controlled, and its resolution has edges not worth
+# reproducing in shell. Measured against certbot directly:
 #
 #   XDG unset, HOME=/root        -> /root/.config/letsencrypt/cli.ini
 #   XDG unset, HOME=/tmp/x       -> /tmp/x/.config/letsencrypt/cli.ini
@@ -154,13 +154,10 @@ resolve_bundle_paths() {
 #
 # os.environ.get() returns its default only when the name is absent, so an empty
 # XDG_CONFIG_HOME is joined as an empty segment and the path becomes relative to
-# the working directory. A preflight that tried to predict all of this would
-# disagree with certbot in exactly the cases an attacker picks.
-#
-# So the environment is pinned instead of predicted: run_certbot clears
-# XDG_CONFIG_HOME and sets HOME to CERTBOT_HOME, which fixes the lookup to the
-# two paths below no matter what the caller exported. The same constant builds
-# both, so the path this checks and the path certbot reads cannot drift apart.
+# the working directory. So the environment is pinned instead of predicted:
+# run_certbot clears XDG_CONFIG_HOME and sets HOME to CERTBOT_HOME, which fixes
+# the lookup to the two paths below. The same constant builds both, so the path
+# this checks and the path certbot reads cannot drift apart.
 readonly CERTBOT_HOME="/root"
 
 # Test seam. Empty in production, so the entries below are the literal canonical
@@ -168,26 +165,127 @@ readonly CERTBOT_HOME="/root"
 # touching the host.
 readonly CERTBOT_CONFIG_PREFIX="${CERTBOT_CONFIG_PREFIX:-}"
 
-readonly GLOBAL_CERTBOT_CONFIG_FILES=(
-    "${CERTBOT_CONFIG_PREFIX}/etc/letsencrypt/cli.ini"
-    "${CERTBOT_CONFIG_PREFIX}${CERTBOT_HOME}/.config/letsencrypt/cli.ini"
+readonly GLOBAL_CERTBOT_CONFIG_FILE="${CERTBOT_CONFIG_PREFIX}/etc/letsencrypt/cli.ini"
+readonly USER_CERTBOT_CONFIG_FILE="${CERTBOT_CONFIG_PREFIX}${CERTBOT_HOME}/.config/letsencrypt/cli.ini"
+
+# /etc/letsencrypt/cli.ini is not ours to forbid. On Amazon Linux 2023 it
+# belongs to the certbot RPM and is written by every install, carrying only the
+# packaging defaults:
+#
+#   preconfigured-renewal = True
+#   max-log-backups = 0
+#
+# Refusing the file outright would block renewal on every host that has certbot
+# installed, and would block issuance on every replacement host the moment
+# `dnf install certbot` put it back -- which is exactly the host Phase 6B
+# exists for. So the file is allowed to exist and is held to a contract instead:
+# it must still be the file the package wrote, and it must say only these two
+# things. Anything else -- a hook, another server, another config-dir, a key
+# this project has never heard of -- fails closed.
+readonly PACKAGE_CERTBOT_CONFIG_OWNER="certbot"
+readonly ALLOWED_GLOBAL_CONFIG_KEYS=(
+    "preconfigured-renewal"
+    "max-log-backups"
 )
 
-# Iterates a literal array rather than calling a resolver. A helper would have to
-# report its own failures, and `for candidate in "$(helper)"` swallows them: the
-# fail() runs inside the command substitution, the subshell dies, and the loop
-# continues over an empty value while this function still returns 0 -- a guard
-# that reports success precisely when it could not do its job.
-verify_no_global_certbot_config() {
-    local candidate
+# Narrow on purpose. A value check is what stops "max-log-backups = 0 ; pre-hook
+# = ..." style smuggling through a key that is itself allowed.
+global_config_value_is_allowed() {
+    local key="$1" value="$2"
 
-    # -L as well as -e: a dangling symlink is still a path certbot would read
-    # once its target appeared.
-    for candidate in "${GLOBAL_CERTBOT_CONFIG_FILES[@]}"; do
-        if [[ -e "$candidate" || -L "$candidate" ]]; then
-            fail "A Certbot global configuration file exists: $candidate. This project configures Certbot entirely on the command line and does not use one. Confirm it is not needed and move it aside before re-running; this script will not modify it."
-        fi
+    case "$key" in
+        preconfigured-renewal) [[ "$value" =~ ^(True|False)$ ]] ;;
+        max-log-backups) [[ "$value" =~ ^[0-9]{1,4}$ ]] ;;
+        *) return 1 ;;
+    esac
+}
+
+key_is_allowed() {
+    local candidate="$1" allowed
+
+    for allowed in "${ALLOWED_GLOBAL_CONFIG_KEYS[@]}"; do
+        [[ "$candidate" == "$allowed" ]] && return 0
     done
+    return 1
+}
+
+# Every directive must be one of the allowed keys with an allowed value. The
+# file is read with a redirect rather than a pipe, so the loop body runs in this
+# shell and a fail() inside it actually ends the script.
+verify_global_config_directives() {
+    local file="$1"
+    local line key value
+
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        # Comments and blank lines only. A trailing comment is not stripped:
+        # certbot does not treat '#' as an inline comment in a value, so
+        # ignoring it here would let one hide a directive from this check.
+        [[ "$line" =~ ^[[:space:]]*(#|\;) ]] && continue
+        [[ "$line" =~ ^[[:space:]]*$ ]] && continue
+
+        [[ "$line" == *=* ]] ||
+            fail "The Certbot global configuration has a line that is not a directive."
+
+        key="${line%%=*}"
+        value="${line#*=}"
+        # Trim surrounding whitespace without a subshell.
+        key="${key#"${key%%[![:space:]]*}"}"; key="${key%"${key##*[![:space:]]}"}"
+        value="${value#"${value%%[![:space:]]*}"}"; value="${value%"${value##*[![:space:]]}"}"
+
+        key_is_allowed "$key" ||
+            fail "The Certbot global configuration declares an unexpected directive: $key. Only the certbot package defaults are allowed here; this project passes every option on the command line."
+        global_config_value_is_allowed "$key" "$value" ||
+            fail "The Certbot global configuration sets $key to a value this contract does not allow."
+    done <"$file"
+}
+
+# Ownership and integrity are asked of rpm, which is the only thing that knows
+# what the package wrote. Both are treated as required answers: a missing rpm,
+# an unowned file or a modified one ends the run. `rpm -qf` without
+# --queryformat exits 0 even for a file no package owns, so the queryformat form
+# is used and the name is compared as well as the status.
+verify_global_config_is_package_file() {
+    local file="$1"
+    local owner status
+
+    command -v rpm >/dev/null 2>&1 ||
+        fail "Unable to verify $file: rpm is not available, so package ownership cannot be established."
+
+    owner="$(rpm -qf --queryformat '%{NAME}\n' "$file" 2>/dev/null)" && status=0 || status=$?
+    (( status == 0 )) ||
+        fail "$file is not owned by any RPM package. This project does not create a Certbot global configuration; remove it or move it aside before re-running."
+    [[ "$owner" == "$PACKAGE_CERTBOT_CONFIG_OWNER" ]] ||
+        fail "$file is owned by '$owner' rather than the certbot package."
+
+    rpm -Vf "$file" >/dev/null 2>&1 ||
+        fail "$file differs from what the certbot package installed. It has been modified; review it before re-running. This script will not change it."
+}
+
+# Runs immediately before certbot, after any package installation that could
+# have created the file. Checking earlier would pass on a host where certbot is
+# not installed yet and then let the install write a configuration nobody looked
+# at.
+verify_global_certbot_config_contract() {
+    # The per-user path is still refused outright: no package writes it, this
+    # project never creates it, and there is no benign reason for it to exist.
+    # -L as well as -e, because a dangling symlink is a path certbot would read
+    # as soon as its target appeared.
+    [[ ! -e "$USER_CERTBOT_CONFIG_FILE" && ! -L "$USER_CERTBOT_CONFIG_FILE" ]] ||
+        fail "A per-user Certbot configuration exists: $USER_CERTBOT_CONFIG_FILE. This project does not use one; remove it before re-running."
+
+    if [[ -L "$GLOBAL_CERTBOT_CONFIG_FILE" ]]; then
+        fail "$GLOBAL_CERTBOT_CONFIG_FILE is a symlink. The certbot package installs a regular file; a symlink here is not package state."
+    fi
+
+    # Absent is fine and is the state on a host where certbot has not been
+    # installed yet. There is nothing for certbot to read.
+    [[ -e "$GLOBAL_CERTBOT_CONFIG_FILE" ]] || return 0
+
+    [[ -f "$GLOBAL_CERTBOT_CONFIG_FILE" ]] ||
+        fail "$GLOBAL_CERTBOT_CONFIG_FILE exists but is not a regular file."
+
+    verify_global_config_is_package_file "$GLOBAL_CERTBOT_CONFIG_FILE"
+    verify_global_config_directives "$GLOBAL_CERTBOT_CONFIG_FILE"
 }
 
 run_certbot() {
@@ -338,7 +436,6 @@ main() {
 
     validate_platform
     validate_inputs "$@"
-    verify_no_global_certbot_config
     resolve_bundle_paths
     umask 077
 
@@ -347,6 +444,12 @@ main() {
         dnf install -y certbot python3-certbot-dns-route53 ||
         fail "Certbot package installation failed or timed out."
     require_command certbot
+
+    # After the package install, not before it. On a host without certbot the
+    # file does not exist yet, so an earlier check would pass and then let dnf
+    # write a global configuration that nothing looked at before certbot read
+    # it. This is the last gate before certbot runs.
+    verify_global_certbot_config_contract
 
     log "Requesting the architecture-approved origin certificate with DNS-01."
     run_certbot certbot certonly \

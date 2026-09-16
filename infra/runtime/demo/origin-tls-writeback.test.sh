@@ -99,7 +99,7 @@ main_body() {
 # $1 body, $2 call line, $3 description
 assert_called_once() {
     local occurrences
-    occurrences="$(printf '%s\n' "$1" | grep -c "^    $2\$" || true)"
+    occurrences="$(grep -c "^    $2\$" <<<"$1" || true)"
     (( occurrences == 1 )) ||
         fail "$3 must call $2 exactly once in main() (found $occurrences)."
 }
@@ -107,8 +107,8 @@ assert_called_once() {
 # $1 body, $2 earlier call, $3 later call, $4 description
 assert_ordered() {
     local earlier later
-    earlier="$(printf '%s\n' "$1" | grep -n "^    $2\$" | head -n 1 | cut -d: -f1)"
-    later="$(printf '%s\n' "$1" | grep -n "^    $3\$" | head -n 1 | cut -d: -f1)"
+    earlier="$(grep -n "^    $2\$" <<<"$1" | head -n 1 | cut -d: -f1 || true)"
+    later="$(grep -n "^    $3\$" <<<"$1" | head -n 1 | cut -d: -f1 || true)"
     [[ -n "$earlier" && -n "$later" && "$earlier" -lt "$later" ]] ||
         fail "$4 ($2 must precede $3)."
 }
@@ -125,15 +125,16 @@ assert_ordered "$acme_main" "validate_certificate_contract" "back_up_origin_tls_
 assert_ordered "$renew_main" "reload_nginx_after_change" "back_up_origin_tls_state" \
     "renew-origin-cert.sh must reload Nginx before backing the certificate up"
 
-renew_backup_line="$(printf '%s\n' "$renew_contents" | grep -n "^    back_up_origin_tls_state$" | head -n 1 | cut -d: -f1)"
+renew_backup_line="$(grep -n "^    back_up_origin_tls_state$" <<<"$renew_contents" | head -n 1 | cut -d: -f1 || true)"
+[[ -n "$renew_backup_line" ]] || fail "Unable to locate the backup call in renew-origin-cert.sh."
 
 # --- 3. a no-change renewal returns before the backup -----------------------
 # The stored archive already matches, so there is nothing to write.
-no_change_block="$(printf '%s\n' "$renew_contents" |
-    sed -n '/is not due for renewal/,/^    fi$/p')"
+no_change_block="$(sed -n '/is not due for renewal/,/^    fi$/p' <<<"$renew_contents")"
 assert_contains "$no_change_block" "return" \
     "A no-change renewal must return before the backup step."
-early_return_line="$(printf '%s\n' "$renew_contents" | grep -n "is not due for renewal" | tail -n 1 | cut -d: -f1)"
+early_return_line="$(grep -n "is not due for renewal" <<<"$renew_contents" | tail -n 1 | cut -d: -f1 || true)"
+[[ -n "$early_return_line" ]] || fail "Unable to locate the no-change early return."
 [[ "$early_return_line" -lt "$renew_backup_line" ]] ||
     fail "The no-change early return must come before the backup call."
 
@@ -179,11 +180,14 @@ output="$(run_backup_step "$RENEW_SCRIPT" 1 "$marker")" || status=$?
 # against code lines with comments stripped, matching a command in statement
 # position rather than the bare word anywhere in the file.
 sync_contents="$(cat "$SYNC_SCRIPT")"
-sync_code="$(printf '%s\n' "$sync_contents" | sed -e 's/[[:space:]]#.*$//' -e 's/^[[:space:]]*#.*$//')"
+sync_code="$(sed -e 's/[[:space:]]#.*$//' -e 's/^[[:space:]]*#.*$//' <<<"$sync_contents")"
 
-printf '%s\n' "$sync_code" |
-    grep -qE '(^|[;&|(]|\bthen\b|\bdo\b|\bexec\b)[[:space:]]*(sudo[[:space:]]+)?(certbot|nginx|systemctl)\b' &&
+# Matched from a here-string. Piped into `grep -q`, grep exits on its first
+# match, printf dies of SIGPIPE, and `set -o pipefail` reports 141 -- so the
+# result flips on file size and scheduling.
+if grep -qE '(^|[;&|(]|\bthen\b|\bdo\b|\bexec\b)[[:space:]]*(sudo[[:space:]]+)?(certbot|nginx|systemctl)\b' <<<"$sync_code"; then
     fail "The backup helper must not run certbot, Nginx or systemctl."
+fi
 
 # Here-string, not a pipe, for the same SIGPIPE reason as assert_contains -- and
 # here the failure mode is the dangerous direction: a pipeline that reports 141
@@ -219,14 +223,14 @@ done
 # Anchored to statement position and to whole words: without that, "cat" matches
 # inside "certificate_file" and the check fires on a plain variable assignment.
 for script_body in "$acme_contents" "$renew_contents" "$sync_contents"; do
-    printf '%s\n' "$script_body" |
-        grep -qE '(^|[;&|(]|\bthen\b|\bdo\b)[[:space:]]*(cat|echo|printf)[[:space:]][^|]*(privkey|fullchain|cert\.pem)' &&
+    if grep -qE '(^|[;&|(]|\bthen\b|\bdo\b)[[:space:]]*(cat|echo|printf)[[:space:]][^|]*(privkey|fullchain|cert\.pem)' <<<"$script_body"; then
         fail "A script prints certificate or key file contents."
+    fi
 done
 
 # --- 10. the bucket is required, not optional -------------------------------
 for script_body in "$acme_contents" "$renew_contents"; do
-    printf '%s' "$script_body" | grep -Fq 'Required environment variable is missing: ORIGIN_TLS_BUCKET' ||
+    grep -Fq 'Required environment variable is missing: ORIGIN_TLS_BUCKET' <<<"$script_body" ||
         fail "ORIGIN_TLS_BUCKET must be required, so a run cannot silently skip the backup."
 done
 
@@ -234,7 +238,7 @@ done
 # configure-acme.sh re-execs itself under sudo before validate_inputs runs, so a
 # variable missing from --preserve-env is gone by the time it is required and
 # every non-root invocation fails.
-preserve_env_line="$(printf '%s\n' "$acme_contents" | grep -F -- '--preserve-env=' | head -n 1)"
+preserve_env_line="$(grep -F -- '--preserve-env=' <<<"$acme_contents" | head -n 1 || true)"
 [[ -n "$preserve_env_line" ]] || fail "Unable to locate the sudo re-exec line."
 assert_contains "$preserve_env_line" "ORIGIN_TLS_BUCKET" \
     "ORIGIN_TLS_BUCKET must survive the sudo re-exec."
@@ -256,23 +260,25 @@ assert_contains "$acme_contents" 'install -o root -g root -m 755 \' \
 assert_contains "$acme_contents" "ORIGIN_TLS_ENV_FILE" \
     "The bucket name must be persisted for the renewal timer."
 
-# --- 13. the Certbot configuration lookup is pinned, not predicted ----------
+# --- 13. the Certbot global configuration contract --------------------------
 # Certbot reads /etc/letsencrypt/cli.ini and ${XDG_CONFIG_HOME:-~/.config}/
 # letsencrypt/cli.ini before any command-line flag, and either may declare
 # pre-hook, post-hook or deploy-hook, which run as root.
 #
-# The second path follows the caller's environment. Measured against certbot:
-# XDG unset with HOME=/root gives /root/.config/letsencrypt/cli.ini; an empty or
-# relative XDG_CONFIG_HOME resolves against the working directory; an absolute
-# one is taken as given. The scripts therefore pin the environment rather than
-# predict it, and these tests hold them to that.
+# /etc/letsencrypt/cli.ini is not ours to forbid: on Amazon Linux 2023 the
+# certbot RPM owns it and writes it on every install, carrying exactly
+# "preconfigured-renewal = True" and "max-log-backups = 0". Refusing it would
+# block renewal on every host with certbot installed and block issuance on every
+# replacement host the moment dnf put it back. So it is held to a contract --
+# still the package's file, still saying only those two things -- and anything
+# else fails closed. The per-user path stays forbidden outright.
 
 certbot_marker="$work_directory/certbot-invoked"
 fake_bin="$work_directory/fake-bin"
 mkdir -p "$fake_bin"
 
-# Records the environment certbot is actually handed, so the pinning is checked
-# by observation rather than by grepping the source.
+# Records the environment certbot is handed, so the pinning is checked by
+# observation rather than by grepping the source.
 cat >"$fake_bin/certbot" <<FAKE
 #!/usr/bin/env bash
 {
@@ -294,31 +300,74 @@ exec "$@"
 FAKETIMEOUT
 chmod 755 "$fake_bin/timeout"
 
-# Runs the script's real verify_no_global_certbot_config() in its own process.
-# $1 script, $2 sandbox prefix, rest: caller environment to expose
-run_preflight() {
+# Stands in for rpm. The sandbox files belong to no package, so the real rpm
+# would refuse every fixture and the contract could never be exercised. The fake
+# answers from two files the tests write, which is what lets a single fixture be
+# replayed as pristine package state, as tampered state, or as unowned.
+cat >"$fake_bin/rpm" <<'FAKERPM'
+#!/usr/bin/env bash
+# -qf --queryformat '%{NAME}\n' FILE  -> owner name on stdout, or exit 1
+# -Vf FILE                            -> exit 0 pristine, 1 modified
+mode=""
+for arg in "$@"; do
+    case "$arg" in
+        -qf) mode="owner" ;;
+        -Vf) mode="verify" ;;
+    esac
+done
+case "$mode" in
+    owner)
+        if [[ -f "$FAKE_RPM_OWNER_FILE" ]]; then cat "$FAKE_RPM_OWNER_FILE"; exit 0; fi
+        echo "file is not owned by any package" >&2; exit 1 ;;
+    verify)
+        if [[ -f "$FAKE_RPM_TAMPERED_FILE" ]]; then echo "S.5....T.  c file"; exit 1; fi
+        exit 0 ;;
+    *) exit 2 ;;
+esac
+FAKERPM
+chmod 755 "$fake_bin/rpm"
+
+rpm_owner_file="$work_directory/fake-rpm-owner"
+rpm_tampered_file="$work_directory/fake-rpm-tampered"
+printf 'certbot\n' >"$rpm_owner_file"
+rm -f "$rpm_tampered_file"
+
+# $1 script, $2 sandbox prefix, rest: extra environment
+run_contract() {
     local script="$1" prefix="$2"
     shift 2
     env "$@" PATH="$fake_bin:$PATH" CERTBOT_CONFIG_PREFIX="$prefix" \
-        bash -c 'source "$1"; verify_no_global_certbot_config' _ "$script" 2>&1
+        FAKE_RPM_OWNER_FILE="$rpm_owner_file" FAKE_RPM_TAMPERED_FILE="$rpm_tampered_file" \
+        bash -c 'source "$1"; verify_global_certbot_config_contract' _ "$script" 2>&1
 }
 
 # Runs the real guard and then the real run_certbot, which is the order main()
-# uses. The sourced script sets `set -e`, so a failing guard aborts before
+# uses. The sourced script sets `set -e`, so a failing guard ends the run before
 # certbot -- that is the property under test, and the marker proves it.
-# $1 script, $2 sandbox prefix, rest: caller environment to expose
-run_guard_then_certbot() {
+run_contract_then_certbot() {
     local script="$1" prefix="$2"
     shift 2
     env "$@" PATH="$fake_bin:$PATH" CERTBOT_CONFIG_PREFIX="$prefix" \
-        bash -c 'source "$1"; verify_no_global_certbot_config; run_certbot certbot plugins' \
+        FAKE_RPM_OWNER_FILE="$rpm_owner_file" FAKE_RPM_TAMPERED_FILE="$rpm_tampered_file" \
+        bash -c 'source "$1"; verify_global_certbot_config_contract; run_certbot certbot plugins' \
         _ "$script" 2>&1
 }
 
-# $1 sandbox prefix, $2 path under it, $3 contents
-seed_config() {
-    mkdir -p "$1/$(dirname "$2")"
-    printf '%s\n' "$3" >"$1/$2"
+# The Amazon Linux 2023 package default, byte for byte in the directives that
+# matter. Confirmed against certbot-2.6.0-4.amzn2023.0.1.noarch.
+write_package_cli_ini() {
+    mkdir -p "$1/etc/letsencrypt"
+    cat >"$1/etc/letsencrypt/cli.ini" <<'PKG'
+# This is an example of the kind of things you can specify in this file.
+preconfigured-renewal = True
+max-log-backups = 0
+PKG
+}
+
+new_prefix() {
+    local p="$work_directory/sandbox-$1-$2"
+    rm -rf "$p"; mkdir -p "$p"
+    printf '%s' "$p"
 }
 
 hostile_xdg="$work_directory/hostile-xdg"
@@ -330,53 +379,98 @@ printf 'pre-hook = /tmp/evil.sh\n' >"$hostile_home/.config/letsencrypt/cli.ini"
 for script in "$ACME_SCRIPT" "$RENEW_SCRIPT"; do
     script_name="${script##*/}"
 
-    # Both canonical locations are refused.
-    for canonical in "etc/letsencrypt/cli.ini" "root/.config/letsencrypt/cli.ini"; do
-        prefix="$work_directory/sandbox-${script_name}-${canonical//\//-}"
-        mkdir -p "$prefix"
-        seed_config "$prefix" "$canonical" 'pre-hook = /tmp/evil.sh'
-        if run_preflight "$script" "$prefix" >/dev/null 2>&1; then
-            fail "$script_name must refuse /$canonical."
-        fi
-        output="$(run_preflight "$script" "$prefix" || true)"
-        assert_contains "$output" "Certbot global configuration file" \
-            "$script_name must name the refused configuration file (/$canonical)."
+    # --- the package default is accepted -----------------------------------
+    pkg_prefix="$(new_prefix pkg "$script_name")"
+    write_package_cli_ini "$pkg_prefix"
+    run_contract "$script" "$pkg_prefix" >/dev/null ||
+        fail "$script_name must accept the certbot package default cli.ini."
 
-        # Refusal must not touch operator state.
-        [[ -f "$prefix/$canonical" ]] ||
-            fail "$script_name must not delete the configuration it refuses."
-        assert_contains "$(cat "$prefix/$canonical")" "pre-hook = /tmp/evil.sh" \
-            "$script_name must not rewrite the configuration it refuses."
-    done
-
-    # A benign file is refused too: the contract bans the file, not a directive
-    # list, which is what also removes --server and --authenticator override.
-    benign_prefix="$work_directory/sandbox-benign-$script_name"
-    mkdir -p "$benign_prefix"
-    seed_config "$benign_prefix" "etc/letsencrypt/cli.ini" 'rsa-key-size = 4096'
-    if run_preflight "$script" "$benign_prefix" >/dev/null 2>&1; then
-        fail "$script_name must refuse any global Certbot configuration, hooks or not."
-    fi
-
-    # A dangling symlink is a path certbot would read once its target appeared.
-    dangling_prefix="$work_directory/sandbox-dangling-$script_name"
-    mkdir -p "$dangling_prefix/etc/letsencrypt"
-    ln -s "$work_directory/no-such-cli.ini" "$dangling_prefix/etc/letsencrypt/cli.ini"
-    if run_preflight "$script" "$dangling_prefix" >/dev/null 2>&1; then
-        fail "$script_name must refuse a dangling symlink at a canonical path."
-    fi
-
-    # A clean host passes. Without this the refusals above could hold for the
-    # wrong reason, and it is also what proves the guard does not report failure
-    # from a resolver that quietly died in a command substitution.
-    clean_prefix="$work_directory/sandbox-clean-$script_name"
-    mkdir -p "$clean_prefix"
-    run_preflight "$script" "$clean_prefix" >/dev/null ||
+    # A host with no certbot installed yet has no file at all.
+    absent_prefix="$(new_prefix absent "$script_name")"
+    run_contract "$script" "$absent_prefix" >/dev/null ||
         fail "$script_name must accept a host with no Certbot global configuration."
 
-    # The caller's environment cannot move the checked paths. Every hostile
-    # shape from the measured table is offered; the canonical locations under
-    # the sandbox stay empty, so the guard must still pass.
+    # --- tampering with the package file is refused -------------------------
+    touch "$rpm_tampered_file"
+    if run_contract "$script" "$pkg_prefix" >/dev/null 2>&1; then
+        fail "$script_name must refuse a modified package cli.ini."
+    fi
+    tamper_output="$(run_contract "$script" "$pkg_prefix" || true)"
+    assert_contains "$tamper_output" "differs from what the certbot package installed" \
+        "$script_name must say the package file was modified."
+    rm -f "$rpm_tampered_file"
+
+    # --- a file no package owns is refused ----------------------------------
+    rm -f "$rpm_owner_file"
+    if run_contract "$script" "$pkg_prefix" >/dev/null 2>&1; then
+        fail "$script_name must refuse a cli.ini that no RPM package owns."
+    fi
+    # Owned by the wrong package is refused too.
+    printf 'some-other-package\n' >"$rpm_owner_file"
+    if run_contract "$script" "$pkg_prefix" >/dev/null 2>&1; then
+        fail "$script_name must refuse a cli.ini owned by a package other than certbot."
+    fi
+    printf 'certbot\n' >"$rpm_owner_file"
+
+    # --- injected directives are refused ------------------------------------
+    for injected in \
+        'pre-hook = /tmp/evil.sh' \
+        'post-hook = /tmp/evil.sh' \
+        'deploy-hook = /tmp/evil.sh' \
+        'renew-hook = /tmp/evil.sh' \
+        'server = https://attacker.invalid/directory' \
+        'authenticator = manual' \
+        'config-dir = /tmp/attacker' \
+        'work-dir = /tmp/attacker' \
+        'logs-dir = /tmp/attacker' \
+        'unknown-key = 1'
+    do
+        inj_prefix="$(new_prefix inj "$script_name-${RANDOM}")"
+        write_package_cli_ini "$inj_prefix"
+        printf '%s\n' "$injected" >>"$inj_prefix/etc/letsencrypt/cli.ini"
+        if run_contract "$script" "$inj_prefix" >/dev/null 2>&1; then
+            fail "$script_name must refuse a package cli.ini carrying: ${injected%% *}"
+        fi
+    done
+
+    # An allowed key with a value outside its syntax is refused, which is what
+    # stops smuggling through a key that is itself on the list.
+    for bad_value in 'preconfigured-renewal = True; pre-hook = /tmp/evil.sh' \
+        'max-log-backups = 0 /tmp/evil.sh' \
+        'preconfigured-renewal = /tmp/evil.sh'
+    do
+        val_prefix="$(new_prefix val "$script_name-${RANDOM}")"
+        mkdir -p "$val_prefix/etc/letsencrypt"
+        printf '%s\n' "$bad_value" >"$val_prefix/etc/letsencrypt/cli.ini"
+        if run_contract "$script" "$val_prefix" >/dev/null 2>&1; then
+            fail "$script_name must refuse an out-of-syntax value: $bad_value"
+        fi
+    done
+
+    # --- a symlink at the global path is refused ----------------------------
+    link_prefix="$(new_prefix link "$script_name")"
+    mkdir -p "$link_prefix/etc/letsencrypt"
+    ln -s "$work_directory/no-such-cli.ini" "$link_prefix/etc/letsencrypt/cli.ini"
+    if run_contract "$script" "$link_prefix" >/dev/null 2>&1; then
+        fail "$script_name must refuse a symlink at the global configuration path."
+    fi
+
+    # --- the per-user path is forbidden outright ----------------------------
+    for user_shape in file dangling; do
+        user_prefix="$(new_prefix user "$script_name-$user_shape")"
+        write_package_cli_ini "$user_prefix"
+        mkdir -p "$user_prefix/root/.config/letsencrypt"
+        if [[ "$user_shape" == file ]]; then
+            printf 'preconfigured-renewal = True\n' >"$user_prefix/root/.config/letsencrypt/cli.ini"
+        else
+            ln -s "$work_directory/no-such-user-cli.ini" "$user_prefix/root/.config/letsencrypt/cli.ini"
+        fi
+        if run_contract "$script" "$user_prefix" >/dev/null 2>&1; then
+            fail "$script_name must refuse a per-user cli.ini ($user_shape)."
+        fi
+    done
+
+    # --- the caller's environment cannot move the checked paths -------------
     for hostile_env in \
         "XDG_CONFIG_HOME=$hostile_xdg" \
         "XDG_CONFIG_HOME=" \
@@ -384,36 +478,29 @@ for script in "$ACME_SCRIPT" "$RENEW_SCRIPT"; do
         "HOME=$hostile_home" \
         "HOME="
     do
-        run_preflight "$script" "$clean_prefix" "$hostile_env" >/dev/null ||
-            fail "$script_name preflight must not depend on the caller's ${hostile_env%%=*}."
+        run_contract "$script" "$pkg_prefix" "$hostile_env" >/dev/null ||
+            fail "$script_name contract must not depend on the caller's ${hostile_env%%=*}."
     done
 
-    # And a configuration at a canonical path is still caught while the caller
-    # points the environment elsewhere.
-    hostile_prefix="$work_directory/sandbox-hostile-$script_name"
-    mkdir -p "$hostile_prefix"
-    seed_config "$hostile_prefix" "root/.config/letsencrypt/cli.ini" 'deploy-hook = /tmp/evil.sh'
-    if run_preflight "$script" "$hostile_prefix" \
-        "XDG_CONFIG_HOME=$hostile_xdg" "HOME=$hostile_home" >/dev/null 2>&1; then
-        fail "$script_name must still refuse a canonical configuration under a hostile environment."
-    fi
-
-    # End to end, through the real run_certbot: a refused configuration must
-    # stop the run before certbot is executed.
+    # --- end to end, through the real run_certbot ---------------------------
+    # A refused configuration must stop the run before certbot executes.
     rm -f "$certbot_marker"
-    if run_guard_then_certbot "$script" "$hostile_prefix" >/dev/null 2>&1; then
-        fail "$script_name must not reach certbot while a global configuration exists."
+    bad_prefix="$(new_prefix bad "$script_name")"
+    write_package_cli_ini "$bad_prefix"
+    printf 'deploy-hook = /tmp/evil.sh\n' >>"$bad_prefix/etc/letsencrypt/cli.ini"
+    if run_contract_then_certbot "$script" "$bad_prefix" >/dev/null 2>&1; then
+        fail "$script_name must not reach certbot while the global configuration is out of contract."
     fi
     [[ ! -e "$certbot_marker" ]] ||
-        fail "$script_name invoked certbot despite a prohibited Certbot configuration."
+        fail "$script_name invoked certbot despite an out-of-contract Certbot configuration."
 
-    # Positive control: on a clean host the same path does reach certbot, which
-    # is what makes the assertion above meaningful rather than vacuous. The fake
-    # records the environment it was handed, so the pinning is observed.
+    # Positive control: the package default does reach certbot, which is what
+    # keeps the assertion above from passing vacuously. The fake records the
+    # environment it was handed, so the pinning is observed.
     rm -f "$certbot_marker"
-    run_guard_then_certbot "$script" "$clean_prefix" \
+    run_contract_then_certbot "$script" "$pkg_prefix" \
         "XDG_CONFIG_HOME=$hostile_xdg" "HOME=$hostile_home" >/dev/null ||
-        fail "$script_name must reach certbot on a host with no global configuration."
+        fail "$script_name must reach certbot on a host carrying the package default cli.ini."
     [[ -e "$certbot_marker" ]] ||
         fail "The certbot harness is not wired: $script_name never reached certbot."
     marker_contents="$(cat "$certbot_marker")"
@@ -429,43 +516,49 @@ done
 
 rm -f "$certbot_marker"
 
-# --- 14. the preflight precedes the certbot invocation in both scripts ------
-# The end-to-end check above proves the guard stops the run. This proves the
-# call sits before certbot in main() as well, so the ordering is not an accident
-# of how the tests drive the functions.
-# $1 script contents, $2 script name
-assert_guard_precedes_certbot() {
-    local body guard certbot_call
-    body="$(main_body "$1")"
-    # `|| true` on both: under set -e with pipefail a grep that matches nothing
-    # fails the pipeline, the assignment fails with it, and the script dies
-    # before reaching the checks below -- reporting a bare exit 1 instead of
-    # saying which contract was broken.
-    guard="$(printf '%s\n' "$body" | grep -n "^    verify_no_global_certbot_config$" | head -n 1 | cut -d: -f1 || true)"
-    certbot_call="$(printf '%s\n' "$body" | grep -n "^    run_certbot certbot" | head -n 1 | cut -d: -f1 || true)"
-    [[ -n "$guard" ]] ||
-        fail "$2 must call verify_no_global_certbot_config in main()."
-    [[ -n "$certbot_call" ]] ||
-        fail "Unable to locate the certbot invocation in $2 main()."
-    (( guard < certbot_call )) ||
-        fail "$2 must check for a global Certbot configuration before invoking certbot."
+# --- 14. the contract runs after the package install and before certbot -----
+# On a fresh host certbot is not installed yet, so /etc/letsencrypt/cli.ini does
+# not exist. A check placed before `dnf install` would pass, the install would
+# then write the file, and certbot would read a configuration nothing had
+# looked at. The gate has to sit between the two.
+acme_main="$(main_body "$acme_contents")"
+renew_main="$(main_body "$renew_contents")"
+
+line_of() {
+    grep -n "$2" <<<"$1" | head -n 1 | cut -d: -f1 || true
 }
 
-assert_guard_precedes_certbot "$acme_contents" "configure-acme.sh"
-assert_guard_precedes_certbot "$renew_contents" "renew-origin-cert.sh"
+acme_install="$(line_of "$acme_main" '^        dnf install -y certbot')"
+acme_guard="$(line_of "$acme_main" '^    verify_global_certbot_config_contract$')"
+acme_certbot="$(line_of "$acme_main" '^    run_certbot certbot')"
+[[ -n "$acme_install" ]] || fail "Unable to locate the certbot package install in configure-acme.sh main()."
+[[ -n "$acme_guard" ]] || fail "configure-acme.sh must call verify_global_certbot_config_contract in main()."
+[[ -n "$acme_certbot" ]] || fail "Unable to locate the certbot invocation in configure-acme.sh main()."
+(( acme_install < acme_guard )) ||
+    fail "configure-acme.sh must verify the global Certbot configuration after installing the package."
+(( acme_guard < acme_certbot )) ||
+    fail "configure-acme.sh must verify the global Certbot configuration before invoking certbot."
 
-# The guard must not reintroduce a resolver whose failure disappears into a
-# command substitution: fail() would run in the subshell, the loop would iterate
-# over nothing, and the function would return 0 on a host it could not check.
+renew_guard="$(line_of "$renew_main" '^    verify_global_certbot_config_contract$')"
+renew_certbot="$(line_of "$renew_main" '^    run_certbot certbot')"
+[[ -n "$renew_guard" ]] || fail "renew-origin-cert.sh must call verify_global_certbot_config_contract in main()."
+[[ -n "$renew_certbot" ]] || fail "Unable to locate the certbot invocation in renew-origin-cert.sh main()."
+(( renew_guard < renew_certbot )) ||
+    fail "renew-origin-cert.sh must verify the global Certbot configuration before invoking certbot."
+
 for script_contents in "$acme_contents" "$renew_contents"; do
     assert_absent "$script_contents" 'for candidate in "$GLOBAL_CERTBOT_CONFIG_FILE" "$(' \
-        "The guard must not resolve a candidate path in a command substitution."
-    assert_contains "$script_contents" 'for candidate in "${GLOBAL_CERTBOT_CONFIG_FILES[@]}"' \
-        "The guard must iterate the literal canonical path list."
+        "The contract must not resolve a candidate path in a command substitution."
+    assert_contains "$script_contents" 'command -v rpm >/dev/null 2>&1 ||' \
+        "A missing rpm must fail the contract rather than skip the ownership check."
+    assert_contains "$script_contents" "rpm -qf --queryformat" \
+        "Package ownership must be queried in the form whose exit status is reliable."
+    assert_contains "$script_contents" 'rpm -Vf "$file" >/dev/null 2>&1 ||' \
+        "Package integrity must be verified and must fail closed."
     assert_contains "$script_contents" '-u XDG_CONFIG_HOME' \
         "certbot must be invoked with XDG_CONFIG_HOME cleared."
     assert_contains "$script_contents" 'HOME="$CERTBOT_HOME"' \
-        "certbot must be invoked with HOME pinned to the constant the guard uses."
+        "certbot must be invoked with HOME pinned to the constant the contract uses."
     assert_contains "$script_contents" '--no-directory-hooks' \
         "The certbot invocation must keep disabling renewal-hooks/ directories."
 done

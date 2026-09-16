@@ -715,6 +715,74 @@ verify_archive_ok "$good_archive" ||
 verify_restored_tree_ok "$restore_root/letsencrypt" ||
     fail "A restored tree with no cli.ini must remain acceptable."
 
+# --- 8h. the package-owned global configuration never enters the archive ----
+# On Amazon Linux 2023 /etc/letsencrypt/cli.ini belongs to the certbot RPM. It
+# is packaging state, not certbot durable state: a replacement host gets its own
+# from dnf. Archiving it would also make this script fail its own verification,
+# because verify_archive refuses cli.ini in an archive -- a backup taken on a
+# real host would have been rejected before it could be uploaded.
+#
+# create_archive runs against a sandbox letsencrypt/ tree. LETSENCRYPT_PARENT is
+# overridden for the subprocess so nothing reads or writes /etc.
+create_archive_into() {
+    local parent="$1" output="$2"
+    ORIGIN_TLS_PARENT_DIRECTORY="$parent" \
+        bash -c 'source "$1"; create_archive "$2"' _ "$SYNC_SCRIPT" "$output" >/dev/null 2>&1
+}
+
+pkg_parent="$work_directory/pkg-source"
+mkdir -p "$pkg_parent"
+cp -R "$fixture_parent/letsencrypt" "$pkg_parent/letsencrypt"
+cat >"$pkg_parent/letsencrypt/cli.ini" <<'PKGINI'
+# This is an example of the kind of things you can specify in this file.
+preconfigured-renewal = True
+max-log-backups = 0
+PKGINI
+
+pkg_archive="$work_directory/pkg-source.tar.gz"
+create_archive_into "$pkg_parent" "$pkg_archive" ||
+    fail "create_archive must succeed on a host carrying the package-owned cli.ini."
+
+pkg_listing="$(tar -tzf "$pkg_archive")"
+if grep -qxF "letsencrypt/cli.ini" <<<"$pkg_listing"; then
+    fail "create_archive must exclude the package-owned letsencrypt/cli.ini."
+fi
+
+# Everything certbot actually needs is still there. Excluding one file must not
+# quietly drop the rest.
+for required in "letsencrypt/live/" "letsencrypt/archive/" "letsencrypt/renewal/" "letsencrypt/accounts/"; do
+    grep -qE "^${required}" <<<"$pkg_listing" ||
+        fail "create_archive dropped $required while excluding cli.ini."
+done
+
+# The resulting archive must pass the very contract that refuses cli.ini, which
+# is the end-to-end property: a real host can now back itself up.
+verify_archive_ok "$pkg_archive" ||
+    fail "An archive taken from a host with the package cli.ini must pass verify_archive."
+
+# The exclusion is not an allowlist. An archive that carries cli.ini -- however
+# it got there -- is still refused, so a replacement host never restores the
+# previous host's global configuration.
+smuggled_parent="$work_directory/smuggled"
+mkdir -p "$smuggled_parent"
+cp -R "$pkg_parent/letsencrypt" "$smuggled_parent/letsencrypt"
+tar -czf "$work_directory/smuggled.tar.gz" -C "$smuggled_parent" letsencrypt
+if verify_archive_ok "$work_directory/smuggled.tar.gz"; then
+    fail "An archive carrying letsencrypt/cli.ini must still be rejected."
+fi
+
+# --- 8i. the tools the safety checks depend on are required ------------------
+# Every staged-tree check is `find ... 2>/dev/null || true` followed by a test
+# on the result. With find absent the result is empty and each one reads as
+# "nothing wrong", so the whole restore contract passes on an archive it never
+# looked at. The same applies to grep and readlink.
+required_line="$(grep -n 'for required in' "$SYNC_SCRIPT" | head -n 1 | cut -d: -f2- || true)"
+[[ -n "$required_line" ]] || fail "Unable to locate the required-command list."
+for needed in find grep readlink stat tar openssl aws timeout; do
+    assert_contains "$required_line" "$needed" \
+        "$needed must be required: the safety checks fail open without it."
+done
+
 # --- 9. static contract: the script must not leak key material or delete ----
 script_contents="$(cat "$SYNC_SCRIPT")"
 for forbidden in "s3:DeleteObject" "rm -rf /etc" "cat \$key_file" "--recursive"; do

@@ -3,11 +3,20 @@
 # Persists the origin TLS state so a replacement host can serve without asking
 # Let's Encrypt for a new certificate.
 #
-# The whole /etc/letsencrypt tree is archived rather than a hand-picked list of
+# The Certbot durable state tree is archived rather than a hand-picked list of
 # files. Certbot needs more than the PEMs: live/ holds symlinks into archive/,
 # renewal/ holds the plugin configuration, and accounts/ holds the ACME account
 # key without which a restored host would have to register again. Copying the
 # PEMs alone produces a host that serves today and cannot renew.
+#
+# One file is deliberately left out: /etc/letsencrypt/cli.ini. On Amazon Linux
+# 2023 it belongs to the certbot RPM, not to this deployment -- it carries the
+# packaging defaults and is recreated by every install. Archiving it would make
+# a replacement host restore the previous host's global Certbot configuration
+# over the one its own package just wrote, and would put a file this project
+# does not own into durable state. The archive contract still refuses cli.ini
+# on the way back in, so excluding it here is not an allowlist: a cli.ini that
+# appears in an archive means someone put it there, and that is refused.
 #
 # tar is used instead of `aws s3 sync` because sync follows symlinks and drops
 # ownership and modes. Restoring a live/ directory of regular files instead of
@@ -58,7 +67,10 @@ readonly HOOK_DIRECTORY_NAME="renewal-hooks"
 # override, which a hook-only filter would leave reachable.
 readonly GLOBAL_CONFIG_FILE_NAME="cli.ini"
 
-readonly LETSENCRYPT_PARENT="/etc"
+# Test seam, in the same shape as CERTBOT_CONFIG_PREFIX in the certbot scripts:
+# /etc in production, a sandbox root when the suite needs create_archive to run
+# against a fixture tree instead of the real /etc/letsencrypt.
+readonly LETSENCRYPT_PARENT="${ORIGIN_TLS_PARENT_DIRECTORY:-/etc}"
 readonly LETSENCRYPT_DIRECTORY_NAME="letsencrypt"
 readonly LETSENCRYPT_DIRECTORY="$LETSENCRYPT_PARENT/$LETSENCRYPT_DIRECTORY_NAME"
 
@@ -68,7 +80,8 @@ readonly AWS_TIMEOUT_SECONDS="120s"
 readonly TIMEOUT_KILL_AFTER_SECONDS="5s"
 
 # Directories certbot needs on a restored host. Presence is verified; the
-# archive itself always carries the whole tree.
+# archive carries the whole durable state tree apart from the package-owned
+# global cli.ini.
 readonly REQUIRED_DIRECTORIES=(
     "live"
     "archive"
@@ -402,9 +415,36 @@ create_archive() {
 
     # -C keeps the archive rooted at letsencrypt/ rather than /etc/letsencrypt,
     # so a restore can be aimed at any parent directory.
+    #
+    # The package-owned global configuration is excluded. It is not durable
+    # state: the certbot RPM writes it on every install, so a restored host
+    # already has its own. Carrying it would also collide with verify_archive,
+    # which refuses cli.ini in an archive -- a backup taken here would fail its
+    # own verification before it was ever uploaded.
+    #
+    # The exclude pattern is matched against the stored name, which -C roots at
+    # letsencrypt/. Verified to behave identically on GNU tar 1.34 (Amazon Linux
+    # 2023), GNU tar 1.35 (Ubuntu) and bsdtar 3.5.3 (macOS).
     tar -czf "$archive_file" \
-        -C "$LETSENCRYPT_PARENT" "$LETSENCRYPT_DIRECTORY_NAME" ||
+        -C "$LETSENCRYPT_PARENT" \
+        --exclude "$LETSENCRYPT_DIRECTORY_NAME/$GLOBAL_CONFIG_FILE_NAME" \
+        "$LETSENCRYPT_DIRECTORY_NAME" ||
         fail "Unable to archive $LETSENCRYPT_DIRECTORY."
+
+    # The exclusion is a promise about what leaves this host, so it is checked
+    # rather than assumed: a tar that quietly ignored the pattern would upload
+    # the file and only fail later, in verify_archive, after the work was done.
+    #
+    # The listing is read into a variable and matched from a here-string. Piped
+    # into `grep -q`, grep would exit on the match, tar would die of SIGPIPE,
+    # and `set -o pipefail` would report 141 -- so the one case this exists to
+    # catch would read as "no match" and pass.
+    local created_listing
+    created_listing="$(tar -tzf "$archive_file")" ||
+        fail "Unable to read back the archive that was just created."
+    if grep -qxF "$LETSENCRYPT_DIRECTORY_NAME/$GLOBAL_CONFIG_FILE_NAME" <<<"$created_listing"; then
+        fail "The archive still contains $GLOBAL_CONFIG_FILE_NAME after exclusion."
+    fi
 }
 
 backup() {
@@ -505,7 +545,12 @@ main() {
 
     (( $# == 1 )) || usage
 
-    for required in aws openssl stat tar timeout; do
+    # find, grep and readlink are listed because the restore safety checks are
+    # built on them, and every one of those checks fails open without them:
+    # `find ... 2>/dev/null || true` yields an empty result, which reads as "no
+    # device node, no escaping symlink, no hook script, no foreign owner". A
+    # missing tool must stop the run, not silently approve the archive.
+    for required in aws find grep openssl readlink stat tar timeout; do
         require_command "$required"
     done
 
