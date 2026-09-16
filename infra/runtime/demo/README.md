@@ -34,6 +34,7 @@ CloudFrontからEC2 originへの通信はHTTPS `443`だけを使用します。N
 | `origin-smoke-check.sh` | HTTPS、証明書、origin verification、非公開portの検証 |
 | `configure-acme.sh` | Certbot/Route 53 DNS-01によるorigin certificate発行とrenewal timer設定 |
 | `renew-origin-cert.sh` | 対象certificateだけを更新し、変更時にNginxを安全にreload |
+| `sync-origin-tls.sh` | `/etc/letsencrypt`をS3へtar退避・復元するorigin TLS state永続化（Phase 6B） |
 | `ec-portfolio-certbot-renew.service` | bounded certificate renewalを実行するsystemd oneshot unit |
 | `ec-portfolio-certbot-renew.timer` | missed runを補完する永続systemd timer |
 
@@ -287,12 +288,15 @@ sudo ./smoke-check.sh
 
 Demo origin hostnameは`origin-demo.yoonec.dev`に固定し、Let's Encrypt production endpointとRoute 53 DNS-01 challengeだけを使用します。HTTP-01、wildcard certificate、TCP `80` listenerは使用しません。CertbotはEC2 instance profileだけでRoute 53へアクセスし、AWS access key、profile、Boto2/legacy credential path、web identity、container credential endpoint、IMDS endpoint overrideは受け付けません。
 
-Phase 4C-2AのTerraformがapplyされ、EC2 instance roleに承認済みRoute 53 ACME permissionが付与された後、連絡可能なACME emailだけを渡して実行します。
+Phase 4C-2AのTerraformがapplyされ、EC2 instance roleに承認済みRoute 53 ACME permissionが付与された後、連絡可能なACME emailと、Phase 6Bのorigin TLS backup bucket名を渡して実行します。bucket名はTerraform output `origin_tls_backup_bucket_name`から取得します。
 
 ```bash
 export ACME_EMAIL="operator@example.com"
-sudo --preserve-env=ACME_EMAIL ./configure-acme.sh
+export ORIGIN_TLS_BUCKET="<origin_tls_backup_bucket_name>"
+sudo --preserve-env=ACME_EMAIL,ORIGIN_TLS_BUCKET ./configure-acme.sh
 ```
+
+`ORIGIN_TLS_BUCKET`は必須です。backupされないまま発行すると、certificateがこのhostのdiskにしか存在しない状態になり、host置換時にLet's Encryptへ再発行を要求することになります。
 
 scriptはAmazon Linux 2023とroot実行をfail-closedで検証し、AL2023 package repositoryから`certbot`と`python3-certbot-dns-route53`をinstallします。package installは10分、certificate発行は15分、systemd操作は30秒を上限とします。発行requestはnon-interactiveで、SANが正確に`origin-demo.yoonec.dev`だけであることを確認します。
 
@@ -309,6 +313,90 @@ scriptはAmazon Linux 2023とroot実行をfail-closedで検証し、AL2023 packa
 2. `systemctl reload nginx`
 
 NginxまたはDemo origin設定がまだ存在しない場合、certificate renewalは完了させたうえでreloadを安全にskipします。Nginx設定検証に失敗した場合はreloadせずnon-zeroで終了するため、実行中のNginxは既存の読み込み済みcertificateを継続利用します。
+
+### origin TLS state の永続化（Phase 6B）
+
+`sync-origin-tls.sh` が `/etc/letsencrypt` を専用 S3 bucket へ退避し、別 host で復元できるようにします。bucket 名は Terraform output `origin_tls_backup_bucket_name` から取得します。
+
+```bash
+ORIGIN_TLS_BUCKET=<bucket> sudo -E ./sync-origin-tls.sh backup
+ORIGIN_TLS_BUCKET=<bucket> sudo -E ./sync-origin-tls.sh restore
+ORIGIN_TLS_BUCKET=<bucket>      ./sync-origin-tls.sh verify
+```
+
+#### なぜ PEM だけでは足りないのか
+
+replacement host が毎回 certificate を新規発行すると、Let's Encrypt の **同一 domain に対する重複 certificate 週 5 件**の制限に数日で到達し、origin TLS が停止します。したがって発行ではなく復元が前提になります。
+
+| 対象 | 必要な理由 |
+| --- | --- |
+| `live/` | `archive/` を指す symlink 群。Nginx の `ssl_certificate` 参照先 |
+| `archive/` | 実体の certificate と private key |
+| `renewal/` | plugin 設定（`dns-route53`）を含む renewal 設定 |
+| `accounts/` | ACME account key。これが無いと復元後の host は account 再登録が必要 |
+
+#### tar を使う理由
+
+`aws s3 sync` は symlink を追跡して実体を複製し、ownership と permission を失います。その結果 `live/` が symlink ではなく通常ファイルの集合になり、**その日は serving できても renewal ができない host** が出来上がります。`tar` は symlink・所有者・permission を保持するため archive 形式を採用しています。
+
+archive は `/etc/letsencrypt` 配下を選別せず全体を格納します。certbot が必要とするファイルは version により異なり、選別すると取りこぼす可能性があるためです。上表の directory は archive 生成後の**検証項目**として使用します。
+
+#### 安全性の契約
+
+upload と unpack の前に archive を検証します。entry 名の検証と、entry の**種別・link target** の検証を分けている点が重要です。
+
+名前に対する検証:
+
+- 空でないこと、gzip tar として読めること
+- **絶対 path と親 traversal を含まないこと**
+- `letsencrypt/` 以外の entry を含まないこと
+- entry 名が certbot が実際に使う文字種のみであること
+- `live` / `archive` / `renewal` / `accounts` が存在すること
+
+metadata に対する検証（**展開前**に実施）:
+
+- entry 種別が regular file / directory / symlink のみであること。hardlink・character device・block device・FIFO・socket は拒否します
+- symlink target が `../../archive/<host>/<file>` の形式のみであること
+- setuid / setgid bit を含まないこと
+
+**展開後の検証では不十分です。** 名前の一覧には entry の種別も link target も現れないため、`letsencrypt/` 配下の無害な名前を持つ character device や、`/etc` を指す symlink がそのまま通過します。restore は root で `tar` を実行するので、展開後に気付いた時点では device node は既に作成され、脱出用 symlink も既に存在します。さらに復元後の検証は既知の path だけを見るため、余分な entry を列挙しません。したがって metadata 検証は展開前に行います。
+
+展開後には、`tar` の出力文字列の解析ではなく **filesystem に直接問い合わせる** sweep も実施し、regular file / directory / symlink 以外の entry と、staging 外へ解決される symlink・絶対 symlink を拒否します。
+
+#### ownership と permission
+
+展開は `--no-same-owner` で行い、**archive が指定する UID/GID は破棄します**。root で `--same-owner` 展開すると、archive 側が private key の所有者を指定できてしまうためです。`uid 1000` / `mode 0600` の entry は「group/world から読めない」という検査を通過しますが、結果として local user が origin private key の所有者になります。Amazon Linux 2023 上の certbot / Nginx state はすべて root 管理であり保持すべき ownership は存在しないため、破棄が最も単純で安全な契約です。
+
+破棄したうえで、sweep により次を検証します（flag が将来変化した場合に fail-closed とするため）。
+
+- すべての entry が restore 実行者（`restore` が root を強制）の所有であること
+- group / world writable な entry が存在しないこと
+- setuid / setgid が存在しないこと
+- `privkey*.pem` と `private_key.json` が group / world から読めず実行もできないこと
+
+#### Certbot hook の拒否
+
+certbot は `renewal-hooks/` の script と、renewal 設定内の `pre_hook` / `post_hook` / `renew_hook` / `deploy_hook` を **root で実行**します。archive は state の backup であって code の運搬手段ではないため、restore 時点で両方を拒否します。拒否しない場合、archive を書き換えられた時点で次回 renewal 時の任意 root command 実行に直結します。
+
+本 project は `renew-origin-cert.sh` が Nginx reload を自前で行うため Certbot hook を必要とせず、全面拒否に運用上の代償はありません。certbot が自動生成する**空の `renewal-hooks/` directory は許可**します。
+
+なお `renew-origin-cert.sh` の `validate_renewal_configuration` も同じ directive 集合を renewal 実行直前に拒否します。restore 側の検査はそれを置き換えるものではなく、hostile state が install される前に止めるための層です。
+
+復元後の tree も検証します。
+
+- `live/` の 4 ファイルが **symlink であり、`archive/` を指し、実体に解決されること**
+- certificate と private key が parse 可能で、**公開鍵が一致すること**
+- private key が group / world から読めないこと
+- renewal 設定が存在すること
+
+`restore` は staging directory で展開・検証してから設置し、`/etc/letsencrypt` が既に存在する場合は**上書きせず失敗**します。稼働中 host の certbot state を誤って置き換えないためです。
+
+#### bucket と IAM
+
+- Block Public Access 全 4 項目 on、public ACL / policy 禁止
+- SSE-S3（AES256）を明示、versioning 有効、noncurrent version は 90 日で失効
+- bucket policy は **insecure transport の拒否のみ**。「instance role 以外を全 Deny」のような広範な Deny は Terraform や管理者の正当な access まで遮断し復旧が困難になるため使用しません。access の絞り込みは identity 側で行います
+- instance role には固定 object 1 件に対する `s3:GetObject` と `s3:PutObject` のみ。`s3:ListBucket` は object path が固定で探索不要なため付与しません。`s3:DeleteObject` も付与しないため、host は archive を置き換えられても履歴を破壊できません
 
 ## HTTPS origin configuration
 

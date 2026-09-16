@@ -8,6 +8,9 @@ Type=oneshot
 User=root
 Group=root
 UMask=0077
+# Written by configure-acme.sh. No leading '-': a missing file must fail the
+# unit rather than silently renew without backing the new certificate up.
+EnvironmentFile=/etc/ec-portfolio/origin-tls.env
 ExecStart=/usr/local/sbin/ec-portfolio-renew-origin-cert
 TimeoutStartSec=20min
 PrivateTmp=true

@@ -9,6 +9,9 @@ readonly CERTBOT_RENEWAL_CONFIG="/etc/letsencrypt/renewal/$ORIGIN_HOSTNAME.conf"
 readonly ORIGIN_CERT_FILE="$CERTBOT_LIVE_DIRECTORY/fullchain.pem"
 readonly ORIGIN_KEY_FILE="$CERTBOT_LIVE_DIRECTORY/privkey.pem"
 readonly NGINX_ORIGIN_CONFIG="/etc/nginx/ec-portfolio-demo/origin-server.conf"
+# Overridable so the write-back contract can be exercised against a fake
+# helper in tests, the same way DEPLOY_API_SCRIPT is overridden elsewhere.
+readonly SYNC_SCRIPT_TARGET="${ORIGIN_TLS_SYNC_SCRIPT:-/usr/local/sbin/ec-portfolio-sync-origin-tls}"
 readonly CERTBOT_TIMEOUT_SECONDS="15m"
 readonly SYSTEMCTL_TIMEOUT_SECONDS="30s"
 readonly TIMEOUT_KILL_AFTER_SECONDS="5s"
@@ -54,6 +57,14 @@ validate_inputs() {
     local variable_name
 
     (( $# == 0 )) || fail "This script does not accept arguments."
+
+    # Supplied by the env file configure-acme.sh installs and the renewal unit
+    # reads. A renewed certificate that is never backed up would leave a
+    # replacement host without it.
+    [[ -n "${ORIGIN_TLS_BUCKET:-}" ]] ||
+        fail "Required environment variable is missing: ORIGIN_TLS_BUCKET"
+    [[ "$ORIGIN_TLS_BUCKET" =~ ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$ ]] ||
+        fail "ORIGIN_TLS_BUCKET is not a valid bucket name."
 
     for variable_name in \
         AWS_ACCESS_KEY_ID \
@@ -179,6 +190,22 @@ validate_certificate_contract() {
     validate_renewal_configuration
 }
 
+# Runs only after a renewal actually changed the certificate. It never touches
+# the certificate files or Nginx, so a failure leaves the renewed certificate
+# installed and Nginx serving it; only the off-host copy is stale, and that is
+# reported rather than swallowed.
+#
+# A future phase will gate this on holding the origin EIP so only the active
+# host writes. That gate belongs around this call.
+back_up_origin_tls_state() {
+    [[ -x "$SYNC_SCRIPT_TARGET" ]] ||
+        fail "The origin TLS backup helper is missing: $SYNC_SCRIPT_TARGET"
+
+    log "Backing up the renewed origin TLS state."
+    ORIGIN_TLS_BUCKET="$ORIGIN_TLS_BUCKET" "$SYNC_SCRIPT_TARGET" backup ||
+        fail "The certificate renewed and Nginx reloaded, but the off-host backup failed. The local certificate and Nginx are untouched; re-run the backup before relying on host replacement."
+}
+
 reload_nginx_after_change() {
     if ! command -v nginx >/dev/null 2>&1; then
         log "Nginx is not installed; certificate renewal completed without reload."
@@ -222,12 +249,18 @@ main() {
     certificate_hash_after="$(sha256sum "$ORIGIN_CERT_FILE" | awk '{print $1}')"
 
     if [[ "$certificate_hash_before" == "$certificate_hash_after" ]]; then
-        log "The certificate is not due for renewal; Nginx reload is unnecessary."
+        log "The certificate is not due for renewal; Nginx reload and backup are unnecessary."
         return
     fi
 
     reload_nginx_after_change
+    back_up_origin_tls_state
     log "Certificate renewal completed successfully."
 }
 
-main "$@"
+# Sourcing exposes the contract functions to the test suite without running an
+# issuance or a renewal. The same guard is used by deploy-api.sh and
+# deploy-runtime.sh.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi
