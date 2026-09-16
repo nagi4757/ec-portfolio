@@ -772,16 +772,54 @@ if verify_archive_ok "$work_directory/smuggled.tar.gz"; then
 fi
 
 # --- 8i. the tools the safety checks depend on are required ------------------
-# Every staged-tree check is `find ... 2>/dev/null || true` followed by a test
-# on the result. With find absent the result is empty and each one reads as
-# "nothing wrong", so the whole restore contract passes on an archive it never
-# looked at. The same applies to grep and readlink.
+# Every staged-tree check is shaped `offender="$(find ... | head -n 1 || true)"`
+# followed by a test on the result. A missing tool anywhere in that pipeline
+# leaves the substitution empty, and empty reads as "nothing wrong" -- so the
+# whole restore contract passes on a tree it never inspected. head is as
+# load-bearing as find: the pipeline's status is head's, `|| true` swallows it,
+# and find dies on the closed pipe.
 required_line="$(grep -n 'for required in' "$SYNC_SCRIPT" | head -n 1 | cut -d: -f2- || true)"
 [[ -n "$required_line" ]] || fail "Unable to locate the required-command list."
-for needed in find grep readlink stat tar openssl aws timeout; do
+for needed in aws find grep head openssl readlink stat tar timeout; do
     assert_contains "$required_line" "$needed" \
         "$needed must be required: the safety checks fail open without it."
 done
+
+# Executable control, not just a grep for the word. A PATH is built that holds
+# every required tool except head, and the script is run through main() so the
+# real require_command gate decides. main() runs the gate before resolve_bucket
+# and before any AWS call, so this reaches a verdict without network or
+# credentials.
+gate_bin="$work_directory/gate-bin"
+mkdir -p "$gate_bin"
+for tool in bash env find grep openssl readlink stat tar timeout sed awk cut mktemp mkdir rm mv dirname cat id uname; do
+    tool_path="$(command -v "$tool" 2>/dev/null || true)"
+    [[ -n "$tool_path" ]] && ln -sf "$tool_path" "$gate_bin/$tool"
+done
+# aws is never invoked on this path; it only has to satisfy require_command.
+printf '#!/usr/bin/env bash\nexit 0\n' >"$gate_bin/aws"
+chmod 755 "$gate_bin/aws"
+
+# Sanity: the sandbox PATH really is missing head, or the control proves nothing.
+PATH="$gate_bin" command -v head >/dev/null 2>&1 &&
+    fail "The head-less PATH fixture still resolves head."
+
+gate_status=0
+gate_output="$(PATH="$gate_bin" ORIGIN_TLS_BUCKET="sandbox-bucket" \
+    "$SYNC_SCRIPT" verify 2>&1)" || gate_status=$?
+(( gate_status != 0 )) ||
+    fail "A host without head must not be allowed to run the restore contract."
+assert_contains "$gate_output" "Required command is not available: head" \
+    "The missing head must be reported by the required-command gate, before any check runs."
+
+# The gate must not be a blanket refusal: with head present the same invocation
+# gets past it, which is what makes the assertion above meaningful.
+ln -sf "$(command -v head)" "$gate_bin/head"
+withhead_status=0
+withhead_output="$(PATH="$gate_bin" ORIGIN_TLS_BUCKET="sandbox-bucket" \
+    "$SYNC_SCRIPT" verify 2>&1)" || withhead_status=$?
+assert_absent "$withhead_output" "Required command is not available" \
+    "With head present the required-command gate must pass."
 
 # --- 9. static contract: the script must not leak key material or delete ----
 script_contents="$(cat "$SYNC_SCRIPT")"

@@ -545,12 +545,16 @@ main() {
 
     (( $# == 1 )) || usage
 
-    # find, grep and readlink are listed because the restore safety checks are
-    # built on them, and every one of those checks fails open without them:
-    # `find ... 2>/dev/null || true` yields an empty result, which reads as "no
-    # device node, no escaping symlink, no hook script, no foreign owner". A
-    # missing tool must stop the run, not silently approve the archive.
-    for required in aws find grep openssl readlink stat tar timeout; do
+    # find, grep, head and readlink are listed because the restore safety checks
+    # are built on them, and every one of those checks fails open without them.
+    # Each is shaped `offender="$(find ... | head -n 1 || true)"` followed by a
+    # test on the result, so a missing tool anywhere in that pipeline leaves the
+    # substitution empty -- which reads as "no device node, no escaping symlink,
+    # no hook script, no foreign owner". head is as load-bearing as find here:
+    # without it the pipeline's status is head's, `|| true` swallows it, find
+    # dies on the closed pipe, and the check approves the tree it never read.
+    # A missing tool must stop the run, not silently approve the archive.
+    for required in aws find grep head openssl readlink stat tar timeout; do
         require_command "$required"
     done
 
