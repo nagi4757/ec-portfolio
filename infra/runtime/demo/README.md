@@ -418,6 +418,64 @@ Phase 6C の ECS EC2 host は、Amazon ECS-optimized Amazon Linux 2023 x86_64 AM
 - pin した image の root snapshot は **30 GiB gp3** です。Launch Template の root volume は
   **snapshot より小さく設定できません**。Phase 6C-3 の下限値はこの実測値に従います。
 
+## Spot replacement bootstrap（Phase 6C・計画中）
+
+> このセクションも **計画段階** です。ECS cluster / Launch Template / Auto Scaling group / Spot host は
+> まだ Terraform にも AWS にも存在しません。現在の origin host は従来どおり単一の On-Demand EC2 です。
+
+`bootstrap-spot-host.sh` は置換 host を「serving-ready」まで持っていく順序契約です。順序そのものが契約であり、
+`bootstrap-spot-host.test.sh` が marker 順序で検証します。
+
+1. root / Amazon Linux 2023 / 必要 command の検証
+2. **ECS agent を disable + stop**（以降のどの段階で失敗しても cluster に登録されない）
+3. 信頼済み local bundle の解決と SHA256 検証
+4. `/etc/letsencrypt` の不在確認
+5. **S3 からの TLS restore**（certbot install より前）
+6. restore 失敗は即座に終了。**certbot 再発行への fallback は存在しない**
+7. `certbot` / `python3-certbot-dns-route53` を install（package が自身の `cli.ini` を作成）
+8. package-owned `cli.ini` contract の検証（RPM ownership / integrity / directive allowlist）
+9. renew helper / env / service / timer を install-only で配置
+10. `/etc/ecs/ecs.config` を atomic に作成
+11. **ECS agent を enable + start**（ここで初めて cluster に参加）
+12. cluster 登録の bounded wait
+13. API `127.0.0.1:8080` readiness の bounded wait
+14. `configure-origin.sh` を `ORIGIN_SMOKE_MODE=ecs` で実行
+15. ECS HTTPS smoke の成功
+16. serving-ready marker を記録
+
+### artifact 配送の境界
+
+このスクリプトは **artifact を download しません**。runtime bundle が同じ directory に既に存在することを前提とし、
+`bundle.sha256` に対する検証を通過したものだけを使用します。mutable な URL や GitHub の latest から取得して root で実行する経路は
+意図的に持ちません。
+
+`bundle.sha256` の位置づけを明確にしておきます。これは **配送の完全性**（truncate、欠落、途中で終わったコピー）を検出するためのものであり、
+**真正性の検証ではありません**。この directory に書き込める者は manifest 自体も書き換えられるため、
+「同じ directory にある」という理由だけで manifest が信頼されるわけではありません。
+
+したがって真正性は bundle をそこに置いた仕組みが担保します。それは Phase 6C-3 の Launch Template / user_data の責務であり、
+本 Phase 6C-2 は **既に信頼された bundle を受け取る host 側の consumer** です。fresh host への配送方法は 6C-3 で別途決定します。
+
+### Elastic IP は bootstrap の責務ではない
+
+serving-ready になった host は、まだ production traffic を受けていません。EIP の付け替えは別の意図的な手順
+（Phase 6C-5）であり、このスクリプトに `AssociateAddress` 相当の呼び出しは存在しません。test がその不在を検証します。
+
+### ECS host 向け origin smoke
+
+`origin-smoke-check.sh` は standalone Docker host 用で、container 名と `docker port` の binding を検証します。
+host networking ではどちらも存在しないため、ECS host では `origin-smoke-check-ecs.sh` を使用します。
+こちらは listener contract を直接検証します。
+
+- `127.0.0.1:8080` と `127.0.0.1:6379` が存在すること
+- `0.0.0.0` / `[::]` の 8080 / 6379 が **存在しないこと**
+- Nginx active、TCP 443 あり、TCP 80 なし
+- header なし / 不正 header は 403、正しい header は 200 かつ `status` が `UP`
+
+`configure-origin.sh` はどちらを使うかを `ORIGIN_SMOKE_MODE`（`standalone` | `ecs`）で選択します。
+**任意の path は受け付けません**。root で実行される script に caller 由来の実行 path を渡す seam を作らないためです。
+未設定時は `standalone` で、既存の On-Demand 動作と完全に同一です。
+
 ## HTTPS origin configuration
 
 `configure-origin.sh`はAmazon Linux 2023専用です。rootでNginx packageをidempotentにinstallし、既存設定を退避してから管理対象設定を検証・反映します。`nginx -t`、service activation、listener検証に加え、bundle内の`origin-smoke-check.sh`によるTLS/hostname/header/readiness検証がすべて成功した場合だけ設定をcommitします。途中で失敗した場合は以前の設定とservice状態をbest-effortで復元し、元の検証failure exit codeを維持します。
