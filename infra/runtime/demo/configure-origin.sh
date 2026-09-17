@@ -197,7 +197,24 @@ resolve_bundle_paths() {
     if ! script_directory="$(cd -- "$source_directory" && pwd -P)"; then
         fail "Cannot resolve the runtime bundle directory."
     fi
-    origin_smoke_script="$script_directory/origin-smoke-check.sh"
+    # The smoke check is selected by an allowlisted mode, never by a path. This
+    # script runs as root, so a caller-supplied path would be a way to hand it
+    # an arbitrary executable to run. The mode chooses between two files that
+    # ship in this bundle, and both are resolved against the bundle directory.
+    #
+    # Unset means standalone, so an existing caller that knows nothing about
+    # this behaves exactly as before.
+    case "${ORIGIN_SMOKE_MODE:-standalone}" in
+        standalone)
+            origin_smoke_script="$script_directory/origin-smoke-check.sh"
+            ;;
+        ecs)
+            origin_smoke_script="$script_directory/origin-smoke-check-ecs.sh"
+            ;;
+        *)
+            fail "ORIGIN_SMOKE_MODE must be standalone or ecs."
+            ;;
+    esac
     [[ -f "$origin_smoke_script" && -x "$origin_smoke_script" ]] ||
         fail "The bundled origin smoke check is missing or not executable."
 }
@@ -362,7 +379,7 @@ main() {
     if (( EUID != 0 )); then
         require_command sudo
         log "Root privileges are required; re-running with sudo."
-        exec sudo --preserve-env=ORIGIN_SERVER_NAME,ORIGIN_CERT_FILE,ORIGIN_KEY_FILE,AWS_REGION,AWS_DEFAULT_REGION -- "$0" "$@"
+        exec sudo --preserve-env=ORIGIN_SERVER_NAME,ORIGIN_CERT_FILE,ORIGIN_KEY_FILE,ORIGIN_SMOKE_MODE,AWS_REGION,AWS_DEFAULT_REGION -- "$0" "$@"
     fi
 
     validate_platform

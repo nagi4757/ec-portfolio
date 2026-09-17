@@ -143,6 +143,8 @@ jobs:
           set -euo pipefail
           infra/runtime/demo/sync-origin-tls.test.sh
           infra/runtime/demo/origin-tls-writeback.test.sh
+          infra/runtime/demo/origin-smoke-check-ecs.test.sh
+          infra/runtime/demo/bootstrap-spot-host.test.sh
 
   deploy-frontends:
     name: Deploy Store and Admin frontends
