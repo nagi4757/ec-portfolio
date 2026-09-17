@@ -402,6 +402,22 @@ certbot は `renewal-hooks/` の script と、renewal 設定内の `pre_hook` / 
 - bucket policy は **insecure transport の拒否のみ**。「instance role 以外を全 Deny」のような広範な Deny は Terraform や管理者の正当な access まで遮断し復旧が困難になるため使用しません。access の絞り込みは identity 側で行います
 - instance role には固定 object 1 件に対する `s3:GetObject` と `s3:PutObject` のみ。`s3:ListBucket` は object path が固定で探索不要なため付与しません。`s3:DeleteObject` も付与しないため、host は archive を置き換えられても履歴を破壊できません
 
+## ECS EC2 Spot host の AMI pin（Phase 6C・計画中）
+
+> このセクションは **計画段階** の取り決めです。ECS cluster / Launch Template / Auto Scaling group / Spot host は
+> まだ Terraform にも AWS にも存在しません。現在稼働している origin host は従来どおり単一の On-Demand EC2 です。
+
+Phase 6C の ECS EC2 host は、Amazon ECS-optimized Amazon Linux 2023 x86_64 AMI を **literal な AMI ID として pin** します。
+
+- 候補 image の discovery には AWS 管理の `/aws/service/ecs/optimized-ami/amazon-linux-2023/recommended` を使いますが、
+  **Terraform からは参照しません**。これは mutable pointer であり、AWS が新しい image を公開した日に plan が
+  launch template version の更新と instance refresh を引き起こすためです。既存の `demo_ami_id` を pin している理由と同じです。
+- pin した値は `infra/terraform/demo/locals.tf` の `ecs_ami_id` に置きます。更新は明示的な PR で行います。
+- `ecs_ami_id` は既存の `demo_ami_id` とは **別 lifecycle** です。cutover が完了するまで On-Demand origin host は稼働を続けるため、
+  一方の image 更新がもう一方を巻き込んではいけません。
+- pin した image の root snapshot は **30 GiB gp3** です。Launch Template の root volume は
+  **snapshot より小さく設定できません**。Phase 6C-3 の下限値はこの実測値に従います。
+
 ## HTTPS origin configuration
 
 `configure-origin.sh`はAmazon Linux 2023専用です。rootでNginx packageをidempotentにinstallし、既存設定を退避してから管理対象設定を検証・反映します。`nginx -t`、service activation、listener検証に加え、bundle内の`origin-smoke-check.sh`によるTLS/hostname/header/readiness検証がすべて成功した場合だけ設定をcommitします。途中で失敗した場合は以前の設定とservice状態をbest-effortで復元し、元の検証failure exit codeを維持します。
