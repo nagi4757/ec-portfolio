@@ -84,16 +84,35 @@ cat >"$fake_bin/systemctl" <<'FAKESYSTEMCTL'
 exit 3
 FAKESYSTEMCTL
 
+# The identity policy this script must enforce on its own, named once and used
+# both by the fake that reports what it was handed and by the assertions. Static
+# keys are only one way in: an alternative credential provider, a redirected or
+# disabled metadata service, an endpoint override or a substituted trust store
+# would each change who makes this call, or who answers it.
+IDENTITY_ENV=(
+    AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_SECURITY_TOKEN
+    AWS_PROFILE AWS_DEFAULT_PROFILE AWS_CREDENTIAL_FILE
+    AWS_SHARED_CREDENTIALS_FILE AWS_CONFIG_FILE
+    AWS_WEB_IDENTITY_TOKEN_FILE AWS_ROLE_ARN
+    AWS_CONTAINER_CREDENTIALS_FULL_URI AWS_CONTAINER_CREDENTIALS_RELATIVE_URI
+    AWS_EC2_METADATA_DISABLED AWS_EC2_METADATA_SERVICE_ENDPOINT
+    AWS_EC2_METADATA_SERVICE_ENDPOINT_MODE
+    AWS_ENDPOINT_URL AWS_ENDPOINT_URL_S3 AWS_ENDPOINT_URL_SSM AWS_ENDPOINT_URL_ROUTE53
+    AWS_CA_BUNDLE REQUESTS_CA_BUNDLE SSL_CERT_FILE SSL_CERT_DIR BOTO_CONFIG
+)
+
+# The fake reports, from inside its own process, every variable in the policy.
+# It is generated from IDENTITY_ENV so a variable added to the policy is
+# reported without a second edit here.
 aws_env_log="$work_directory/aws-env.log"
-cat >"$fake_bin/aws" <<FAKEAWS
-#!/usr/bin/env bash
 {
-    printf 'static-creds=%s\n' "\${AWS_ACCESS_KEY_ID-<unset>}"
-    printf 'profile=%s\n' "\${AWS_PROFILE-<unset>}"
-    printf 'shared-creds=%s\n' "\${AWS_SHARED_CREDENTIALS_FILE-<unset>}"
-} >>"$aws_env_log"
-printf '%s\n' "$TOKEN"
-FAKEAWS
+    printf '#!/usr/bin/env bash\n'
+    printf 'for name in %s; do\n' "${IDENTITY_ENV[*]}"
+    printf '    printf "%%s=%%s\\n" "$name" "${!name-<unset>}" >>"%s"\n' "$aws_env_log"
+    printf 'done\n'
+    printf 'printf "%%s\\n" "%s"\n' "$TOKEN"
+} >"$fake_bin/aws"
+chmod 755 "$fake_bin/aws"
 
 # Records the request it was given, so header handling can be asserted without
 # the token ever being printed by the script under test.
@@ -302,15 +321,47 @@ assert_absent "$script_code" "certbot" \
 # credential happened to be in the caller's environment. The fake records the
 # environment it was handed rather than the suite checking the output.
 : >"$aws_env_log"
-run_smoke "$HEALTHY_ALL" "$HEALTHY_V4" "" \
-    AWS_ACCESS_KEY_ID=leaked-key AWS_PROFILE=leaked-profile \
-    AWS_SHARED_CREDENTIALS_FILE=/tmp/evil-credentials >/dev/null 2>&1 ||
+hostile_identity=(
+    AWS_ACCESS_KEY_ID=leaked-key AWS_SECRET_ACCESS_KEY=leaked-secret
+    AWS_SESSION_TOKEN=leaked-token AWS_SECURITY_TOKEN=leaked-token
+    AWS_PROFILE=leaked-profile AWS_DEFAULT_PROFILE=leaked-profile
+    AWS_CREDENTIAL_FILE=/tmp/evil-credentials
+    AWS_SHARED_CREDENTIALS_FILE=/tmp/evil-credentials
+    AWS_CONFIG_FILE=/tmp/evil-config
+    AWS_WEB_IDENTITY_TOKEN_FILE=/tmp/token
+    AWS_ROLE_ARN=arn:aws:iam::123456789012:role/evil
+    AWS_CONTAINER_CREDENTIALS_FULL_URI=http://127.0.0.1:9999/creds
+    AWS_CONTAINER_CREDENTIALS_RELATIVE_URI=/creds
+    AWS_EC2_METADATA_DISABLED=true
+    AWS_EC2_METADATA_SERVICE_ENDPOINT=http://127.0.0.1:9999
+    AWS_EC2_METADATA_SERVICE_ENDPOINT_MODE=IPv6
+    AWS_ENDPOINT_URL=https://example.invalid
+    AWS_ENDPOINT_URL_S3=https://example.invalid
+    AWS_ENDPOINT_URL_SSM=https://example.invalid
+    AWS_ENDPOINT_URL_ROUTE53=https://example.invalid
+    AWS_CA_BUNDLE=/tmp/evil-ca.pem REQUESTS_CA_BUNDLE=/tmp/evil-ca.pem
+    SSL_CERT_FILE=/tmp/evil-ca.pem SSL_CERT_DIR=/tmp/evil-ca
+    BOTO_CONFIG=/tmp/evil-boto
+)
+(( ${#hostile_identity[@]} == ${#IDENTITY_ENV[@]} )) ||
+    fail "Every variable in the identity policy must be injected by this test."
+
+run_smoke "$HEALTHY_ALL" "$HEALTHY_V4" "" "${hostile_identity[@]}" >/dev/null 2>&1 ||
     fail "A hostile credential environment must not break the check."
 aws_env_contents="$(cat "$aws_env_log")"
-for observation in "static-creds=<unset>" "profile=<unset>" "shared-creds=<unset>"; do
-    assert_contains "$aws_env_contents" "$observation" \
-        "The SSM call must run with the instance role only ($observation)."
+for identity_name in "${IDENTITY_ENV[@]}"; do
+    assert_contains "$aws_env_contents" "$identity_name=<unset>" \
+        "The SSM call must run with the instance role only ($identity_name)."
 done
+
+# The positive control: the fake really does report a value that reaches it, so
+# the <unset> assertions above mean removal rather than a fake that reports
+# nothing. curl is invoked without the identity scrub and sees the environment.
+: >"$aws_env_log"
+run_smoke "$HEALTHY_ALL" "$HEALTHY_V4" "" AWS_PAGER=probe >/dev/null 2>&1 || true
+env AWS_ACCESS_KEY_ID=probe-key bash "$fake_bin/aws" >/dev/null 2>&1
+assert_contains "$(cat "$aws_env_log")" "AWS_ACCESS_KEY_ID=probe-key" \
+    "The fake must report a variable that actually reaches it, or it proves nothing."
 
 # --- 11. the script still refuses to run unprivileged -----------------------
 # run_smoke_checks is reachable from the suite; the entry point is not.

@@ -102,6 +102,27 @@ readonly AWS_CREDENTIAL_ENV=(
     AWS_SHARED_CREDENTIALS_FILE AWS_CONFIG_FILE
 )
 
+# Clearing static keys is not enough on its own. The credential chain has other
+# entry points that would each hand a child a different identity: a web identity
+# token, a container credential endpoint, or metadata turned off or redirected
+# so the instance role cannot be reached at all.
+readonly AWS_PROVIDER_ENV=(
+    AWS_WEB_IDENTITY_TOKEN_FILE AWS_ROLE_ARN
+    AWS_CONTAINER_CREDENTIALS_FULL_URI AWS_CONTAINER_CREDENTIALS_RELATIVE_URI
+    AWS_EC2_METADATA_DISABLED AWS_EC2_METADATA_SERVICE_ENDPOINT
+    AWS_EC2_METADATA_SERVICE_ENDPOINT_MODE
+)
+
+# Where the call goes and who it trusts. An endpoint override would send an SSM
+# or S3 read to a host of the caller's choosing, and a substituted trust store
+# would let that host present a certificate of its own. The same list
+# renew-origin-cert.sh already blocks, extended with the S3 and SSM endpoints
+# this bootstrap uses.
+readonly AWS_ENDPOINT_ENV=(
+    AWS_ENDPOINT_URL AWS_ENDPOINT_URL_S3 AWS_ENDPOINT_URL_SSM AWS_ENDPOINT_URL_ROUTE53
+    AWS_CA_BUNDLE REQUESTS_CA_BUNDLE SSL_CERT_FILE SSL_CERT_DIR BOTO_CONFIG
+)
+
 # Test seams belonging to the helpers this script calls. They are cleared too:
 # a seam that redirects where TLS state is restored, or which certbot
 # configuration is validated, must not be reachable by setting the environment
@@ -124,8 +145,15 @@ readonly READINESS_INTERVAL_SECONDS="${SPOT_READINESS_INTERVAL_SECONDS:-5}"
 
 script_directory=""
 
-# Cleanup state. The agent is only left running on a host that finished.
-ecs_agent_started="false"
+# Cleanup state. Each flag is raised *before* the command that could create the
+# side effect it describes, not after it succeeds: `systemctl enable --now` can
+# enable a unit and then fail to start it, and an enabled unit would come back
+# on the next boot. The name says "may be" because that is all the caller can
+# know from a non-zero exit. For the ECS agent this is true from the very first
+# step: the AMI ships the unit enabled, so the host arrives with it already
+# active and the bootstrap's own disable can fail halfway.
+ecs_agent_may_be_active="false"
+renew_timer_may_be_enabled="false"
 bootstrap_committed="false"
 
 log() {
@@ -156,7 +184,8 @@ run_systemctl() {
 run_aws_child() {
     local -a clear=()
     local name
-    for name in "${AWS_CREDENTIAL_ENV[@]}" "${HELPER_SEAM_ENV[@]}"; do
+    for name in "${AWS_CREDENTIAL_ENV[@]}" "${AWS_PROVIDER_ENV[@]}" \
+        "${AWS_ENDPOINT_ENV[@]}" "${HELPER_SEAM_ENV[@]}"; do
         clear+=(-u "$name")
     done
     env "${clear[@]}" \
@@ -182,9 +211,14 @@ cleanup() {
 
     if (( exit_code != 0 )) && [[ "$bootstrap_committed" != "true" ]]; then
         rm -f "$SERVING_READY_MARKER" 2>/dev/null || true
-        if [[ "$ecs_agent_started" == "true" ]]; then
+        if [[ "$renew_timer_may_be_enabled" == "true" ]]; then
             printf '[spot-bootstrap] %s\n' \
-                "Bootstrap failed after the ECS agent started; taking the host back out of the cluster." >&2
+                "Bootstrap failed after the renewal timer was touched; disabling it." >&2
+            run_systemctl disable --now ec-portfolio-certbot-renew.timer >/dev/null 2>&1 || true
+        fi
+        if [[ "$ecs_agent_may_be_active" == "true" ]]; then
+            printf '[spot-bootstrap] %s\n' \
+                "Bootstrap failed after the ECS agent was touched; taking the host back out of the cluster." >&2
             run_systemctl disable --now ecs >/dev/null 2>&1 || true
         fi
     fi
@@ -306,6 +340,14 @@ verify_letsencrypt_absent() {
 # registers and receives a task.
 disable_ecs_agent() {
     log "Holding the ECS agent back until the host is ready."
+    # The ECS-optimized AMI ships the agent enabled, so this call has something
+    # to undo from the first moment the host boots. It carries the same partial
+    # failure hazard as `enable --now`: `disable --now` is also two operations,
+    # and a non-zero exit can leave the unit enabled for the next boot. The flag
+    # is therefore raised before the call, not after a later one -- otherwise a
+    # bootstrap that failed right here would exit with the agent still enabled
+    # and nothing in the cleanup willing to touch it.
+    ecs_agent_may_be_active="true"
     run_systemctl disable --now ecs ||
         fail "Unable to disable the ECS agent before bootstrap."
 }
@@ -366,6 +408,9 @@ install_renewal_runtime() {
 # certificate it is not serving.
 enable_renewal_timer() {
     log "Enabling the renewal timer."
+    # Same hazard as the agent: a host that failed its bootstrap must not come
+    # back from a reboot renewing certificates and writing them to S3.
+    renew_timer_may_be_enabled="true"
     run_systemctl enable --now ec-portfolio-certbot-renew.timer ||
         fail "The renewal timer could not be enabled."
 }
@@ -391,8 +436,12 @@ write_ecs_config() {
 
 start_ecs_agent() {
     log "Enabling the ECS agent."
+    # Already true: disable_ecs_agent raised it at the top of the run. Repeated
+    # here so the invariant is stated where the side effect is, and holds even
+    # if the step order changes. `enable --now` is two operations, and a
+    # non-zero exit can still leave the unit enabled for the next boot.
+    ecs_agent_may_be_active="true"
     run_systemctl enable --now ecs || fail "The ECS agent could not be started."
-    ecs_agent_started="true"
 }
 
 # Registration is only interesting if it is registration with the cluster this
@@ -476,8 +525,8 @@ mark_serving_ready() {
 # main() so the suite can drive it without being root. Production behaviour is
 # unchanged: main() still refuses to run unprivileged or off Amazon Linux 2023.
 run_bootstrap_steps() {
-    reset_serving_ready_marker
     disable_ecs_agent
+    reset_serving_ready_marker
     resolve_bundle
     verify_bundle_checksums
     verify_letsencrypt_absent

@@ -141,15 +141,28 @@ read_origin_verify_token() {
         aws_arguments+=(--region "$aws_region")
     fi
 
-    # Defence in depth. The bootstrap already strips these before invoking
-    # anything that talks to AWS, but this script is executable on its own, and
-    # the identity it must use is the instance role -- not whatever credential
-    # happened to be in the environment of whoever ran it.
+    # Defence in depth, and the same identity policy the bootstrap applies. The
+    # bootstrap already strips these before invoking anything that talks to AWS,
+    # but this script is executable on its own, and the identity it must use is
+    # the instance role -- not whatever credential happened to be in the
+    # environment of whoever ran it. Static keys and profiles are only part of
+    # it: a web identity token, a container credential endpoint, disabled or
+    # redirected instance metadata, an endpoint override or a substituted trust
+    # store would each change who answers this call, or who makes it.
     origin_verify_token="$(
         AWS_PAGER="" run_with_timeout "$AWS_TIMEOUT_SECONDS" \
             env -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY -u AWS_SESSION_TOKEN \
                 -u AWS_SECURITY_TOKEN -u AWS_PROFILE -u AWS_DEFAULT_PROFILE \
                 -u AWS_CREDENTIAL_FILE -u AWS_SHARED_CREDENTIALS_FILE -u AWS_CONFIG_FILE \
+                -u AWS_WEB_IDENTITY_TOKEN_FILE -u AWS_ROLE_ARN \
+                -u AWS_CONTAINER_CREDENTIALS_FULL_URI \
+                -u AWS_CONTAINER_CREDENTIALS_RELATIVE_URI \
+                -u AWS_EC2_METADATA_DISABLED -u AWS_EC2_METADATA_SERVICE_ENDPOINT \
+                -u AWS_EC2_METADATA_SERVICE_ENDPOINT_MODE \
+                -u AWS_ENDPOINT_URL -u AWS_ENDPOINT_URL_S3 -u AWS_ENDPOINT_URL_SSM \
+                -u AWS_ENDPOINT_URL_ROUTE53 \
+                -u AWS_CA_BUNDLE -u REQUESTS_CA_BUNDLE -u SSL_CERT_FILE \
+                -u SSL_CERT_DIR -u BOTO_CONFIG \
             aws "${aws_arguments[@]}"
     )"
 

@@ -427,21 +427,23 @@ Phase 6C の ECS EC2 host は、Amazon ECS-optimized Amazon Linux 2023 x86_64 AM
 `bootstrap-spot-host.test.sh` が marker 順序で検証します。
 
 1. root / Amazon Linux 2023 / 必要 command の検証
-2. **ECS agent を disable + stop**（以降のどの段階で失敗しても cluster に登録されない）
-3. 信頼済み local bundle の解決と SHA256 検証
-4. `/etc/letsencrypt` の不在確認
-5. **S3 からの TLS restore**（certbot install より前）
-6. restore 失敗は即座に終了。**certbot 再発行への fallback は存在しない**
-7. `certbot` / `python3-certbot-dns-route53` を install（package が自身の `cli.ini` を作成）
-8. package-owned `cli.ini` contract の検証（RPM ownership / integrity / directive allowlist）
-9. renew helper / env / service / timer を install-only で配置
-10. `/etc/ecs/ecs.config` を atomic に作成
-11. **ECS agent を enable + start**（ここで初めて cluster に参加）
-12. cluster 登録の bounded wait
-13. API `127.0.0.1:8080` readiness の bounded wait
-14. `configure-origin.sh` を `ORIGIN_SMOKE_MODE=ecs` で実行
-15. ECS HTTPS smoke の成功
-16. serving-ready marker を記録
+2. **ECS agent を disable + stop**（bootstrap が行う最初の mutating action。以降のどの段階で失敗しても cluster に登録されない）
+3. serving-ready marker の reset
+4. 信頼済み local bundle の解決と SHA256 検証
+5. `/etc/letsencrypt` の不在確認
+6. **S3 からの TLS restore**（certbot install より前）
+7. restore 失敗は即座に終了。**certbot 再発行への fallback は存在しない**
+8. `certbot` / `python3-certbot-dns-route53` を install（package が自身の `cli.ini` を作成）
+9. package-owned `cli.ini` contract の検証（RPM ownership / integrity / directive allowlist）
+10. renew helper / env / service / timer を install-only で配置
+11. `/etc/ecs/ecs.config` を atomic に作成
+12. **ECS agent を enable + start**（ここで初めて cluster に参加）
+13. cluster 登録の bounded wait（登録先 cluster 名の厳密一致まで確認）
+14. API `127.0.0.1:8080` readiness の bounded wait
+15. `configure-origin.sh` を `ORIGIN_SMOKE_MODE=ecs` で実行
+16. ECS HTTPS smoke の成功
+17. renewal timer の有効化
+18. serving-ready marker を記録
 
 ### 失敗時の cleanup と ASG replacement の境界
 
@@ -449,9 +451,36 @@ Phase 6C の ECS EC2 host は、Amazon ECS-optimized Amazon Linux 2023 x86_64 AM
 registration / readiness / HTTPS smoke は ECS agent を起動した後に走るため、EXIT trap で cleanup します。
 
 - commit 前に失敗した場合、serving-ready marker を削除する
-- ECS agent を既に起動していた場合、`systemctl disable --now ecs` を best-effort で実行し cluster から外す
+- ECS agent に触れた後であれば `systemctl disable --now ecs` を best-effort で実行し cluster から外す
+- renewal timer に触れた後であれば `systemctl disable --now ec-portfolio-certbot-renew.timer` を best-effort で実行する
 - cleanup の失敗が元の failure exit code を上書きしない
-- 成功後は agent を維持する
+- 成功後は agent も timer も維持する
+
+#### partial side effect を cleanup 対象にする
+
+`systemctl enable --now <unit>` は **enable と start の 2 操作**です。enable が成功して start が失敗した場合、
+command は non-zero を返しますが unit は **enabled のまま**残り、次の boot で自動起動します。
+成功後に flag を立てる実装ではこの経路が cleanup から漏れ、bootstrap に失敗した host が reboot 後に
+cluster へ再登録されたり、証明書 renewal と S3 write-back を実行したりし得ます。
+
+そのため `ecs_agent_may_be_active` / `renew_timer_may_be_enabled` は **command 実行前**に立て、
+非 zero 終了なら成功可否に関わらず disable します。「may be」なのは、caller が exit code から
+知り得るのがそこまでだからです。
+
+これは **最初の `systemctl disable --now ecs`** にも同じく適用します。ECS-optimized AMI は agent を
+**enabled の状態で出荷する**ため、host は起動時点で既に「次の boot で自動起動する」状態にあります。
+`disable --now` もまた 2 操作であり、部分的に失敗すれば enabled のまま非 zero を返し得ます。
+flag を `start_ecs_agent` まで立てない実装では、この最初の段階で失敗した bootstrap が
+「agent が enabled のまま、cleanup は何もしない」状態で終了します。
+`default` cluster に登録されるだけ、EIP は付かない、といった周辺条件には依存させません。
+
+cleanup は失敗した最初の disable を **best-effort で再試行**します。test は
+「1 回目が失敗した後に 2 回目が実際に実行された」ことを試行回数と成功回数の両方で検証し、
+成功経路では再試行が起きないことを positive control で確認します。
+
+test の fake `systemctl` も「単に失敗する」のではなく、**enable の side effect を残してから失敗する**挙動を再現し、
+「次の boot で自動起動し得る enabled 状態を残さない」ことを unit state として検証します。
+成功経路で cleanup が走らないことは別の positive control で確認します。
 
 > **重要**: この cleanup が保証するのは「失敗した host に work が配置されないこと」だけです。
 > **失敗した host を ASG が自動で replacement することは 6C-2 では保証しません。**
@@ -467,11 +496,25 @@ timer の有効化に失敗した場合は serving-ready を作成しません�
 
 ### AWS 呼び出しの identity と Region
 
-bootstrap から起動する AWS child は **EC2 instance role のみ**を使います。
-`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` / `AWS_SECURITY_TOKEN` /
-`AWS_PROFILE` / `AWS_DEFAULT_PROFILE` / `AWS_CREDENTIAL_FILE` / `AWS_SHARED_CREDENTIALS_FILE` /
-`AWS_CONFIG_FILE` は child から取り除きます。TLS restore だけでなく、
-`configure-origin.sh` と ECS smoke の SSM 呼び出しにも同じ処理を適用します。
+bootstrap から起動する AWS child は **EC2 instance role のみ**を使います。static key と profile を消すだけでは
+不十分で、credential chain には他の入口があり、呼び出し先と信頼する証明書も環境変数で差し替え可能です。
+以下の 3 系統をすべて child から取り除きます。
+
+| 系統 | 変数 | 取り除く理由 |
+| --- | --- | --- |
+| static credential / profile | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_SECURITY_TOKEN`, `AWS_PROFILE`, `AWS_DEFAULT_PROFILE`, `AWS_CREDENTIAL_FILE`, `AWS_SHARED_CREDENTIALS_FILE`, `AWS_CONFIG_FILE` | instance role 以外の identity で動作させない |
+| credential provider | `AWS_WEB_IDENTITY_TOKEN_FILE`, `AWS_ROLE_ARN`, `AWS_CONTAINER_CREDENTIALS_FULL_URI`, `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI`, `AWS_EC2_METADATA_DISABLED`, `AWS_EC2_METADATA_SERVICE_ENDPOINT`, `AWS_EC2_METADATA_SERVICE_ENDPOINT_MODE` | 別 provider への切り替え、IMDS の無効化・転送を防ぐ |
+| endpoint / trust | `AWS_ENDPOINT_URL`, `AWS_ENDPOINT_URL_S3`, `AWS_ENDPOINT_URL_SSM`, `AWS_ENDPOINT_URL_ROUTE53`, `AWS_CA_BUNDLE`, `REQUESTS_CA_BUNDLE`, `SSL_CERT_FILE`, `SSL_CERT_DIR`, `BOTO_CONFIG` | 呼び出し先の差し替えと、その差し替え先を信頼させる trust store の持ち込みを防ぐ |
+
+これは `renew-origin-cert.sh` が certbot に対して既に適用している policy と同じもので、この bootstrap が使う
+S3 / SSM endpoint を追加したものです。TLS restore だけでなく、`cli.ini` contract 検証、`configure-origin.sh`、
+ECS smoke の SSM 呼び出しにも同じ処理を適用します。`origin-smoke-check-ecs.sh` は単体実行もできるため、
+同一 policy を defence in depth として自身でも適用します。
+
+test はこれを **child process の環境を実際に観測して**検証します。stand-in が自分の process 内から各変数を報告し、
+`<unset>` であることを assert します。さらに、identity 除去を通さない child（`dnf`）が同じ変数を
+**値付きで観測する**ことを positive control とし、harness が実際に hostile な値を注入していることを保証します
+（注入が止まれば `<unset>` の assertion が空虚になるため）。
 
 helper 側の test seam（`ORIGIN_TLS_PARENT_DIRECTORY`、`CERTBOT_CONFIG_PREFIX`）も同様に取り除きます。
 caller の環境変数で「どこに TLS state を復元するか」「どの certbot 設定を検証するか」を選べてはいけないためです。
