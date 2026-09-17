@@ -141,8 +141,16 @@ read_origin_verify_token() {
         aws_arguments+=(--region "$aws_region")
     fi
 
+    # Defence in depth. The bootstrap already strips these before invoking
+    # anything that talks to AWS, but this script is executable on its own, and
+    # the identity it must use is the instance role -- not whatever credential
+    # happened to be in the environment of whoever ran it.
     origin_verify_token="$(
-        AWS_PAGER="" run_with_timeout "$AWS_TIMEOUT_SECONDS" aws "${aws_arguments[@]}"
+        AWS_PAGER="" run_with_timeout "$AWS_TIMEOUT_SECONDS" \
+            env -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY -u AWS_SESSION_TOKEN \
+                -u AWS_SECURITY_TOKEN -u AWS_PROFILE -u AWS_DEFAULT_PROFILE \
+                -u AWS_CREDENTIAL_FILE -u AWS_SHARED_CREDENTIALS_FILE -u AWS_CONFIG_FILE \
+            aws "${aws_arguments[@]}"
     )"
 
     [[ "$origin_verify_token" != "None" && ${#origin_verify_token} -ge 32 && ${#origin_verify_token} -le 128 &&

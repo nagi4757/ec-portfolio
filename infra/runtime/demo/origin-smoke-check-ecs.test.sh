@@ -84,8 +84,14 @@ cat >"$fake_bin/systemctl" <<'FAKESYSTEMCTL'
 exit 3
 FAKESYSTEMCTL
 
+aws_env_log="$work_directory/aws-env.log"
 cat >"$fake_bin/aws" <<FAKEAWS
 #!/usr/bin/env bash
+{
+    printf 'static-creds=%s\n' "\${AWS_ACCESS_KEY_ID-<unset>}"
+    printf 'profile=%s\n' "\${AWS_PROFILE-<unset>}"
+    printf 'shared-creds=%s\n' "\${AWS_SHARED_CREDENTIALS_FILE-<unset>}"
+} >>"$aws_env_log"
 printf '%s\n' "$TOKEN"
 FAKEAWS
 
@@ -290,6 +296,21 @@ for forbidden in "docker inspect" "docker port" "ec-portfolio-demo-api" "ec-port
 done
 assert_absent "$script_code" "certbot" \
     "The smoke check must never invoke certbot."
+
+# --- 10b. the SSM call uses the instance role only --------------------------
+# This script is executable on its own, so it must not fall back to whatever
+# credential happened to be in the caller's environment. The fake records the
+# environment it was handed rather than the suite checking the output.
+: >"$aws_env_log"
+run_smoke "$HEALTHY_ALL" "$HEALTHY_V4" "" \
+    AWS_ACCESS_KEY_ID=leaked-key AWS_PROFILE=leaked-profile \
+    AWS_SHARED_CREDENTIALS_FILE=/tmp/evil-credentials >/dev/null 2>&1 ||
+    fail "A hostile credential environment must not break the check."
+aws_env_contents="$(cat "$aws_env_log")"
+for observation in "static-creds=<unset>" "profile=<unset>" "shared-creds=<unset>"; do
+    assert_contains "$aws_env_contents" "$observation" \
+        "The SSM call must run with the instance role only ($observation)."
+done
 
 # --- 11. the script still refuses to run unprivileged -----------------------
 # run_smoke_checks is reachable from the suite; the entry point is not.

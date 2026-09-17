@@ -101,10 +101,13 @@ FAKE
 make_fake systemctl '
 case "$*" in
     *"disable --now ecs"*)  printf "ecs-stop\n"  >>"$MARKER_FILE" ;;
+    *"enable --now ec-portfolio-certbot-renew.timer"*)
+        [[ -e "$STATE_DIR/fail-renew-enable" ]] && exit 1
+        printf "renew-enable\n" >>"$MARKER_FILE" ;;
     *"enable --now ecs"*)
         [[ -e "$STATE_DIR/fail-ecs-start" ]] && exit 1
         printf "ecs-start\n" >>"$MARKER_FILE" ;;
-    *"enable --now ec-portfolio-certbot-renew.timer"*) printf "renew-install\n" >>"$MARKER_FILE" ;;
+    *"daemon-reload"*) printf "renew-install\n" >>"$MARKER_FILE" ;;
 esac
 exit 0'
 
@@ -129,7 +132,8 @@ for arg in "$@"; do
         *51678*)
             [[ -e "$STATE_DIR/fail-registration" ]] && exit 1
             printf "registration\n" >>"$MARKER_FILE"
-            printf "{\"Cluster\":\"c\"}\n"; exit 0 ;;
+            printf "{\"Cluster\":\"%s\"}\n" "$(cat "$STATE_DIR/cluster-name" 2>/dev/null || printf "ec-portfolio-demo")"
+            exit 0 ;;
         *8080*)
             [[ -e "$STATE_DIR/fail-readiness" ]] && exit 1
             printf "api-ready\n" >>"$MARKER_FILE"
@@ -188,6 +192,9 @@ build_bundle() {
 printf 'restore\n' >>"$MARKER_FILE"
 printf 'restore-bucket=%s\n' "${ORIGIN_TLS_BUCKET-}" >>"$MARKER_FILE"
 printf 'restore-static-creds=%s\n' "${AWS_ACCESS_KEY_ID-<unset>}" >>"$MARKER_FILE"
+printf 'restore-profile=%s\n' "${AWS_PROFILE-<unset>}" >>"$MARKER_FILE"
+printf 'restore-tls-seam=%s\n' "${ORIGIN_TLS_PARENT_DIRECTORY-<unset>}" >>"$MARKER_FILE"
+printf 'restore-region=%s\n' "${AWS_REGION-<unset>}" >>"$MARKER_FILE"
 exit 0
 SYNC
 
@@ -196,6 +203,8 @@ SYNC
 verify_global_certbot_config_contract() {
     [[ -e "$STATE_DIR/fail-cli-contract" ]] && return 1
     printf 'cli-contract\n' >>"$MARKER_FILE"
+    printf 'cli-static-creds=%s\n' "${AWS_ACCESS_KEY_ID-<unset>}" >>"$MARKER_FILE"
+    printf 'cli-certbot-seam=%s\n' "${CERTBOT_CONFIG_PREFIX-<unset>}" >>"$MARKER_FILE"
     return 0
 }
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then :; fi
@@ -205,6 +214,10 @@ RENEW
 #!/usr/bin/env bash
 printf 'nginx-configure\n' >>"$MARKER_FILE"
 printf 'smoke-mode=%s\n' "${ORIGIN_SMOKE_MODE-<unset>}" >>"$MARKER_FILE"
+printf 'origin-static-creds=%s\n' "${AWS_ACCESS_KEY_ID-<unset>}" >>"$MARKER_FILE"
+printf 'origin-profile=%s\n' "${AWS_PROFILE-<unset>}" >>"$MARKER_FILE"
+printf 'origin-region=%s\n' "${AWS_REGION-<unset>}" >>"$MARKER_FILE"
+printf 'origin-tls-seam=%s\n' "${ORIGIN_TLS_PARENT_DIRECTORY-<unset>}" >>"$MARKER_FILE"
 [[ -e "$STATE_DIR/fail-smoke" ]] && exit 1
 printf 'ecs-smoke\n' >>"$MARKER_FILE"
 exit 0
@@ -213,7 +226,15 @@ ORIGINCFG
     printf '#!/usr/bin/env bash\nexit 0\n' >"$bundle/origin-smoke-check-ecs.sh"
     : >"$bundle/ec-portfolio-certbot-renew.service"
     : >"$bundle/ec-portfolio-certbot-renew.timer"
+
+    # A manifest naming every required artifact exactly once, by relative path.
     : >"$bundle/bundle.sha256"
+    local artifact
+    for artifact in sync-origin-tls.sh renew-origin-cert.sh configure-origin.sh \
+        origin-smoke-check-ecs.sh ec-portfolio-certbot-renew.service \
+        ec-portfolio-certbot-renew.timer; do
+        printf '%064d  %s\n' 0 "$artifact" >>"$bundle/bundle.sha256"
+    done
     chmod 755 "$bundle/sync-origin-tls.sh" "$bundle/renew-origin-cert.sh" \
         "$bundle/configure-origin.sh" "$bundle/origin-smoke-check-ecs.sh"
 }
@@ -240,9 +261,10 @@ run_bootstrap() {
     env PATH="$fake_bin:$PATH" \
         MARKER_FILE="$current_markers" STATE_DIR="$state_directory" \
         SPOT_BOOTSTRAP_PREFIX="$root" \
-        SPOT_BUNDLE_SHA256_FILE="$bundle/bundle.sha256" \
         ECS_CLUSTER_NAME="$CLUSTER" ORIGIN_TLS_BUCKET="$BUCKET" \
-        AWS_ACCESS_KEY_ID="leaked-static-key" \
+        AWS_ACCESS_KEY_ID="leaked-static-key" AWS_PROFILE="leaked-profile" \
+        AWS_SHARED_CREDENTIALS_FILE="/tmp/evil-credentials" \
+        ORIGIN_TLS_PARENT_DIRECTORY="/tmp/evil" CERTBOT_CONFIG_PREFIX="/tmp/evil" \
         SPOT_REGISTRATION_ATTEMPTS=2 SPOT_REGISTRATION_INTERVAL_SECONDS=0 \
         SPOT_READINESS_ATTEMPTS=2 SPOT_READINESS_INTERVAL_SECONDS=0 \
         bash -c 'source "$1"; validate_inputs; run_bootstrap_steps' \
@@ -273,9 +295,9 @@ run_bootstrap success
 
 expected_order=(
     ecs-stop bundle-verify restore certbot-install cli-contract renew-install
-    ecs-config ecs-start registration api-ready nginx-configure ecs-smoke
+    ecs-config ecs-start registration api-ready nginx-configure ecs-smoke renew-enable
 )
-observed="$(grep -xE 'ecs-stop|bundle-verify|restore|certbot-install|cli-contract|renew-install|ecs-config|ecs-start|registration|api-ready|nginx-configure|ecs-smoke' "$current_markers" | tr '\n' ' ')"
+observed="$(grep -xE 'ecs-stop|bundle-verify|restore|certbot-install|cli-contract|renew-install|ecs-config|ecs-start|registration|api-ready|nginx-configure|ecs-smoke|renew-enable' "$current_markers" | tr '\n' ' ')"
 expected="$(printf '%s ' "${expected_order[@]}")"
 [[ "$observed" == "$expected" ]] ||
     fail "Marker order mismatch.
@@ -286,8 +308,29 @@ expected="$(printf '%s ' "${expected_order[@]}")"
 serving_ready_exists || fail "The success path must record the serving-ready marker."
 
 # --- 2. the restore runs with the instance role only ------------------------
-assert_contains "$(cat "$current_markers")" "restore-static-creds=<unset>" \
-    "The restore must not inherit a static AWS credential."
+for observation in \
+    "restore-static-creds=<unset>" "restore-profile=<unset>" \
+    "cli-static-creds=<unset>" "origin-static-creds=<unset>" "origin-profile=<unset>"
+do
+    assert_contains "$(cat "$current_markers")" "$observation" \
+        "Every AWS child must run with the instance role only ($observation)."
+done
+
+# The seams belonging to the helpers must not survive into the child either: a
+# caller who could set them would choose where TLS state is restored and which
+# certbot configuration is validated.
+for observation in \
+    "restore-tls-seam=<unset>" "cli-certbot-seam=<unset>" "origin-tls-seam=<unset>"
+do
+    assert_contains "$(cat "$current_markers")" "$observation" \
+        "Helper test seams must not be inherited by a production child ($observation)."
+done
+
+# The Region is stated rather than discovered.
+for observation in "restore-region=ap-northeast-1" "origin-region=ap-northeast-1"; do
+    assert_contains "$(cat "$current_markers")" "$observation" \
+        "Every AWS child must be given the Region explicitly ($observation)."
+done
 assert_contains "$(cat "$current_markers")" "restore-bucket=$BUCKET" \
     "The restore must be given the configured bucket."
 
@@ -344,7 +387,7 @@ run_bootstrap_with_existing() {
     current_markers="$root/markers"; : >"$current_markers"
     rm -f "$state_directory"/fail-*
     env PATH="$fake_bin:$PATH" MARKER_FILE="$current_markers" STATE_DIR="$state_directory" \
-        SPOT_BOOTSTRAP_PREFIX="$root" SPOT_BUNDLE_SHA256_FILE="$root/bundle/bundle.sha256" \
+        SPOT_BOOTSTRAP_PREFIX="$root" \
         ECS_CLUSTER_NAME="$CLUSTER" ORIGIN_TLS_BUCKET="$BUCKET" \
         bash -c 'source "$1"; validate_inputs; run_bootstrap_steps' \
         _ "$root/bundle/bootstrap-spot-host.sh" >"$root/output" 2>&1 && last_status=0 || last_status=$?
@@ -368,6 +411,97 @@ assert_contains "$script_code" '(( EUID == 0 )) || fail' \
     "validate_platform must still require root."
 assert_contains "$script_code" 'if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then' \
     "Sourcing the script must not run a bootstrap."
+
+# --- 10b. a failure after the agent started takes the host back out ---------
+# Registration, readiness and the smoke gate all run with the agent already
+# enabled. Without cleanup, a host that failed one of them would keep sitting in
+# the cluster waiting for work it cannot serve.
+for late_case in "registration:fail-registration" "readiness:fail-readiness" "smoke:fail-smoke"; do
+    name="${late_case%%:*}"
+    switch="${late_case#*:}"
+
+    run_bootstrap "cleanup-$name" "$switch"
+    (( last_status != 0 )) || fail "The $name gate must fail the bootstrap."
+    marker_present ecs-start ||
+        fail "The $name case must have started the agent, or it tests nothing."
+
+    # ecs-stop appears twice: once at the start, once from the cleanup.
+    stop_count="$(grep -cxF ecs-stop "$current_markers" || true)"
+    (( stop_count >= 2 )) ||
+        fail "A failed $name gate must take the host back out of the cluster (ecs-stop seen $stop_count times)."
+    if serving_ready_exists; then fail "A failed $name gate must not record serving-ready."; fi
+done
+
+# --- 10c. the renewal timer is enabled last, and gates serving-ready --------
+run_bootstrap renew-timer fail-renew-enable
+(( last_status != 0 )) || fail "A renewal timer that cannot be enabled must fail the bootstrap."
+if serving_ready_exists; then fail "A failed renewal timer must not record serving-ready."; fi
+marker_present ecs-smoke || fail "The renewal timer must be enabled after the smoke gate."
+
+# --- 10d. the agent must register with the expected cluster -----------------
+for wrong_cluster in default other-cluster; do
+    printf '%s' "$wrong_cluster" >"$state_directory/cluster-name"
+    run_bootstrap "cluster-$wrong_cluster"
+    (( last_status != 0 )) ||
+        fail "Registration with '$wrong_cluster' must fail rather than be accepted."
+    if serving_ready_exists; then fail "A wrong-cluster registration must not record serving-ready."; fi
+done
+rm -f "$state_directory/cluster-name"
+
+# --- 10e. the bundle manifest must cover every required artifact ------------
+# sha256sum --check only validates what a manifest lists, so a manifest is
+# refused before it is used unless it names each artifact exactly once by a
+# relative path inside the bundle.
+manifest_case() {
+    local name="$1" manifest_body="$2"
+    local root="$work_directory/manifest-$name"
+    rm -rf "$root"; mkdir -p "$root/etc" "$root/run"
+    build_bundle "$root/bundle"
+    printf '%s' "$manifest_body" >"$root/bundle/bundle.sha256"
+    current_markers="$root/markers"; : >"$current_markers"
+    rm -f "$state_directory"/fail-*
+    env PATH="$fake_bin:$PATH" MARKER_FILE="$current_markers" STATE_DIR="$state_directory" \
+        SPOT_BOOTSTRAP_PREFIX="$root" ECS_CLUSTER_NAME="$CLUSTER" ORIGIN_TLS_BUCKET="$BUCKET" \
+        SPOT_REGISTRATION_ATTEMPTS=1 SPOT_REGISTRATION_INTERVAL_SECONDS=0 \
+        SPOT_READINESS_ATTEMPTS=1 SPOT_READINESS_INTERVAL_SECONDS=0 \
+        bash -c 'source "$1"; validate_inputs; run_bootstrap_steps' \
+        _ "$root/bundle/bootstrap-spot-host.sh" >"$root/output" 2>&1 && return 0 || return 1
+}
+
+full_manifest=''
+for artifact in sync-origin-tls.sh renew-origin-cert.sh configure-origin.sh \
+    origin-smoke-check-ecs.sh ec-portfolio-certbot-renew.service \
+    ec-portfolio-certbot-renew.timer; do
+    full_manifest="$full_manifest$(printf '%064d  %s\n' 0 "$artifact")
+"
+done
+
+# missing a required artifact
+for missing in configure-origin.sh origin-smoke-check-ecs.sh sync-origin-tls.sh; do
+    body="$(grep -vF " $missing" <<<"$full_manifest")"
+    if manifest_case "missing-${missing%%.*}" "$body"; then
+        fail "A manifest omitting $missing must be refused."
+    fi
+done
+
+# duplicate entry
+if manifest_case duplicate "$full_manifest$(printf '%064d  configure-origin.sh\n' 0)"; then
+    fail "A manifest naming an artifact twice must be refused."
+fi
+
+# absolute path
+if manifest_case absolute "$(printf '%064d  /etc/passwd\n' 0)$full_manifest"; then
+    fail "A manifest containing an absolute path must be refused."
+fi
+
+# parent traversal
+if manifest_case traversal "$(printf '%064d  ../outside.sh\n' 0)$full_manifest"; then
+    fail "A manifest containing a parent traversal entry must be refused."
+fi
+
+# checksum mismatch still fails, through sha256sum itself
+run_bootstrap checksum-mismatch fail-bundle
+(( last_status != 0 )) || fail "A checksum mismatch must fail the bootstrap."
 
 # --- 11. the sandbox prefix cannot be used against a real host --------------
 # The suite needs the seam, a caller of the executable must not have it. Without

@@ -72,6 +72,45 @@ readonly ENV_TARGET="$ENV_DIRECTORY/origin-tls.env"
 readonly RENEW_UNIT_TARGET="${BOOTSTRAP_PREFIX}/etc/systemd/system/ec-portfolio-certbot-renew.service"
 readonly RENEW_TIMER_TARGET="${BOOTSTRAP_PREFIX}/etc/systemd/system/ec-portfolio-certbot-renew.timer"
 
+# The runtime bundle this host must carry. Checked as a set before any checksum
+# is verified: sha256sum --check only validates the entries a manifest happens
+# to list, so a manifest that simply omits a file would pass while the file it
+# should have covered is whatever was delivered.
+readonly REQUIRED_BUNDLE_ARTIFACTS=(
+    "sync-origin-tls.sh"
+    "renew-origin-cert.sh"
+    "configure-origin.sh"
+    "origin-smoke-check-ecs.sh"
+    "ec-portfolio-certbot-renew.service"
+    "ec-portfolio-certbot-renew.timer"
+)
+readonly BUNDLE_MANIFEST_NAME="bundle.sha256"
+
+# The only Region this Demo runs in. Passed explicitly to every AWS child rather
+# than left to the CLI's own resolution: a host that picked up a Region from an
+# inherited profile or a stray config file would read a different parameter
+# store than the one this deployment owns.
+readonly EXPECTED_AWS_REGION="ap-northeast-1"
+
+# Every inherited credential source is cleared before an AWS child runs. The
+# instance role is the only identity this host is meant to have; anything in the
+# caller environment is either a mistake or an attempt to make this host act as
+# somebody else.
+readonly AWS_CREDENTIAL_ENV=(
+    AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_SECURITY_TOKEN
+    AWS_PROFILE AWS_DEFAULT_PROFILE AWS_CREDENTIAL_FILE
+    AWS_SHARED_CREDENTIALS_FILE AWS_CONFIG_FILE
+)
+
+# Test seams belonging to the helpers this script calls. They are cleared too:
+# a seam that redirects where TLS state is restored, or which certbot
+# configuration is validated, must not be reachable by setting the environment
+# of this bootstrap.
+readonly HELPER_SEAM_ENV=(
+    ORIGIN_TLS_PARENT_DIRECTORY CERTBOT_CONFIG_PREFIX ORIGIN_SMOKE_MODE
+    SPOT_BOOTSTRAP_PREFIX
+)
+
 readonly DNF_TIMEOUT_SECONDS="10m"
 readonly SYSTEMCTL_TIMEOUT_SECONDS="30s"
 readonly TIMEOUT_KILL_AFTER_SECONDS="5s"
@@ -84,6 +123,10 @@ readonly READINESS_ATTEMPTS="${SPOT_READINESS_ATTEMPTS:-60}"
 readonly READINESS_INTERVAL_SECONDS="${SPOT_READINESS_INTERVAL_SECONDS:-5}"
 
 script_directory=""
+
+# Cleanup state. The agent is only left running on a host that finished.
+ecs_agent_started="false"
+bootstrap_committed="false"
 
 log() {
     printf '[spot-bootstrap] %s\n' "$*"
@@ -107,6 +150,49 @@ run_with_timeout() {
 run_systemctl() {
     run_with_timeout "$SYSTEMCTL_TIMEOUT_SECONDS" systemctl "$@"
 }
+
+# Runs a child with the instance role as its only identity and with every helper
+# seam removed, and with the Region stated rather than discovered.
+run_aws_child() {
+    local -a clear=()
+    local name
+    for name in "${AWS_CREDENTIAL_ENV[@]}" "${HELPER_SEAM_ENV[@]}"; do
+        clear+=(-u "$name")
+    done
+    env "${clear[@]}" \
+        AWS_REGION="$EXPECTED_AWS_REGION" \
+        AWS_DEFAULT_REGION="$EXPECTED_AWS_REGION" \
+        "$@"
+}
+
+# A failure anywhere before the commit point must leave this host out of the
+# cluster. Without this the agent would keep running after a failed
+# registration, readiness or smoke gate, and ECS would place work on a host that
+# never finished building itself.
+#
+# Cleanup is best effort and must not change the exit code: the reason the
+# bootstrap failed is more useful than a failure to tidy up after it.
+#
+# This does not by itself cause the instance to be replaced. An unregistered
+# host simply receives no work. Making the Auto Scaling group notice and replace
+# it needs a lifecycle hook or a health check, which is Phase 6C-3.
+cleanup() {
+    local exit_code=$?
+    trap - EXIT
+
+    if (( exit_code != 0 )) && [[ "$bootstrap_committed" != "true" ]]; then
+        rm -f "$SERVING_READY_MARKER" 2>/dev/null || true
+        if [[ "$ecs_agent_started" == "true" ]]; then
+            printf '[spot-bootstrap] %s\n' \
+                "Bootstrap failed after the ECS agent started; taking the host back out of the cluster." >&2
+            run_systemctl disable --now ecs >/dev/null 2>&1 || true
+        fi
+    fi
+
+    exit "$exit_code"
+}
+
+trap cleanup EXIT
 
 validate_platform() {
     (( EUID == 0 )) || fail "This script must run as root."
@@ -134,6 +220,17 @@ validate_inputs() {
         fail "Required environment variable is missing: ORIGIN_TLS_BUCKET"
     [[ "$ORIGIN_TLS_BUCKET" =~ ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$ ]] ||
         fail "ORIGIN_TLS_BUCKET is not a valid bucket name."
+
+    # Stated, not discovered. If a caller supplies one it must be the Region
+    # this deployment lives in; anything else would point the AWS children at a
+    # different parameter store and a different bucket.
+    local supplied_region="${AWS_REGION:-${AWS_DEFAULT_REGION:-}}"
+    if [[ -n "$supplied_region" ]]; then
+        [[ "$supplied_region" =~ ^[a-z0-9-]{5,32}$ ]] ||
+            fail "The supplied AWS Region is not a valid Region name."
+        [[ "$supplied_region" == "$EXPECTED_AWS_REGION" ]] ||
+            fail "This bootstrap only runs in $EXPECTED_AWS_REGION (got $supplied_region)."
+    fi
 }
 
 # Every artifact is resolved next to this script and checked against the SHA256
@@ -159,14 +256,42 @@ resolve_bundle() {
     done
 }
 
+# sha256sum --check validates the entries a manifest lists and says nothing
+# about the ones it does not. A manifest that omitted configure-origin.sh would
+# pass while that file was whatever the delivery left behind, so the manifest is
+# first checked for shape: every required artifact named exactly once, nothing
+# addressed outside this directory.
+verify_bundle_manifest_covers_artifacts() {
+    local manifest="$1"
+    local artifact path count
+
+    # Entry paths are the second field. Reject anything that could name a file
+    # outside the bundle before sha256sum is asked to read it.
+    while IFS= read -r path; do
+        [[ -n "$path" ]] || continue
+        [[ "$path" != /* ]] ||
+            fail "The bundle manifest contains an absolute path: $path"
+        [[ "$path" != *".."* ]] ||
+            fail "The bundle manifest contains a parent traversal entry: $path"
+    done < <(awk '{ sub(/^[*]/, "", $2); print $2 }' "$manifest")
+
+    for artifact in "${REQUIRED_BUNDLE_ARTIFACTS[@]}"; do
+        count="$(awk -v want="$artifact" '{ sub(/^[*]/, "", $2); if ($2 == want) n++ } END { print n + 0 }' "$manifest")"
+        (( count == 1 )) ||
+            fail "The bundle manifest must name $artifact exactly once (found $count)."
+    done
+}
+
 verify_bundle_checksums() {
-    local manifest="${SPOT_BUNDLE_SHA256_FILE:-$script_directory/bundle.sha256}"
+    local manifest="$script_directory/$BUNDLE_MANIFEST_NAME"
 
     [[ -f "$manifest" ]] ||
         fail "The runtime bundle checksum manifest is missing: $manifest"
 
-    log "Verifying the runtime bundle against $manifest."
-    ( cd -- "$script_directory" && sha256sum --check --status -- "$manifest" ) ||
+    verify_bundle_manifest_covers_artifacts "$manifest"
+
+    log "Verifying the runtime bundle against $BUNDLE_MANIFEST_NAME."
+    ( cd -- "$script_directory" && sha256sum --check --status -- "$BUNDLE_MANIFEST_NAME" ) ||
         fail "The runtime bundle does not match its expected SHA256 manifest."
 }
 
@@ -190,12 +315,7 @@ restore_origin_tls_state() {
     install -o root -g root -m 0755 "$script_directory/sync-origin-tls.sh" "$SYNC_TARGET" ||
         fail "Unable to install the origin TLS helper."
 
-    # Instance role only. Any inherited static credential is cleared so the
-    # helper cannot fall back to one.
-    env -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY -u AWS_SESSION_TOKEN \
-        -u AWS_SECURITY_TOKEN -u AWS_PROFILE -u AWS_DEFAULT_PROFILE \
-        -u AWS_CREDENTIAL_FILE -u AWS_SHARED_CREDENTIALS_FILE -u AWS_CONFIG_FILE \
-        ORIGIN_TLS_BUCKET="$ORIGIN_TLS_BUCKET" "$SYNC_TARGET" restore ||
+    run_aws_child ORIGIN_TLS_BUCKET="$ORIGIN_TLS_BUCKET" "$SYNC_TARGET" restore ||
         fail "The origin TLS restore failed. Refusing to continue; this host will not request a new certificate."
 }
 
@@ -214,7 +334,7 @@ verify_global_certbot_config() {
     install -o root -g root -m 0755 "$script_directory/renew-origin-cert.sh" "$RENEW_TARGET" ||
         fail "Unable to install the renewal script."
 
-    bash -c 'source "$1"; verify_global_certbot_config_contract' _ "$RENEW_TARGET" ||
+    run_aws_child bash -c 'source "$1"; verify_global_certbot_config_contract' _ "$RENEW_TARGET" ||
         fail "The Certbot global configuration does not satisfy the managed contract."
 }
 
@@ -238,6 +358,14 @@ install_renewal_runtime() {
         fail "Unable to install the renewal timer."
 
     run_systemctl daemon-reload || fail "systemd daemon-reload failed or timed out."
+}
+
+# Deliberately separate from installing the units, and deliberately last. The
+# timer is Persistent=true, so nothing is lost by starting it at the end, and a
+# host that never became ready should not be running renewals against a
+# certificate it is not serving.
+enable_renewal_timer() {
+    log "Enabling the renewal timer."
     run_systemctl enable --now ec-portfolio-certbot-renew.timer ||
         fail "The renewal timer could not be enabled."
 }
@@ -264,20 +392,33 @@ write_ecs_config() {
 start_ecs_agent() {
     log "Enabling the ECS agent."
     run_systemctl enable --now ecs || fail "The ECS agent could not be started."
+    ecs_agent_started="true"
 }
 
+# Registration is only interesting if it is registration with the cluster this
+# host was told to join. An agent that came up against "default", or against
+# another cluster, would report a Cluster key and would be scheduled by somebody
+# else entirely.
 wait_for_cluster_registration() {
-    local attempt
+    local attempt metadata registered
+
     log "Waiting for ECS cluster registration."
     for ((attempt = 1; attempt <= REGISTRATION_ATTEMPTS; attempt++)); do
-        if curl --disable --silent --fail --max-time 3 http://localhost:51678/v1/metadata 2>/dev/null |
-            grep -Fq '"Cluster"'; then
-            log "The ECS agent is registered."
-            return 0
+        metadata="$(curl --disable --silent --fail --max-time 3 \
+            http://localhost:51678/v1/metadata 2>/dev/null || true)"
+        if [[ -n "$metadata" ]]; then
+            registered="$(sed -n 's/.*"Cluster"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' <<<"$metadata")"
+            if [[ "$registered" == "$ECS_CLUSTER_NAME" ]]; then
+                log "The ECS agent is registered with $ECS_CLUSTER_NAME."
+                return 0
+            fi
+            if [[ -n "$registered" ]]; then
+                fail "The ECS agent registered with '$registered' rather than '$ECS_CLUSTER_NAME'."
+            fi
         fi
         sleep "$REGISTRATION_INTERVAL_SECONDS"
     done
-    fail "The ECS agent did not register with the cluster within the configured budget."
+    fail "The ECS agent did not register with $ECS_CLUSTER_NAME within the configured budget."
 }
 
 wait_for_api_readiness() {
@@ -302,9 +443,12 @@ wait_for_api_readiness() {
 # waiting: this host holds no Elastic IP yet, so it is taking no traffic.
 configure_origin() {
     log "Configuring the HTTPS origin and validating it end to end."
-    # env rather than a command prefix: ORIGIN_SERVER_NAME is readonly here, and
-    # a prefix assignment to a readonly name is an error in bash.
-    env ORIGIN_SERVER_NAME="$ORIGIN_SERVER_NAME" \
+    # configure-origin.sh and the ECS smoke it runs both read the origin
+    # verification SecureString, so they go through the same hardened child:
+    # instance role only, Region stated, helper seams cleared. ORIGIN_SMOKE_MODE
+    # is set here rather than inherited, which is why the seam list clears it
+    # first.
+    run_aws_child ORIGIN_SERVER_NAME="$ORIGIN_SERVER_NAME" \
         ORIGIN_CERT_FILE="$LETSENCRYPT_DIRECTORY/live/$ORIGIN_SERVER_NAME/fullchain.pem" \
         ORIGIN_KEY_FILE="$LETSENCRYPT_DIRECTORY/live/$ORIGIN_SERVER_NAME/privkey.pem" \
         ORIGIN_SMOKE_MODE=ecs \
@@ -324,6 +468,7 @@ reset_serving_ready_marker() {
 mark_serving_ready() {
     install -o root -g root -m 0644 /dev/null "$SERVING_READY_MARKER" ||
         fail "Unable to record the serving-ready marker."
+    bootstrap_committed="true"
     log "Serving-ready. The Elastic IP is NOT associated by this script."
 }
 
@@ -345,6 +490,7 @@ run_bootstrap_steps() {
     wait_for_cluster_registration
     wait_for_api_readiness
     configure_origin
+    enable_renewal_timer
     mark_serving_ready
 }
 

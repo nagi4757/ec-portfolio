@@ -443,6 +443,42 @@ Phase 6C の ECS EC2 host は、Amazon ECS-optimized Amazon Linux 2023 x86_64 AM
 15. ECS HTTPS smoke の成功
 16. serving-ready marker を記録
 
+### 失敗時の cleanup と ASG replacement の境界
+
+どの gate で失敗しても、host は workload scheduler から見て fail-closed でなければなりません。
+registration / readiness / HTTPS smoke は ECS agent を起動した後に走るため、EXIT trap で cleanup します。
+
+- commit 前に失敗した場合、serving-ready marker を削除する
+- ECS agent を既に起動していた場合、`systemctl disable --now ecs` を best-effort で実行し cluster から外す
+- cleanup の失敗が元の failure exit code を上書きしない
+- 成功後は agent を維持する
+
+> **重要**: この cleanup が保証するのは「失敗した host に work が配置されないこと」だけです。
+> **失敗した host を ASG が自動で replacement することは 6C-2 では保証しません。**
+> それには Auto Scaling group の lifecycle hook または health check との統合が必要で、**Phase 6C-3 の責務**です。
+> 現状は cluster に登録されないまま instance が残るため、6C-3 でこの統合を入れるまでは手動での確認が必要です。
+
+### renewal timer の有効化順序
+
+renewal timer の unit 設置と `daemon-reload` は前半で行いますが、**有効化は最後**です。
+timer は `Persistent=true` のため bootstrap 途中で起動する理由がなく、
+serving していない host が証明書更新を走らせる状態を避けます。
+timer の有効化に失敗した場合は serving-ready を作成しません。
+
+### AWS 呼び出しの identity と Region
+
+bootstrap から起動する AWS child は **EC2 instance role のみ**を使います。
+`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` / `AWS_SECURITY_TOKEN` /
+`AWS_PROFILE` / `AWS_DEFAULT_PROFILE` / `AWS_CREDENTIAL_FILE` / `AWS_SHARED_CREDENTIALS_FILE` /
+`AWS_CONFIG_FILE` は child から取り除きます。TLS restore だけでなく、
+`configure-origin.sh` と ECS smoke の SSM 呼び出しにも同じ処理を適用します。
+
+helper 側の test seam（`ORIGIN_TLS_PARENT_DIRECTORY`、`CERTBOT_CONFIG_PREFIX`）も同様に取り除きます。
+caller の環境変数で「どこに TLS state を復元するか」「どの certbot 設定を検証するか」を選べてはいけないためです。
+
+Region は **`ap-northeast-1` を明示的に渡します**。AWS CLI が local config や inherited profile から
+偶然 Region を得ることに依存しません。caller が Region を指定した場合は形式と一致を検証し、異なれば失敗します。
+
 ### artifact 配送の境界
 
 このスクリプトは **artifact を download しません**。runtime bundle が同じ directory に既に存在することを前提とし、
