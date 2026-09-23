@@ -32,6 +32,7 @@ CloudFrontからEC2 originへの通信はHTTPS `443`だけを使用します。N
 | `smoke-check.sh` | secret不要のcontainer、port、readiness検証 |
 | `configure-origin.sh` | Nginx install、TLS origin設定、SSM origin verification設定 |
 | `origin-smoke-check.sh` | HTTPS、証明書、origin verification、非公開portの検証 |
+| `origin-token-rotation-check.sh` | origin verification token rotation中に、旧/新tokenの受理・拒否をhost上のrequestで検証 |
 | `configure-acme.sh` | Certbot/Route 53 DNS-01によるorigin certificate発行とrenewal timer設定 |
 | `renew-origin-cert.sh` | 対象certificateだけを更新し、変更時にNginxを安全にreload |
 | `sync-origin-tls.sh` | Certbot durable state（package所有の`cli.ini`を除く`/etc/letsencrypt`）をS3へtar退避・復元するorigin TLS state永続化（Phase 6B） |
@@ -604,6 +605,50 @@ tokenは32〜128文字のURL-safe文字（`A-Z`、`a-z`、`0-9`、`_`、`-`）�
 ```
 
 Nginx master configurationもroot-onlyです。`nginx -T`はsecret mapの内容まで標準出力へ展開するため、実行結果をterminal共有、ticket、CI artifact、ログ収集へ載せてはいけません。syntax確認にはscript内の`nginx -t`だけを使用します。
+
+### Origin verification tokenの無停止rotation
+
+CloudFrontのheader変更はedgeへ段階的に伝播するため、伝播中は旧tokenを送るedgeと新tokenを送るedgeが混在します。originが1つのtokenしか受理しない場合、この間の一部requestが403になります。rotation中だけoriginに旧/新の2 tokenを受理させ、CloudFrontが`Deployed`になってから旧tokenを外します。
+
+新tokenがhostへ届く経路は、既存のEC2 instance role権限で読める`/ec-portfolio/demo/origin/verify-token`だけです。そのためSSM parameterを先に新tokenへ更新し、旧tokenは`configure-origin.sh`が前回installした`origin-secret.conf`から引き継ぎます。追加のSSM parameterやIAM変更は不要です。
+
+- `ORIGIN_VERIFY_RETAIN_INSTALLED_TOKEN=true`: SSM token（新）に加え、installed mapのSSM以外のtoken（旧）も受理するmapを生成します。installed mapは本scriptが書く形式だけを受け付け、それ以外の行や3つ目のtokenがあれば失敗します。mapのtokenは最大2つです。
+- 未設定または`false`: 従来どおりSSM tokenだけのmapです（出力はrotation導入前とbyte単位で同一）。
+
+`origin-token-rotation-check.sh`は各段階をhost上のrequest（`--resolve <origin>:443:127.0.0.1`、origin-smoke-checkと同じ方式）で検証します。tokenはroot-onlyのcurl config fileで渡し、出力はHTTP statusとSHA-256先頭12文字のfingerprintだけです。
+
+| mode | 検証内容 |
+| --- | --- |
+| `capture` | 2 token受理中に、SSM以外のtoken（旧）を`/run/ec-portfolio-demo-origin-rotation/`（tmpfs、root 0700/0600）へ退避 |
+| `both` | header無し・不正tokenは403、SSM token（新）と旧tokenは200 |
+| `new-only` | header無し・不正tokenは403、SSM token（新）は200、旧tokenは403、installed mapはSSM tokenのみ |
+| `forget` | 退避した旧tokenを削除 |
+
+順序（各stepの成功がgate）。他secretのrotation手順と混同しないよう、origin tokenのstepは`OR`で始まる名前で呼びます。
+
+| step | 作業 |
+| --- | --- |
+| `OR1` | Terraform: `/ec-portfolio/demo/origin/verify-token`だけを新tokenへ更新（CloudFrontは旧tokenのまま） |
+| `OR2` | `ORIGIN_VERIFY_RETAIN_INSTALLED_TOKEN=true`で`configure-origin.sh`（旧+新を受理） |
+| `OR3` | `origin-token-rotation-check.sh capture`、続けて`both` |
+| `OR4` | Terraform: CloudFront `X-Origin-Verify`を新tokenへ更新 |
+| `OR5` | CloudFront distributionの`Status`が`Deployed`になるまで待機 |
+| `OR6` | CloudFront経由のAPI readinessが200であることを確認 |
+| `OR7` | 通常の`configure-origin.sh`（新tokenのみ） |
+| `OR8` | `origin-token-rotation-check.sh new-only`、成功後に`forget` |
+
+`OR2`と`OR3`のcommand:
+
+```bash
+export ORIGIN_VERIFY_RETAIN_INSTALLED_TOKEN=true
+sudo --preserve-env=ORIGIN_SERVER_NAME,ORIGIN_CERT_FILE,ORIGIN_KEY_FILE,ORIGIN_VERIFY_RETAIN_INSTALLED_TOKEN \
+  ./configure-origin.sh
+unset ORIGIN_VERIFY_RETAIN_INSTALLED_TOKEN
+sudo --preserve-env=ORIGIN_SERVER_NAME ./origin-token-rotation-check.sh capture
+sudo --preserve-env=ORIGIN_SERVER_NAME ./origin-token-rotation-check.sh both
+```
+
+`OR1`の完了後、`OR7`より前に通常modeの`configure-origin.sh`を実行すると、originは新tokenだけを受理し、旧tokenを送るCloudFront edgeからのrequestが403になります。hostを再起動すると退避した旧tokenは消えますが、Nginxのmap（2 token）は維持されます。
 
 ## Phase 4C execution order and Terraform prerequisites
 

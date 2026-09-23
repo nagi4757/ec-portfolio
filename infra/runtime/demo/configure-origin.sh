@@ -12,10 +12,15 @@ readonly DNF_TIMEOUT_SECONDS="10m"
 readonly SYSTEMCTL_TIMEOUT_SECONDS="30s"
 readonly ORIGIN_SMOKE_TIMEOUT_SECONDS="120s"
 readonly TIMEOUT_KILL_AFTER_SECONDS="5s"
+readonly ORIGIN_VERIFY_TOKEN_PATTERN='^[A-Za-z0-9_-]{32,128}$'
 
 runtime_directory=""
 origin_verify_token=""
 export -n origin_verify_token
+# Rotation only: the token the installed map accepts besides the SSM token.
+retained_origin_verify_token=""
+export -n retained_origin_verify_token
+retain_installed_token="false"
 script_directory=""
 origin_smoke_script=""
 configuration_installed="false"
@@ -96,7 +101,7 @@ cleanup() {
         rm -rf -- "$runtime_directory" || true
     fi
 
-    unset origin_verify_token
+    unset origin_verify_token retained_origin_verify_token
     exit "$exit_code"
 }
 
@@ -219,6 +224,83 @@ resolve_bundle_paths() {
         fail "The bundled origin smoke check is missing or not executable."
 }
 
+# Token rotation without an outage needs a moment in which the origin accepts
+# both the token CloudFront still sends and the one it is about to send. The new
+# token reaches the host the only way a token does, through the SSM parameter,
+# so the old one is taken from the map this script installed last time. Unset
+# means false: every existing caller keeps getting a single-token map.
+resolve_token_retention() {
+    case "${ORIGIN_VERIFY_RETAIN_INSTALLED_TOKEN:-false}" in
+        false)
+            retain_installed_token="false"
+            ;;
+        true)
+            retain_installed_token="true"
+            ;;
+        *)
+            fail "ORIGIN_VERIFY_RETAIN_INSTALLED_TOKEN must be true or false."
+            ;;
+    esac
+}
+
+# Prints the tokens an installed origin-secret.conf accepts, one per line. Only
+# the exact lines render_origin_verify_map writes are recognized; any other
+# content makes the map unusable as a source rather than silently carried over.
+read_installed_origin_verify_tokens() {
+    local config_file="$1"
+    local line
+    local token
+
+    [[ -f "$config_file" ]] || return 1
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        case "$line" in
+            'map $http_x_origin_verify $ec_portfolio_origin_verified {' | '    default 0;' | '}')
+                ;;
+            '    ~^'*'$ 1;')
+                token="${line#'    ~^'}"
+                token="${token%'$ 1;'}"
+                [[ "$token" =~ $ORIGIN_VERIFY_TOKEN_PATTERN ]] || return 1
+                printf '%s\n' "$token"
+                ;;
+            *)
+                return 1
+                ;;
+        esac
+    done <"$config_file"
+}
+
+# Sets retained_origin_verify_token to the installed token that is not the SSM
+# token, or to nothing when the installed map already accepts only the SSM
+# token. The map never grows beyond two tokens.
+select_retained_origin_verify_token() {
+    local config_file="$1"
+    local installed_tokens
+    local token
+
+    installed_tokens="$(read_installed_origin_verify_tokens "$config_file")" ||
+        fail "The installed origin verification map is missing or not in the managed format."
+    [[ -n "$installed_tokens" ]] || fail "The installed origin verification map accepts no token."
+
+    retained_origin_verify_token=""
+    while IFS= read -r token; do
+        [[ "$token" != "$origin_verify_token" ]] || continue
+        [[ -z "$retained_origin_verify_token" ]] ||
+            fail "The installed map accepts more than one token besides the SSM token."
+        retained_origin_verify_token="$token"
+    done <<<"$installed_tokens"
+}
+
+render_origin_verify_map() {
+    printf '%s\n' \
+        'map $http_x_origin_verify $ec_portfolio_origin_verified {' \
+        '    default 0;'
+    printf '    ~^%s$ 1;\n' "$origin_verify_token"
+    if [[ -n "$retained_origin_verify_token" ]]; then
+        printf '    ~^%s$ 1;\n' "$retained_origin_verify_token"
+    fi
+    printf '%s\n' '}'
+}
+
 read_origin_verify_token() {
     local aws_region="${AWS_REGION:-${AWS_DEFAULT_REGION:-}}"
     local -a aws_arguments=(
@@ -240,8 +322,7 @@ read_origin_verify_token() {
         AWS_PAGER="" run_with_timeout "$AWS_TIMEOUT_SECONDS" aws "${aws_arguments[@]}"
     )"
 
-    [[ "$origin_verify_token" != "None" && ${#origin_verify_token} -ge 32 && ${#origin_verify_token} -le 128 &&
-        "$origin_verify_token" =~ ^[A-Za-z0-9_-]+$ ]] ||
+    [[ "$origin_verify_token" != "None" && "$origin_verify_token" =~ $ORIGIN_VERIFY_TOKEN_PATTERN ]] ||
         fail "The origin verification parameter is missing or does not satisfy the token policy."
 }
 
@@ -290,13 +371,7 @@ write_staged_configuration() {
         '    include /etc/nginx/ec-portfolio-demo/origin-server.conf;' \
         '}' >"$runtime_directory/nginx.conf"
 
-    {
-        printf '%s\n' \
-            'map $http_x_origin_verify $ec_portfolio_origin_verified {' \
-            '    default 0;'
-        printf '    ~^%s$ 1;\n' "$origin_verify_token"
-        printf '%s\n' '}'
-    } >"$runtime_directory/origin-secret.conf"
+    render_origin_verify_map >"$runtime_directory/origin-secret.conf"
 
     {
         printf '%s\n' \
@@ -379,12 +454,13 @@ main() {
     if (( EUID != 0 )); then
         require_command sudo
         log "Root privileges are required; re-running with sudo."
-        exec sudo --preserve-env=ORIGIN_SERVER_NAME,ORIGIN_CERT_FILE,ORIGIN_KEY_FILE,ORIGIN_SMOKE_MODE,AWS_REGION,AWS_DEFAULT_REGION -- "$0" "$@"
+        exec sudo --preserve-env=ORIGIN_SERVER_NAME,ORIGIN_CERT_FILE,ORIGIN_KEY_FILE,ORIGIN_SMOKE_MODE,ORIGIN_VERIFY_RETAIN_INSTALLED_TOKEN,AWS_REGION,AWS_DEFAULT_REGION -- "$0" "$@"
     fi
 
     validate_platform
     validate_inputs "$@"
     resolve_bundle_paths
+    resolve_token_retention
     log "Installing the Nginx package when necessary."
     run_with_timeout "$DNF_TIMEOUT_SECONDS" dnf install -y nginx ||
         fail "Nginx package installation failed or timed out."
@@ -400,6 +476,15 @@ main() {
     prepare_runtime_directory
     log "Reading the origin verification SecureString with the EC2 instance role."
     read_origin_verify_token
+    if [[ "$retain_installed_token" == "true" ]]; then
+        # Read before install_configuration replaces the file.
+        select_retained_origin_verify_token "$NGINX_SECRET_CONFIG"
+        if [[ -n "$retained_origin_verify_token" ]]; then
+            log "Token rotation: the origin accepts the SSM token and the previously installed token."
+        else
+            log "Token rotation: the installed map already accepts only the SSM token."
+        fi
+    fi
     write_staged_configuration
     install_configuration
     activate_nginx
@@ -408,4 +493,8 @@ main() {
     log "Demo HTTPS origin configuration completed successfully."
 }
 
-main "$@"
+# Sourcing defines the functions without running anything, which is how the
+# tests reach the token map logic without root, Nginx or systemd.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi
