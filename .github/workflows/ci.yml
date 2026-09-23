@@ -138,6 +138,9 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Test origin runtime install contract
+        run: infra/runtime/demo/deploy-origin-runtime.test.sh
+
       - name: Test origin TLS persistence contract
         run: |
           set -euo pipefail
