@@ -146,6 +146,12 @@ jobs:
           infra/runtime/demo/origin-smoke-check-ecs.test.sh
           infra/runtime/demo/bootstrap-spot-host.test.sh
 
+      - name: Test origin verification token rotation contract
+        run: |
+          set -euo pipefail
+          infra/runtime/demo/configure-origin.test.sh
+          infra/runtime/demo/origin-token-rotation-check.test.sh
+
   deploy-frontends:
     name: Deploy Store and Admin frontends
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
