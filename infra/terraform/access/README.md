@@ -200,6 +200,32 @@ step 2.
       ]
     },
     {
+      "Sid": "CustomerManagedPolicyRead",
+      "Effect": "Allow",
+      "Action": [
+        "iam:GetPolicy",
+        "iam:GetPolicyVersion",
+        "iam:ListPolicyVersions"
+      ],
+      "Resource": [
+        "arn:aws:iam::<ACCOUNT_ID>:policy/ECPortfolioTerraformPlanFrontendRead",
+        "arn:aws:iam::<ACCOUNT_ID>:policy/ECPortfolioTerraformPlanGithubIamRead",
+        "arn:aws:iam::<ACCOUNT_ID>:policy/ECPortfolioTerraformPlanPhase5F1Read",
+        "arn:aws:iam::<ACCOUNT_ID>:policy/ECPortfolioTerraformPlanPhase5F2aRead",
+        "arn:aws:iam::<ACCOUNT_ID>:policy/ECPortfolioTerraformPlanRuntimeInputRead",
+        "arn:aws:iam::<ACCOUNT_ID>:policy/ECPortfolioDbPortForwarding",
+        "arn:aws:iam::<ACCOUNT_ID>:policy/ECPortfolioEc2SessionAccess",
+        "arn:aws:iam::<ACCOUNT_ID>:policy/ECPortfolioPhase5BFrontendDeploy",
+        "arn:aws:iam::<ACCOUNT_ID>:policy/ECPortfolioPhase5CRuntimeDeploy",
+        "arn:aws:iam::<ACCOUNT_ID>:policy/ECPortfolioPhase5EFrontendCICDApply",
+        "arn:aws:iam::<ACCOUNT_ID>:policy/ECPortfolioPreMigrationSnapshot",
+        "arn:aws:iam::<ACCOUNT_ID>:policy/ECPortfolioTerraformApplyEcrRead",
+        "arn:aws:iam::<ACCOUNT_ID>:policy/ECPortfolioTerraformApplyOriginTls",
+        "arn:aws:iam::<ACCOUNT_ID>:policy/ECPortfolioTerraformApplyPhase5F1",
+        "arn:aws:iam::<ACCOUNT_ID>:policy/ECPortfolioTerraformApplyPhase5F2a"
+      ]
+    },
+    {
       "Sid": "AccessStateBucketList",
       "Effect": "Allow",
       "Action": "s3:ListBucket",
@@ -236,8 +262,17 @@ Deliberately absent: `sso:CreatePermissionSet`, `sso:DeletePermissionSet`,
 attachment actions, every `sso-directory`, `identitystore` and `organizations`
 action, IAM role lifecycle actions (`iam:CreateRole`, `iam:DeleteRole`,
 `iam:UpdateRole`, `iam:DeleteRolePolicy`, `iam:AttachRolePolicy`,
-`iam:DetachRolePolicy`, trust policy and permissions boundary changes), and any
-access to workload resources or to the Demo state.
+`iam:DetachRolePolicy`, trust policy and permissions boundary changes), IAM
+policy mutation (`iam:CreatePolicy`, `iam:CreatePolicyVersion`,
+`iam:SetDefaultPolicyVersion`, `iam:DeletePolicyVersion`, `iam:DeletePolicy`,
+`iam:TagPolicy`, `iam:UntagPolicy`), and any access to workload resources or to
+the Demo state.
+
+`CustomerManagedPolicyRead`: the Plan and Apply permission sets also carry
+customer managed policies (5 and 10). They are read-only here so that their
+content can be baselined and reviewed; the list is exactly the policies the two
+permission sets reference, as the discovery records them. A new reference means
+a new ARN in this statement, never a wildcard.
 
 `s3:prefix` values: `access/env:/` is the prefix the S3 backend actually lists
 with. The two state keys are the rest of the access namespace. Whether a
@@ -254,6 +289,25 @@ exact role ARNs only. Creating, deleting or re-shaping roles, attachments,
 trust or boundaries is outside what this root does. A provisioning that fails
 with `not authorized to perform: iam:<action>` is a STOP: the action is
 reviewed, never added by reflex.
+
+### Changing the `ECPortfolioAccessAdmin` policy
+
+The document above is the source of truth; the console only ever receives a
+rendering of it from merged `main`.
+
+1. Merge the change to this document first.
+2. Render the document from merged `main` with the placeholders filled, and
+   compare the SHA-256 of the rendering with the one recorded in the change
+   before pasting it. A rendering taken from an unmerged branch is not used.
+3. In the console, replace the inline policy of `ECPortfolioAccessAdmin` with
+   the rendering, and let Identity Center provision it.
+4. Verify read-only, as `ec-portfolio-access-admin`: the step 5 checks of the
+   bootstrap, the reserved role reads (`iam:GetRole`, `iam:ListRolePolicies`,
+   `iam:GetRolePolicy`, `iam:ListAttachedRolePolicies`), `iam:GetPolicy` and
+   `iam:ListPolicyVersions` on each of the 15 customer managed policies, and
+   an AccessDenied from `iam:GetPolicy` on an AWS managed policy outside the
+   list (for example `arn:aws:iam::aws:policy/ReadOnlyAccess`).
+5. Run the discovery again; its baseline must equal the previous one.
 
 ## Discovery and baseline
 
