@@ -27,6 +27,7 @@ CloudFrontからEC2 originへの通信はHTTPS `443`だけを使用します。N
 | `deploy-api.sh` | ECR pull、SSM secret取得、Valkey/APIの安全な起動・交換 |
 | `deploy-api-from-ssm.sh` | SSM Parameter Storeからdeployment contractを解決し`deploy-api.sh`へ引き渡すhost-side wrapper（Phase 5F-2a） |
 | `deploy-runtime.sh` | GitHub ActionsからSSM Run Commandで4 artifactを検証し、installerとwrapperを順に実行するCI側orchestrator（Phase 5F-2b / 5F-3b） |
+| `deploy-origin-runtime.sh` | merge済みorigin/mainのorigin scriptsを、SSM Run Commandでrelease別directoryへ検証付きinstallするoperator用script |
 | `install-api-convergence.sh` | runtime scriptsとboot convergence unitを冪等にinstall・enableするhost-side installer |
 | `ec-portfolio-api-converge.service` | EC2起動時にdesired image SHAへ収束するsystemd oneshot unit |
 | `smoke-check.sh` | secret不要のcontainer、port、readiness検証 |
@@ -592,6 +593,28 @@ AWS CLIのRegionがhostで設定されていない場合のみ、non-secretの`A
 - `Host`、`X-Forwarded-For`、`X-Forwarded-Proto`をupstreamへ渡す
 - `X-Origin-Verify`自体はSpring Bootへ転送しない
 - upstreamは常に`http://127.0.0.1:8080`
+
+### origin scriptsのhostへのverified install
+
+`deploy-runtime.sh`が配送するのはAPI convergenceの4 artifactだけで、origin scriptsは含みません。稼働中hostへorigin scriptsを置くときは`deploy-origin-runtime.sh`を使い、scp/cpで既存fileを上書きしません。
+
+- source: `SOURCE_SHA`のgit object（working treeではない）。実行時点の`origin/main`と一致しなければ失敗します。
+- 対象: `configure-origin.sh`、`origin-smoke-check.sh`、`origin-token-rotation-check.sh`。`configure-origin.sh`は同じdirectoryのsmoke checkを、rotation checkは同じdirectoryの`configure-origin.sh`を使うため、この3つで自己完結します。
+- 転送: `deploy-runtime.sh`と同じinline base64。hostはfileを1つも作る前に全artifactのSHA-256を検証します。
+- 設置: `/opt/ec-portfolio/runtime/demo/origin/<SOURCE_SHA>/`（root 0700、file root 0700）。同じ親directory内のstagingへ書き込み、再検証してから1回のrenameで公開するため、release directoryは完全な状態か存在しないかのどちらかです。
+- 既存releaseは変更しません。同じreleaseが既にあれば検証だけ行い、差分・余分なfile・symlinkがあれば失敗します。
+- 「current」pointerは持ちません。scriptは明示したrelease directoryから実行し、rollbackは以前のrelease directory（またはこの仕組み以前から存在するfile）を使うことです。本scriptは既存releaseを削除・変更しません。
+- artifactにsecretは含まれません。tokenはhost上でinstance roleにより取得されます。
+
+```bash
+git fetch origin main
+export SOURCE_SHA="$(git rev-parse origin/main)"
+infra/runtime/demo/deploy-origin-runtime.sh plan    # file別SHA-256、設置先、payload sizeを表示（AWS呼び出しなし）
+EC2_INSTANCE_ID="<Terraform output ec2_instance_id>" \
+  infra/runtime/demo/deploy-origin-runtime.sh deploy   # hostがOnlineでなければ何も送らず失敗
+```
+
+`plan`が表示するSHA-256はsourceとartifactの値で、`deploy`はhost上でinstallしたfileの`sha256sum`を出力します。両者の一致でsource、artifact、hostの3点を照合します。`AWS_PROFILE`は`ssm:SendCommand`（対象instanceと`AWS-RunShellScript`）、`ssm:GetCommandInvocation`、`ssm:DescribeInstanceInformation`を持つidentityを明示して指定します。
 
 ## Origin verification secret
 
