@@ -406,3 +406,22 @@ jobs:
 
       - name: Deploy to the EC2 host when online
         run: infra/runtime/demo/deploy-runtime.sh deploy
+
+  # The access root owns the Terraform permission set policies. Its policy gate
+  # and discovery decide whether an import or a policy change may be applied, so
+  # their contracts are checked on every pull request, like the runtime suites.
+  # No AWS call is made: both suites run against stubs.
+  access-root-tests:
+    name: Access root shell tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Test access root policy gate and discovery
+        run: |
+          set -euo pipefail
+          infra/terraform/access/scripts/policy-gate.test.sh
+          infra/terraform/access/scripts/discover-permission-sets.test.sh
