@@ -226,6 +226,12 @@ step 2.
       ]
     },
     {
+      "Sid": "PreMigrationSnapshotPolicyVersionWrite",
+      "Effect": "Allow",
+      "Action": "iam:CreatePolicyVersion",
+      "Resource": "arn:aws:iam::<ACCOUNT_ID>:policy/ECPortfolioPreMigrationSnapshot"
+    },
+    {
       "Sid": "AccessStateBucketList",
       "Effect": "Allow",
       "Action": "s3:ListBucket",
@@ -263,7 +269,8 @@ attachment actions, every `sso-directory`, `identitystore` and `organizations`
 action, IAM role lifecycle actions (`iam:CreateRole`, `iam:DeleteRole`,
 `iam:UpdateRole`, `iam:DeleteRolePolicy`, `iam:AttachRolePolicy`,
 `iam:DetachRolePolicy`, trust policy and permissions boundary changes), IAM
-policy mutation (`iam:CreatePolicy`, `iam:CreatePolicyVersion`,
+policy mutation other than `PreMigrationSnapshotPolicyVersionWrite`
+(`iam:CreatePolicy`, `iam:CreatePolicyVersion` on any other policy,
 `iam:SetDefaultPolicyVersion`, `iam:DeletePolicyVersion`, `iam:DeletePolicy`,
 `iam:TagPolicy`, `iam:UntagPolicy`), and any access to workload resources or to
 the Demo state.
@@ -273,6 +280,44 @@ customer managed policies (5 and 10). They are read-only here so that their
 content can be baselined and reviewed; the list is exactly the policies the two
 permission sets reference, as the discovery records them. A new reference means
 a new ARN in this statement, never a wildcard.
+
+`PreMigrationSnapshotPolicyVersionWrite`: rotating the Demo DB master password
+needs `rds:ModifyDBInstance` on the Demo RDS instance, and the Apply permission
+set has no such permission. The DB phase of the secret rotation (Phase B)
+stopped on that AccessDenied after the SSM parameter had already been updated,
+and this change is how it is recovered. The Apply inline policy has no room
+left and all ten of its customer managed policy slots are taken, so the
+permission is added as a new version of `ECPortfolioPreMigrationSnapshot`.
+That is the only Apply customer managed policy that grants RDS actions, and it
+is already scoped to the exact Demo DB instance ARN. The new version adds
+exactly one statement and leaves the existing ones unchanged:
+
+```json
+{
+  "Sid": "ModifyExactDemoDbInstance",
+  "Effect": "Allow",
+  "Action": "rds:ModifyDBInstance",
+  "Resource": "arn:aws:rds:ap-northeast-1:<ACCOUNT_ID>:db:ec-portfolio-demo-mariadb"
+}
+```
+
+- AccessAdmin creates that version with
+  `iam:CreatePolicyVersion --set-as-default`, on this one policy ARN only.
+- `iam:CreatePolicyVersion` alone can create a version and make it the default,
+  so `iam:SetDefaultPolicyVersion` is not granted.
+- The policy has one version, so the quota of five is not in reach and
+  `iam:DeletePolicyVersion` is not granted either.
+- A rollback is a roll-forward: a new version carrying the previous document,
+  created with `--set-as-default`. Pointing the default back at an existing
+  version would need `iam:SetDefaultPolicyVersion`, which stays out until a
+  change actually requires it.
+- AccessAdmin can already rewrite the Apply inline policy, so this adds no new
+  way to raise Apply's permissions. It is still limited to one ARN.
+
+This statement cannot be verified read-only. The first `CreatePolicyVersion`
+is its verification, followed by `iam:GetPolicy`, `iam:GetPolicyVersion` and
+`iam:ListPolicyVersions` on the policy, and by a discovery to confirm that
+nothing else changed.
 
 `s3:prefix` values: `access/env:/` is the prefix the S3 backend actually lists
 with. The two state keys are the rest of the access namespace. Whether a
