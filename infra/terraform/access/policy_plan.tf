@@ -4,6 +4,7 @@ data "aws_iam_policy_document" "plan" {
   source_policy_documents = [
     data.aws_iam_policy_document.plan_baseline.json,
     data.aws_iam_policy_document.plan_origin_tls.json,
+    data.aws_iam_policy_document.plan_spot_foundation.json,
   ]
 }
 
