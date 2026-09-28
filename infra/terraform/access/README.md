@@ -222,7 +222,8 @@ step 2.
         "arn:aws:iam::<ACCOUNT_ID>:policy/ECPortfolioTerraformApplyEcrRead",
         "arn:aws:iam::<ACCOUNT_ID>:policy/ECPortfolioTerraformApplyOriginTls",
         "arn:aws:iam::<ACCOUNT_ID>:policy/ECPortfolioTerraformApplyPhase5F1",
-        "arn:aws:iam::<ACCOUNT_ID>:policy/ECPortfolioTerraformApplyPhase5F2a"
+        "arn:aws:iam::<ACCOUNT_ID>:policy/ECPortfolioTerraformApplyPhase5F2a",
+        "arn:aws:iam::<ACCOUNT_ID>:policy/ECPortfolioTerraformApplySpotFoundation"
       ]
     },
     {
@@ -276,10 +277,13 @@ policy mutation other than `OriginTlsPolicyVersionWrite`
 the Demo state.
 
 `CustomerManagedPolicyRead`: the Plan and Apply permission sets also carry
-customer managed policies (5 and 10). They are read-only here so that their
+customer managed policies (5 and 11). They are read-only here so that their
 content can be baselined and reviewed; the list is exactly the policies the two
 permission sets reference, as the discovery records them. A new reference means
-a new ARN in this statement, never a wildcard.
+a new ARN in this statement, never a wildcard. The eleventh Apply policy,
+`ECPortfolioTerraformApplySpotFoundation`, is listed here before it is attached;
+the console update of this statement waits until the discovery shows the
+attachment (see [Phase 6C-3 Spot foundation permissions](#phase-6c-3-spot-foundation-permissions)).
 
 `OriginTlsPolicyVersionWrite`: rotating the `X-Origin-Verify` token ends with
 CloudFront sending the new token (step `OR4` in the runtime README). That needs
@@ -358,7 +362,7 @@ rendering of it from merged `main`.
 4. Verify read-only, as `ec-portfolio-access-admin`: the step 5 checks of the
    bootstrap, the reserved role reads (`iam:GetRole`, `iam:ListRolePolicies`,
    `iam:GetRolePolicy`, `iam:ListAttachedRolePolicies`), `iam:GetPolicy` and
-   `iam:ListPolicyVersions` on each of the 15 customer managed policies, and
+   `iam:ListPolicyVersions` on each of the 16 customer managed policies, and
    an AccessDenied from `iam:GetPolicy` on an AWS managed policy outside the
    list (for example `arn:aws:iam::aws:policy/ReadOnlyAccess`).
 5. Run the discovery again; its baseline must equal the previous one.
@@ -477,3 +481,333 @@ A Demo change that adds AWS resources changes the access policies in the same
 development phase, in its own change applied first: Apply gets the mutations it
 needs, and Plan gets the reads that the post-apply convergence plan will make.
 An AccessDenied in a Demo plan is fixed here, never in the console.
+
+## Phase 6C-3 Spot foundation permissions
+
+Phase 6C-3 adds the ECS on EC2 Spot foundation to the Demo root: 24 resources
+(ECS cluster and capacity provider, Spot launch template, Auto Scaling group and
+lifecycle hook, host IAM role, instance profile and inline policies, runtime
+artifacts bucket and bundle object). With the Auto Scaling group at desired 0,
+the apply launches no instance.
+
+| Permission set | Change | Where |
+| --- | --- | --- |
+| `ECPortfolioTerraformPlan` | 6 read-only statements for the post-apply convergence plan | `policy_plan_spot_foundation.tf`, applied by this root |
+| `ECPortfolioTerraformApply` | new customer managed policy `ECPortfolioTerraformApplySpotFoundation`, attached as its eleventh | created and attached by an administrator from the document below; this root manages neither |
+
+The Apply inline policy and its ten existing customer managed policies are not
+changed. The applied IAM quota "Managed policies per role" was confirmed in the
+Service Quotas console to be at least 11 before this change; the
+`OriginTlsPolicyVersionWrite` note above predates that check.
+
+Both documents were derived from the API calls AWS provider 6.62 makes for these
+resources on create, read, update and delete, mapped to IAM actions through the
+AWS service reference and the API references. None comes from resource names
+alone. A provider upgrade, or new arguments on these resources (warm pool, load
+balancers, object lock, `force_destroy`, a lifecycle hook role), needs the same
+check again; a missing permission then fails closed with an AccessDenied.
+
+### `ECPortfolioTerraformApplySpotFoundation`
+
+Maintained by hand; this root does not manage it. The document below is the
+reviewed source.
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "CreateDemoEcsCluster",
+      "Effect": "Allow",
+      "Action": [
+        "ecs:CreateCluster"
+      ],
+      "Resource": "arn:aws:ecs:ap-northeast-1:<ACCOUNT_ID>:cluster/ec-portfolio-demo",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestTag/Name": "ec-portfolio-demo",
+          "aws:RequestTag/Project": "ec-portfolio",
+          "aws:RequestTag/Environment": "demo"
+        }
+      }
+    },
+    {
+      "Sid": "ManageExactDemoEcsCluster",
+      "Effect": "Allow",
+      "Action": [
+        "ecs:DescribeClusters",
+        "ecs:UpdateCluster",
+        "ecs:PutClusterCapacityProviders",
+        "ecs:DeleteCluster",
+        "ecs:TagResource",
+        "ecs:UntagResource"
+      ],
+      "Resource": "arn:aws:ecs:ap-northeast-1:<ACCOUNT_ID>:cluster/ec-portfolio-demo"
+    },
+    {
+      "Sid": "ManageExactEcsSpotCapacityProvider",
+      "Effect": "Allow",
+      "Action": [
+        "ecs:CreateCapacityProvider",
+        "ecs:DescribeCapacityProviders",
+        "ecs:UpdateCapacityProvider",
+        "ecs:DeleteCapacityProvider",
+        "ecs:TagResource",
+        "ecs:UntagResource"
+      ],
+      "Resource": "arn:aws:ecs:ap-northeast-1:<ACCOUNT_ID>:capacity-provider/ec-portfolio-demo-ecs-spot"
+    },
+    {
+      "Sid": "DescribeAutoScaling",
+      "Effect": "Allow",
+      "Action": [
+        "autoscaling:DescribeAutoScalingGroups",
+        "autoscaling:DescribeLifecycleHooks",
+        "autoscaling:DescribeScalingActivities"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "ManageExactEcsSpotAutoScalingGroup",
+      "Effect": "Allow",
+      "Action": [
+        "autoscaling:CreateAutoScalingGroup",
+        "autoscaling:UpdateAutoScalingGroup",
+        "autoscaling:DeleteAutoScalingGroup",
+        "autoscaling:PutLifecycleHook",
+        "autoscaling:DeleteLifecycleHook",
+        "autoscaling:CreateOrUpdateTags",
+        "autoscaling:DeleteTags"
+      ],
+      "Resource": "arn:aws:autoscaling:ap-northeast-1:<ACCOUNT_ID>:autoScalingGroup:*:autoScalingGroupName/ec-portfolio-demo-ecs-spot"
+    },
+    {
+      "Sid": "CreateEcsSpotLaunchTemplate",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:CreateLaunchTemplate"
+      ],
+      "Resource": "arn:aws:ec2:ap-northeast-1:<ACCOUNT_ID>:launch-template/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestTag/Name": "ec-portfolio-demo-ecs-spot",
+          "aws:RequestTag/Project": "ec-portfolio",
+          "aws:RequestTag/Environment": "demo"
+        }
+      }
+    },
+    {
+      "Sid": "ManageEcsSpotLaunchTemplate",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:CreateLaunchTemplateVersion",
+        "ec2:ModifyLaunchTemplate",
+        "ec2:DeleteLaunchTemplate"
+      ],
+      "Resource": "arn:aws:ec2:ap-northeast-1:<ACCOUNT_ID>:launch-template/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/Name": "ec-portfolio-demo-ecs-spot",
+          "aws:ResourceTag/Project": "ec-portfolio"
+        }
+      }
+    },
+    {
+      "Sid": "ManageExactEcsSpotRole",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateRole",
+        "iam:GetRole",
+        "iam:UpdateRoleDescription",
+        "iam:UpdateAssumeRolePolicy",
+        "iam:DeleteRole",
+        "iam:TagRole",
+        "iam:UntagRole",
+        "iam:ListRolePolicies",
+        "iam:ListAttachedRolePolicies",
+        "iam:ListInstanceProfilesForRole",
+        "iam:PutRolePolicy",
+        "iam:GetRolePolicy",
+        "iam:DeleteRolePolicy"
+      ],
+      "Resource": "arn:aws:iam::<ACCOUNT_ID>:role/ec-portfolio-demo-ecs-spot"
+    },
+    {
+      "Sid": "ManageExactEcsSpotInstanceProfile",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateInstanceProfile",
+        "iam:GetInstanceProfile",
+        "iam:AddRoleToInstanceProfile",
+        "iam:RemoveRoleFromInstanceProfile",
+        "iam:DeleteInstanceProfile",
+        "iam:TagInstanceProfile",
+        "iam:UntagInstanceProfile"
+      ],
+      "Resource": "arn:aws:iam::<ACCOUNT_ID>:instance-profile/ec-portfolio-demo-ecs-spot"
+    },
+    {
+      "Sid": "PassEcsSpotRoleToEc2",
+      "Effect": "Allow",
+      "Action": [
+        "iam:PassRole"
+      ],
+      "Resource": "arn:aws:iam::<ACCOUNT_ID>:role/ec-portfolio-demo-ecs-spot",
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": "ec2.amazonaws.com"
+        }
+      }
+    },
+    {
+      "Sid": "ManageRuntimeArtifactsBucket",
+      "Effect": "Allow",
+      "Action": [
+        "s3:CreateBucket",
+        "s3:TagResource",
+        "s3:DeleteBucket",
+        "s3:PutBucketTagging",
+        "s3:PutBucketPolicy",
+        "s3:DeleteBucketPolicy",
+        "s3:PutBucketVersioning",
+        "s3:PutEncryptionConfiguration",
+        "s3:PutLifecycleConfiguration",
+        "s3:PutBucketPublicAccessBlock",
+        "s3:PutBucketOwnershipControls",
+        "s3:ListBucketVersions",
+        "s3:GetAccelerateConfiguration",
+        "s3:GetBucketAcl",
+        "s3:GetBucketCORS",
+        "s3:GetBucketLogging",
+        "s3:GetBucketObjectLockConfiguration",
+        "s3:GetBucketOwnershipControls",
+        "s3:GetBucketPolicy",
+        "s3:GetBucketPublicAccessBlock",
+        "s3:GetBucketRequestPayment",
+        "s3:GetBucketTagging",
+        "s3:GetBucketVersioning",
+        "s3:GetBucketWebsite",
+        "s3:GetEncryptionConfiguration",
+        "s3:GetLifecycleConfiguration",
+        "s3:GetReplicationConfiguration",
+        "s3:ListBucket"
+      ],
+      "Resource": "arn:aws:s3:::ec-portfolio-demo-runtime-artifacts-*"
+    },
+    {
+      "Sid": "ManageSpotRuntimeBundleObject",
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutObject",
+        "s3:PutObjectTagging",
+        "s3:GetObject",
+        "s3:GetObjectTagging",
+        "s3:DeleteObject",
+        "s3:DeleteObjectVersion"
+      ],
+      "Resource": "arn:aws:s3:::ec-portfolio-demo-runtime-artifacts-*/runtime/spot-runtime.tar.gz"
+    }
+  ]
+}
+```
+
+`scripts/policy-gate.sh canonical` of this block as written (placeholder
+included): `5b6249a24c950a17829a9d7fd7328a8679157a9908b3ef5763945bcbe16d880a`.
+12 statements, 80 actions, 4,366 of the 6,144 non-whitespace characters a
+managed policy allows.
+
+- **Exact ARNs.** The cluster, the capacity provider, the role and the instance
+  profile. `ecs:CreateCluster` additionally requires the `Name`, `Project` and
+  `Environment` request tags.
+- **`Resource "*"`.** Only `DescribeAutoScaling`: the service reference lists
+  no resource type for `autoscaling:DescribeAutoScalingGroups`,
+  `DescribeLifecycleHooks` and `DescribeScalingActivities`.
+- **Patterns.** Only where AWS or Terraform assigns part of the name:
+  - the Auto Scaling group ID (the group name is fixed);
+  - the launch template ID (create is request-tag conditioned, changes are
+    resource-tag conditioned);
+  - the bucket suffix that `bucket_prefix` appends.
+- **`iam:PassRole`.** Only the host role, and only to `ec2.amazonaws.com`.
+  `iam:PassedToService` names the final service that assumes the role, which
+  covers the launch template, the Auto Scaling launch check and the instance
+  profile.
+- **Reused, not repeated.** The existing inline statement `Ec2DemoApply`
+  already allows the following in the Demo region; narrowing it means moving
+  the needed actions here:
+  - `ec2:Describe*`;
+  - `ec2:CreateTags` and `ec2:DeleteTags`;
+  - `ec2:RunInstances`. Auto Scaling checks the caller's `ec2:RunInstances` and
+    `iam:PassRole` with a RunInstances dry run on `CreateAutoScalingGroup` and
+    `UpdateAutoScalingGroup`.
+- **Bucket tags.** `s3:TagResource` is granted because `CreateBucket` with tags
+  requires it (the provider always sends them). Tag reads and tag updates try
+  `s3:ListTagsForResource` and `s3:UntagResource` first. When those are denied,
+  the provider falls back to `s3:GetBucketTagging` and `s3:PutBucketTagging`,
+  the same path the existing buckets take.
+- **Deliberately absent:**
+  - `iam:CreateServiceLinkedRole`;
+  - `ec2:RunInstances` or `ec2:TerminateInstances` of its own;
+  - security group changes;
+  - `s3:PutBucketAcl` (`CreateBucket` with the `private` ACL needs only
+    `s3:CreateBucket`) and `s3:PutObjectAcl`;
+  - object lock and governance bypass;
+  - every action on existing Demo resources (the On-Demand host, RDS,
+    CloudFront, Route 53, SSM parameters).
+
+### Plan reads (`policy_plan_spot_foundation.tf`)
+
+Only what the refresh of the new resources reads and the existing statements do
+not already allow:
+- ECS describe on the exact cluster and capacity provider;
+- the two Auto Scaling describes;
+- the policy lists of the host role;
+- the bucket configuration reads;
+- `s3:GetObject` and `s3:GetObjectTagging` on the one bundle key.
+
+No write, tagging or permissions management action. The rendered Plan inline
+policy grows from 31 to 37 statements and from 5,915 to 7,384 of the 10,240
+non-whitespace characters. Every existing statement renders unchanged.
+
+### Service-linked roles
+
+Neither `AWSServiceRoleForAutoScaling` nor `AWSServiceRoleForECS` exists yet.
+Auto Scaling creates its role on the first `CreateAutoScalingGroup`, and ECS
+creates its role on the first cluster. Each uses the caller's
+`iam:CreateServiceLinkedRole`, which Apply is not given. An administrator
+creates them once, before the first Spot apply. For each pair
+(`AWSServiceRoleForAutoScaling`, `autoscaling.amazonaws.com`) and
+(`AWSServiceRoleForECS`, `ecs.amazonaws.com`):
+
+1. `aws iam get-role --role-name <role>`.
+   - It exists: check that `Path` is `/aws-service-role/<service>/` and that
+     the trust principal is `<service>`, then skip it.
+   - `NoSuchEntity`: continue to step 2.
+   - Any other error: STOP; an error is never read as "absent".
+2. `aws iam create-service-linked-role --aws-service-name <service>`, once.
+   A repeated call is not assumed to succeed. After an error or an unclear
+   outcome, go back to step 1 instead of calling it again.
+3. `get-role` again with the step 1 checks. A `NoSuchEntity` right after a
+   successful create is re-checked read-only, not created again.
+
+ECS deletes `AWSServiceRoleForECS` when the last cluster in every Region is
+deleted, so a later recreate starts again at step 1.
+
+### Order after merge
+
+Each step is approved separately; any AccessDenied or unexpected plan is a STOP.
+
+1. Service-linked roles, as above.
+2. An administrator renders the JSON above from merged `main`, checks its
+   canonical SHA-256 against the one recorded here, fills `<ACCOUNT_ID>` and
+   creates the policy. AccessAdmin has no `iam:CreatePolicy`.
+3. The administrator attaches it to `ECPortfolioTerraformApply` as a customer
+   managed policy reference in the Identity Center console and provisions. The
+   Apply reserved role then carries 11 customer managed policies.
+4. Discovery: Apply lists the 11 references and nothing else changed.
+5. `ECPortfolioAccessAdmin` update from merged `main`, as in
+   [Changing the `ECPortfolioAccessAdmin` policy](#changing-the-ecportfolioaccessadmin-policy),
+   now with 16 customer managed policies.
+6. This root: a plan that changes only
+   `aws_ssoadmin_permission_set_inline_policy.plan` (6 statements added), then
+   apply, convergence and a discovery.
+7. The Demo root: the Phase 6C-3 plan and apply.
