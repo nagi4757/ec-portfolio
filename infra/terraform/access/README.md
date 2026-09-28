@@ -226,10 +226,10 @@ step 2.
       ]
     },
     {
-      "Sid": "PreMigrationSnapshotPolicyVersionWrite",
+      "Sid": "OriginTlsPolicyVersionWrite",
       "Effect": "Allow",
       "Action": "iam:CreatePolicyVersion",
-      "Resource": "arn:aws:iam::<ACCOUNT_ID>:policy/ECPortfolioPreMigrationSnapshot"
+      "Resource": "arn:aws:iam::<ACCOUNT_ID>:policy/ECPortfolioTerraformApplyOriginTls"
     },
     {
       "Sid": "AccessStateBucketList",
@@ -269,7 +269,7 @@ attachment actions, every `sso-directory`, `identitystore` and `organizations`
 action, IAM role lifecycle actions (`iam:CreateRole`, `iam:DeleteRole`,
 `iam:UpdateRole`, `iam:DeleteRolePolicy`, `iam:AttachRolePolicy`,
 `iam:DetachRolePolicy`, trust policy and permissions boundary changes), IAM
-policy mutation other than `PreMigrationSnapshotPolicyVersionWrite`
+policy mutation other than `OriginTlsPolicyVersionWrite`
 (`iam:CreatePolicy`, `iam:CreatePolicyVersion` on any other policy,
 `iam:SetDefaultPolicyVersion`, `iam:DeletePolicyVersion`, `iam:DeletePolicy`,
 `iam:TagPolicy`, `iam:UntagPolicy`), and any access to workload resources or to
@@ -281,23 +281,25 @@ content can be baselined and reviewed; the list is exactly the policies the two
 permission sets reference, as the discovery records them. A new reference means
 a new ARN in this statement, never a wildcard.
 
-`PreMigrationSnapshotPolicyVersionWrite`: rotating the Demo DB master password
-needs `rds:ModifyDBInstance` on the Demo RDS instance, and the Apply permission
-set has no such permission. The DB phase of the secret rotation (Phase B)
-stopped on that AccessDenied after the SSM parameter had already been updated,
-and this change is how it is recovered. The Apply inline policy has no room
-left and all ten of its customer managed policy slots are taken, so the
-permission is added as a new version of `ECPortfolioPreMigrationSnapshot`.
-That is the only Apply customer managed policy that grants RDS actions, and it
-is already scoped to the exact Demo DB instance ARN. The new version adds
-exactly one statement and leaves the existing ones unchanged:
+`OriginTlsPolicyVersionWrite`: rotating the `X-Origin-Verify` token ends with
+CloudFront sending the new token (step `OR4` in the runtime README). That needs
+`cloudfront:UpdateDistribution` on the Demo API distribution, and the Apply
+permission set has no such permission. The attempt stopped on that
+AccessDenied without changing anything, while the origin already accepted both
+tokens. The Apply inline policy has no room left and all ten of its customer
+managed policy slots are taken, so the permission is added as a new version of
+`ECPortfolioTerraformApplyOriginTls`. No Apply customer managed policy grants a
+CloudFront action. That one already owns the Terraform changes on the API
+origin side, and `X-Origin-Verify` is the origin protection between CloudFront
+and that origin. The new version adds exactly one statement and leaves the
+existing ones unchanged:
 
 ```json
 {
-  "Sid": "ModifyExactDemoDbInstance",
+  "Sid": "UpdateExactDemoApiDistribution",
   "Effect": "Allow",
-  "Action": "rds:ModifyDBInstance",
-  "Resource": "arn:aws:rds:ap-northeast-1:<ACCOUNT_ID>:db:ec-portfolio-demo-mariadb"
+  "Action": "cloudfront:UpdateDistribution",
+  "Resource": "arn:aws:cloudfront::<ACCOUNT_ID>:distribution/<API_DISTRIBUTION_ID>"
 }
 ```
 
@@ -305,8 +307,9 @@ exactly one statement and leaves the existing ones unchanged:
   `iam:CreatePolicyVersion --set-as-default`, on this one policy ARN only.
 - `iam:CreatePolicyVersion` alone can create a version and make it the default,
   so `iam:SetDefaultPolicyVersion` is not granted.
-- The policy has one version, so the quota of five is not in reach and
-  `iam:DeletePolicyVersion` is not granted either.
+- The policy holds three versions. The new one makes four, and a roll-forward
+  rollback would make five, the quota. `iam:DeletePolicyVersion` is therefore
+  not granted yet; a later change that needs a sixth version needs it first.
 - A rollback is a roll-forward: a new version carrying the previous document,
   created with `--set-as-default`. Pointing the default back at an existing
   version would need `iam:SetDefaultPolicyVersion`, which stays out until a
@@ -318,6 +321,12 @@ This statement cannot be verified read-only. The first `CreatePolicyVersion`
 is its verification, followed by `iam:GetPolicy`, `iam:GetPolicyVersion` and
 `iam:ListPolicyVersions` on the policy, and by a discovery to confirm that
 nothing else changed.
+
+It replaces `PreMigrationSnapshotPolicyVersionWrite`, which allowed the same
+action on `ECPortfolioPreMigrationSnapshot` only for the DB phase (Phase B) of
+the rotation. That policy's version 2 added `rds:ModifyDBInstance` on the exact
+Demo DB instance ARN (`ModifyExactDemoDbInstance`), and that version stays in
+effect. With the recovery complete, AccessAdmin keeps no write to that policy.
 
 `s3:prefix` values: `access/env:/` is the prefix the S3 backend actually lists
 with. The two state keys are the rest of the access namespace. Whether a
