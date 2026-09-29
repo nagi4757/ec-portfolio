@@ -1,0 +1,20 @@
+[Unit]
+Description=Reject non-root access to the EC2 instance metadata service (EC Portfolio Demo)
+# The ECS agent starts the host-network tasks, so the rules must exist before
+# it does. RequiredBy= below makes this a hard dependency of ecs.service: when
+# this unit fails, the agent refuses to start instead of starting without the
+# guard. No network dependency: the rules are local and take effect for every
+# connection made after they are written.
+Before=ecs.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# No leading '-': a failed apply must fail the unit, and through RequiredBy=
+# keep the ECS agent down.
+ExecStart=/usr/local/sbin/ec-portfolio-imds-guard apply
+TimeoutStartSec=60s
+
+[Install]
+WantedBy=multi-user.target
+RequiredBy=ecs.service

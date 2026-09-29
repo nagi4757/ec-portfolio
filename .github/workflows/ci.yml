@@ -149,6 +149,13 @@ jobs:
           infra/runtime/demo/origin-smoke-check-ecs.test.sh
           infra/runtime/demo/bootstrap-spot-host.test.sh
 
+      - name: Test Spot host bootstrap hardening contract
+        run: |
+          set -euo pipefail
+          infra/runtime/demo/imds-guard.test.sh
+          infra/runtime/demo/spot-user-data-loader.test.sh
+          infra/runtime/demo/spot-runtime-bundle.test.sh
+
       - name: Test origin verification token rotation contract
         run: |
           set -euo pipefail

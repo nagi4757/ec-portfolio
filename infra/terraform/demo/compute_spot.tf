@@ -223,21 +223,32 @@ resource "aws_autoscaling_group" "ecs_spot" {
 # holds the ECS agent back and disables it again on any failure. What it cannot
 # do is make the Auto Scaling group notice. An EC2 health check will not,
 # because the operating system is perfectly healthy on a host whose TLS restore
-# failed. So the instance is held in Pending:Wait while the bootstrap runs, and
-# the loader reports the outcome.
+# failed. So the instance is held in Pending:Wait while the bootstrap runs.
+#
+# Since Phase 6C-4a the outcome has two reporters, one at a time. The loader
+# runs the bootstrap's pre phase inside user data and reports ABANDON if it
+# fails. When it succeeds the pre phase has queued
+# ec-portfolio-spot-post-bootstrap.service, which runs after cloud-final and
+# ecs.service, proves the host and reports CONTINUE -- or ABANDON on any failure
+# or on its own start timeout. Nothing in user data waits for the ECS agent.
 #
 # ABANDON is the default result rather than CONTINUE because the failure this
 # has to survive is the one where nothing reports at all -- a loader that died
 # before it read its own instance ID, or a host that never ran user data. Those
 # must not become InService by timing out.
 #
-# 1800 seconds covers the bootstrap's own configured waits, which already total
-# about 1200 (a ten-minute certbot install budget, then 300 seconds each for
-# cluster registration and API readiness), plus the steps that have no
-# script-level bound at all: the bundle download, the TLS restore, the Nginx
-# install and the HTTPS smoke. It is not a measured figure and should be
-# revisited against the first real launch in Phase 6C-4.
+# 3600 seconds is sized from the configured bounds rather than measured:
+#   - pre phase, worst case about 12 minutes: the ten-minute certbot install
+#     budget plus the bundle download, the TLS restore, the IMDS guard and the
+#     30-second systemctl calls;
+#   - post phase, bounded by the unit's TimeoutStartSec of 30 minutes plus a
+#     2-minute TimeoutStopSec in which the script reports ABANDON.
+# That is about 44 minutes at worst, inside the hour with room to spare. The
+# 6C-3 value of 1800 did not cover it: registration, readiness, the Nginx
+# install and the smoke alone could use most of it. A host that never reports
+# waits the full hour before its ABANDON default applies, at Spot cost.
 #
+
 # No notification_target_arn or role_arn: Auto Scaling publishes lifecycle
 # events to EventBridge regardless, and nothing here consumes them yet.
 resource "aws_autoscaling_lifecycle_hook" "ecs_spot_launching" {
@@ -245,5 +256,5 @@ resource "aws_autoscaling_lifecycle_hook" "ecs_spot_launching" {
   autoscaling_group_name = aws_autoscaling_group.ecs_spot.name
   lifecycle_transition   = "autoscaling:EC2_INSTANCE_LAUNCHING"
   default_result         = "ABANDON"
-  heartbeat_timeout      = 1800
+  heartbeat_timeout      = 3600
 }

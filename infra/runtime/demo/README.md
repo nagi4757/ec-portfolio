@@ -429,7 +429,16 @@ Phase 6C の ECS EC2 host は、Amazon ECS-optimized Amazon Linux 2023 x86_64 AM
 `bootstrap-spot-host.sh` は置換 host を「serving-ready」まで持っていく順序契約です。順序そのものが契約であり、
 `bootstrap-spot-host.test.sh` が marker 順序で検証します。
 
-1. root / Amazon Linux 2023 / 必要 command の検証
+Phase 6C-4a から、bootstrap は **pre / post の 2 phase** に分かれています。
+
+ECS-optimized AMI の packaging（`amazon-linux-ami-integrated/ecs.service`）では、`ecs.service` が
+`After=cloud-final.service` で順序付けされています。この場合、user data（cloud-final）の中から ECS agent を起動しても、
+user data が終わるまで agent は起動しません。そのため user data の中で登録や readiness を待つ構造は、必ず timeout で終わります。
+pin した AMI で実際にこの順序付けがあるかは確認していませんが、**順序付けの有無に関係なく安全な構造**に変更しました。
+
+**pre phase**（`bootstrap-spot-host.sh pre`。loader が user data の中で実行）
+
+1. root / Amazon Linux 2023 / 必要 command の検証（`iptables`、`setpriv` を含む）
 2. **ECS agent を disable + stop**（bootstrap が行う最初の mutating action。以降のどの段階で失敗しても cluster に登録されない）
 3. serving-ready marker の reset
 4. 信頼済み local bundle の解決と SHA256 検証
@@ -439,14 +448,37 @@ Phase 6C の ECS EC2 host は、Amazon ECS-optimized Amazon Linux 2023 x86_64 AM
 8. `certbot` / `python3-certbot-dns-route53` を install（package が自身の `cli.ini` を作成）
 9. package-owned `cli.ini` contract の検証（RPM ownership / integrity / directive allowlist）
 10. renew helper / env / service / timer を install-only で配置
-11. `/etc/ecs/ecs.config` を atomic に作成
-12. **ECS agent を enable + start**（ここで初めて cluster に参加）
-13. cluster 登録の bounded wait（登録先 cluster 名の厳密一致まで確認）
-14. API `127.0.0.1:8080` readiness の bounded wait
-15. `configure-origin.sh` を `ORIGIN_SMOKE_MODE=ecs` で実行
-16. ECS HTTPS smoke の成功
-17. renewal timer の有効化
-18. serving-ready marker を記録
+11. IMDS guard（script / unit）と post-bootstrap unit・環境ファイルを配置し、`daemon-reload`
+12. **IMDS guard を enable + start し、効果を実測で確認**（root は token を取得でき、UID 10001 / 999 は拒否される）
+13. `/etc/ecs/ecs.config` を atomic に作成
+14. **ECS agent を enable のみ**（start はしない。以降の boot では guard の後に起動する）
+15. **`ec-portfolio-spot-post-bootstrap.service` を `systemctl start --no-block` で queue**（ここで lifecycle action の報告責任を post に引き渡す）
+
+pre phase は agent の起動・登録・API readiness を**一切待ちません**。失敗した場合は loader が ABANDON を報告します。
+
+**post phase**（`bootstrap-spot-host.sh post`。`ec-portfolio-spot-post-bootstrap.service` が cloud-final 終了後に実行）
+
+1. bundle の SHA256 再検証
+2. cluster 登録の bounded wait（登録先 cluster 名の厳密一致まで確認）
+3. API `127.0.0.1:8080` readiness の bounded wait
+4. `configure-origin.sh` を `ORIGIN_SMOKE_MODE=ecs` で実行し、ECS HTTPS smoke を確認
+5. renewal timer の有効化
+6. serving-ready marker を記録
+7. **lifecycle hook に CONTINUE を報告**（ここが commit point。受理されて初めて InService になる）
+
+post phase のどの gate で失敗しても、agent を止めて cluster から外し、ABANDON を報告します。
+unit の `TimeoutStartSec` による SIGTERM も、`trap 'exit 143' TERM` によって同じ ABANDON 経路に入ります。
+
+```
+cloud-final.service（user data: loader → pre phase）
+    │  pre が post を --no-block で queue して終了
+    ▼
+ec-portfolio-imds-guard.service ──Before= / RequiredBy=──▶ ecs.service
+                                                             │
+                                                             ▼ After=cloud-final.service ecs.service
+                                        ec-portfolio-spot-post-bootstrap.service（Wants=ecs.service）
+                                             registration → readiness → origin/smoke → CONTINUE
+```
 
 ### 失敗時の cleanup と ASG replacement の境界
 
@@ -456,6 +488,9 @@ registration / readiness / HTTPS smoke は ECS agent を起動した後に走る
 - commit 前に失敗した場合、serving-ready marker を削除する
 - ECS agent に触れた後であれば `systemctl disable --now ecs` を best-effort で実行し cluster から外す
 - renewal timer に触れた後であれば `systemctl disable --now ec-portfolio-certbot-renew.timer` を best-effort で実行する
+- post-bootstrap を queue した可能性があれば `systemctl stop --no-block` で取り消す（pre phase）
+- post phase では最後に **ABANDON を報告**する。pre phase の失敗は loader が報告するため、pre phase 自身は報告しない
+- IMDS guard は取り消さない（失敗した host をより厳しくするだけで、次の boot でも agent を止め続ける）
 - cleanup の失敗が元の failure exit code を上書きしない
 - 成功後は agent も timer も維持する
 
@@ -489,11 +524,17 @@ test の fake `systemctl` も「単に失敗する」のではなく、**enable 
 > **失敗した host を ASG が自動で replacement することは 6C-2 の責務ではありません。**
 >
 > その統合は Phase 6C-3 で入りました。Auto Scaling group の launch lifecycle hook
-> （`autoscaling:EC2_INSTANCE_LAUNCHING`、`default_result = ABANDON`、heartbeat 1800 秒）が instance を
-> `Pending:Wait` に留め、Launch Template の loader が bootstrap の exit code を
-> `CompleteLifecycleAction` で CONTINUE / ABANDON として報告します。何も報告されないまま heartbeat が尽きた場合も
-> default の ABANDON が適用されるため、「報告できなかった host が InService になる」経路はありません。
+> （`autoscaling:EC2_INSTANCE_LAUNCHING`、`default_result = ABANDON`）が instance を `Pending:Wait` に留めます。
+> Phase 6C-4a からは、報告者は常に 1 つです。pre phase の失敗は loader が ABANDON を報告し、
+> pre phase の成功後は post-bootstrap unit が CONTINUE / ABANDON を報告します。
+> 何も報告されないまま heartbeat が尽きた場合も default の ABANDON が適用されるため、
+> 「報告できなかった host が InService になる」経路はありません。
 > EC2 health check は OS の健全性しか見ないため、この経路の代わりにはなりません。
+>
+> heartbeat は 6C-4a で **1800 秒から 3600 秒**に変更しました。
+> pre phase の最悪値（certbot install の 10 分を含めて約 12 分）と、post unit の
+> `TimeoutStartSec=1800s` + `TimeoutStopSec=120s` を合計すると約 44 分になり、1800 秒には収まらないためです。
+> `bootstrap-spot-host.test.sh` がこの不等式を unit file と `compute_spot.tf` から読み取って検証します。
 
 ### renewal timer の有効化順序
 
@@ -546,13 +587,60 @@ Region は **`ap-northeast-1` を明示的に渡します**。AWS CLI が local 
 Phase 6C-3 で決定した配送方法は次のとおりです。詳細は
 [`infra/terraform/demo/README.md` の Phase 6C-3 セクション](../../terraform/demo/README.md) を参照してください。
 
-- 8 ファイル（`bootstrap-spot-host.sh` + required 6 種 + `bundle.sha256`）を 1 つの `tar.gz` にまとめ、
+- 11 ファイル（`bootstrap-spot-host.sh` + required 9 種 + `bundle.sha256`）を 1 つの `tar.gz` にまとめ、
   専用の private / versioned S3 bucket に固定 key で置く
 - Launch Template の user_data は **exact な S3 VersionId** と **archive 全体の SHA256** を pin する
 - loader はその SHA256 を検証してから extract し、`bootstrap-spot-host.sh` を実行する
 - `bundle.sha256` は archive の中にあるため、外側の SHA256 が manifest ごと保護する。
   これが「manifest は同じ directory にあるから信頼されるのではない」という上の記述に対する解答であり、
   信頼の起点は archive の外、すなわち reviewed な Terraform の値にある
+
+### container からの IMDS アクセス遮断（Phase 6C-4a）
+
+Phase 6C-4 の API / Valkey task は host network mode で動作します。Launch Template の IMDSv2 hop limit 1 は、
+bridge network の container（packet が 1 hop 余分に通る）は止めますが、host network の container は hop を通らないため効きません。
+対策がなければ、侵害された API process は `169.254.169.254` への 1 回の HTTP request で Spot instance role の credential を取得できます。
+そうなると、origin TLS archive の書き込み、ACME TXT record、origin verify token、lifecycle action まで使えてしまいます。
+
+`imds-guard.sh` と `ec-portfolio-imds-guard.service` がこれを塞ぎます。
+
+| 項目 | 契約 |
+| --- | --- |
+| 対象 | `169.254.169.254/32` 宛ての locally generated traffic のみ（filter table の `OUTPUT`） |
+| 許可 | UID 0（ECS agent、ecs-init、SSM agent、cloud-init、bootstrap、certbot renewal はすべて root） |
+| 拒否 | UID 0 以外すべて。API（UID 10001）と Valkey（UID 999）を含み、後から増えた UID も既定で拒否 |
+| 構造 | `OUTPUT` の先頭に `-d 169.254.169.254/32 -j EC_PORTFOLIO_IMDS` を 1 つだけ置く。専用 chain は「root なら RETURN、それ以外は REJECT」の 2 rule のみ |
+| 冪等性 | 2 回目の `apply` は読み取りだけで何も変更しない。drift（順序違い、余分な rule、jump の位置）は修復する |
+| 修復順序 | REJECT を先に入れてから root RETURN を上に入れ、jump も先頭に入れてから重複を削除する。修復中に non-root が通る瞬間はない |
+| 再起動 | unit が `WantedBy=multi-user.target` かつ `RequiredBy=ecs.service` / `Before=ecs.service` のため、毎 boot で ECS より先に再適用される |
+| fail-closed | guard の失敗時は `RequiredBy=` により `ecs.service` が起動しない。初回 boot では pre phase が `verify` で実効性を確認し、失敗すれば ABANDON |
+| 変更しないもの | chain policy、`INPUT` / `FORWARD`、他の宛先、security group、IAM |
+
+iptables は host に install されている frontend をそのまま使います（Docker / ecs-init と同じもの）。
+使う操作（`-N` / `-I` / `-D` / `-C` / `-S` と owner match）は legacy と nf_tables のどちらの backend でも同じ意味を持つため、
+backend は仮定しません。rule が期待どおりかどうかは listing の文字列ではなく `-C` で frontend 自身に判定させます。
+
+UID は推測ではなく image から確認しています。
+
+- API: `apps/api/Dockerfile` の `USER 10001:10001`
+- Valkey: `valkey/valkey:8.1.9-alpine`（linux/amd64 manifest `sha256:16625369…`）は `Config.User` が空で root として起動します。
+  layer に `adduser -S -G valkey -u 999 valkey` があり、`docker-entrypoint.sh` は command が `valkey-server` で root 起動のときに
+  `setpriv --reuid=valkey --regid=valkey --clear-groups` で UID 999 に落とします
+
+**Residual risk**: この方式は socket owner の UID で判定するため、**UID 0 で動く host network container は IMDS を遮断できません**。
+そのため container の UID は security contract の一部であり、Phase 6C-4 の task definition では次を守ります。
+
+- API は UID 10001 で動かす（image の既定。task definition でも `user = "10001:10001"` を明示する）
+- Valkey は UID 999 で動かす。entrypoint の privilege drop（command が `valkey-server` で始まることに依存）に頼るのではなく、
+  **`user = "999:1000"` を明示できるかを 6C-4 で検証する**。entrypoint の non-root 経路は chown を行わず、
+  書き込めない directory に warning を出すだけなので、`--save '' --appendonly no` の構成では動作する見込みだが、初回起動で確認する
+- **root で動く application container は禁止**（`privileged` も使わない）
+
+その他、既知の影響は次のとおりです。
+
+- Session Manager の `ssm-user` shell から instance role を使う `aws` command は、`sudo` なしでは IMDS に届かない（意図どおり）
+- EC2 Instance Connect の `ec2-instance-connect` user も IMDS に届かない。この Demo は SSH ingress を持たないため影響はない
+- Launch Template は IPv6 metadata endpoint を有効化していないため、IPv6 経路は対象外
 
 ### Elastic IP は bootstrap の責務ではない
 
