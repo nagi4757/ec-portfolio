@@ -5,6 +5,7 @@ data "aws_iam_policy_document" "plan" {
     data.aws_iam_policy_document.plan_baseline.json,
     data.aws_iam_policy_document.plan_origin_tls.json,
     data.aws_iam_policy_document.plan_spot_foundation.json,
+    data.aws_iam_policy_document.plan_ecs_application.json,
   ]
 }
 
