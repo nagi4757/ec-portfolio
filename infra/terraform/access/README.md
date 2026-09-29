@@ -223,7 +223,8 @@ step 2.
         "arn:aws:iam::<ACCOUNT_ID>:policy/ECPortfolioTerraformApplyOriginTls",
         "arn:aws:iam::<ACCOUNT_ID>:policy/ECPortfolioTerraformApplyPhase5F1",
         "arn:aws:iam::<ACCOUNT_ID>:policy/ECPortfolioTerraformApplyPhase5F2a",
-        "arn:aws:iam::<ACCOUNT_ID>:policy/ECPortfolioTerraformApplySpotFoundation"
+        "arn:aws:iam::<ACCOUNT_ID>:policy/ECPortfolioTerraformApplySpotFoundation",
+        "arn:aws:iam::<ACCOUNT_ID>:policy/ECPortfolioTerraformApplyEcsApplication"
       ]
     },
     {
@@ -277,13 +278,15 @@ policy mutation other than `OriginTlsPolicyVersionWrite`
 the Demo state.
 
 `CustomerManagedPolicyRead`: the Plan and Apply permission sets also carry
-customer managed policies (5 and 11). They are read-only here so that their
+customer managed policies (5 and 12). They are read-only here so that their
 content can be baselined and reviewed; the list is exactly the policies the two
 permission sets reference, as the discovery records them. A new reference means
 a new ARN in this statement, never a wildcard. The eleventh Apply policy,
-`ECPortfolioTerraformApplySpotFoundation`, is listed here before it is attached;
+`ECPortfolioTerraformApplySpotFoundation`, was listed here before it was
+attached (see [Phase 6C-3 Spot foundation permissions](#phase-6c-3-spot-foundation-permissions)).
+The twelfth, `ECPortfolioTerraformApplyEcsApplication`, follows the same rule:
 the console update of this statement waits until the discovery shows the
-attachment (see [Phase 6C-3 Spot foundation permissions](#phase-6c-3-spot-foundation-permissions)).
+attachment (see [Phase 6C-4 ECS application permissions](#phase-6c-4-ecs-application-permissions)).
 
 `OriginTlsPolicyVersionWrite`: rotating the `X-Origin-Verify` token ends with
 CloudFront sending the new token (step `OR4` in the runtime README). That needs
@@ -362,7 +365,7 @@ rendering of it from merged `main`.
 4. Verify read-only, as `ec-portfolio-access-admin`: the step 5 checks of the
    bootstrap, the reserved role reads (`iam:GetRole`, `iam:ListRolePolicies`,
    `iam:GetRolePolicy`, `iam:ListAttachedRolePolicies`), `iam:GetPolicy` and
-   `iam:ListPolicyVersions` on each of the 16 customer managed policies, and
+   `iam:ListPolicyVersions` on each of the 17 customer managed policies, and
    an AccessDenied from `iam:GetPolicy` on an AWS managed policy outside the
    list (for example `arn:aws:iam::aws:policy/ReadOnlyAccess`).
 5. Run the discovery again; its baseline must equal the previous one.
@@ -811,3 +814,320 @@ Each step is approved separately; any AccessDenied or unexpected plan is a STOP.
    `aws_ssoadmin_permission_set_inline_policy.plan` (6 statements added), then
    apply, convergence and a discovery.
 7. The Demo root: the Phase 6C-3 plan and apply.
+
+## Phase 6C-4 ECS application permissions
+
+Phase 6C-4 adds the ECS application layer to the Demo root: 7 resources
+(`aws_cloudwatch_log_group.ecs_api`, `aws_iam_role.ecs_task_execution` and its
+three inline policies `aws_iam_role_policy.ecs_task_execution_ecr_pull`,
+`aws_iam_role_policy.ecs_task_execution_runtime_secrets` and
+`aws_iam_role_policy.ecs_task_execution_logs`, `aws_ecs_task_definition.api`
+and `aws_ecs_service.api`). The service uses the DAEMON scheduling strategy
+with launch type EC2, no load balancer, no task role and
+`enable_execute_command = false`. Created while the Auto Scaling group is at
+desired 0, it starts no task and no instance.
+
+The names below are fixed by this change. The Demo root must use exactly these,
+or its plan and apply fail with an AccessDenied.
+
+| Resource | Name |
+| --- | --- |
+| Log group | `/ec-portfolio/demo/ecs/api` |
+| Task execution role | `ec-portfolio-demo-ecs-task-execution` |
+| Task definition family | `ec-portfolio-demo-api` |
+| Service | `ec-portfolio-demo-api` in cluster `ec-portfolio-demo` |
+
+| Permission set | Change | Where |
+| --- | --- | --- |
+| `ECPortfolioTerraformPlan` | 5 read-only statements for the post-apply convergence plan | `policy_plan_ecs_application.tf`, applied by this root |
+| `ECPortfolioTerraformApply` | new customer managed policy `ECPortfolioTerraformApplyEcsApplication`, attached as its twelfth | created and attached by an administrator from the document below; this root manages neither |
+| `ECPortfolioAccessAdmin` | `CustomerManagedPolicyRead` lists the new policy (16 → 17 ARNs) | the document above; no new write |
+
+The Apply inline policy and its eleven existing customer managed policies are
+not changed. The IAM quota "Managed policies per role" was confirmed in the
+Service Quotas console on 2026-09-29 at an applied account-level value of 20,
+so a twelfth policy fits.
+
+Both documents were derived from the API calls AWS provider 6.62 makes for
+these resources on create, read, update and delete, mapped to IAM actions
+through the AWS service reference (v1.4) and the API references. None comes
+from resource names alone. A provider upgrade, or new arguments on these
+resources (`wait_for_steady_state`, load balancers, service connect, a task
+role, `kms_key_id`, `deletion_protection_enabled`, `skip_destroy`), needs the
+same check again; a missing permission then fails closed with an AccessDenied.
+
+### `ECPortfolioTerraformApplyEcsApplication`
+
+Maintained by hand; this root does not manage it. The document below is the
+reviewed source.
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ManageExactEcsApiLogGroup",
+      "Effect": "Allow",
+      "Action": [
+        "logs:CreateLogGroup",
+        "logs:PutRetentionPolicy",
+        "logs:DeleteLogGroup",
+        "logs:ListTagsForResource",
+        "logs:TagResource",
+        "logs:UntagResource"
+      ],
+      "Resource": [
+        "arn:aws:logs:ap-northeast-1:<ACCOUNT_ID>:log-group:/ec-portfolio/demo/ecs/api",
+        "arn:aws:logs:ap-northeast-1:<ACCOUNT_ID>:log-group:/ec-portfolio/demo/ecs/api:*"
+      ]
+    },
+    {
+      "Sid": "DescribeLogGroups",
+      "Effect": "Allow",
+      "Action": [
+        "logs:DescribeLogGroups"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "ManageExactEcsTaskExecutionRole",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateRole",
+        "iam:GetRole",
+        "iam:UpdateRoleDescription",
+        "iam:UpdateAssumeRolePolicy",
+        "iam:DeleteRole",
+        "iam:TagRole",
+        "iam:UntagRole",
+        "iam:ListRolePolicies",
+        "iam:ListAttachedRolePolicies",
+        "iam:ListInstanceProfilesForRole",
+        "iam:PutRolePolicy",
+        "iam:GetRolePolicy",
+        "iam:DeleteRolePolicy"
+      ],
+      "Resource": "arn:aws:iam::<ACCOUNT_ID>:role/ec-portfolio-demo-ecs-task-execution"
+    },
+    {
+      "Sid": "PassEcsTaskExecutionRoleToEcsTasks",
+      "Effect": "Allow",
+      "Action": [
+        "iam:PassRole"
+      ],
+      "Resource": "arn:aws:iam::<ACCOUNT_ID>:role/ec-portfolio-demo-ecs-task-execution",
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": "ecs-tasks.amazonaws.com"
+        }
+      }
+    },
+    {
+      "Sid": "ManageDemoApiTaskDefinitionFamily",
+      "Effect": "Allow",
+      "Action": [
+        "ecs:RegisterTaskDefinition",
+        "ecs:TagResource",
+        "ecs:UntagResource"
+      ],
+      "Resource": "arn:aws:ecs:ap-northeast-1:<ACCOUNT_ID>:task-definition/ec-portfolio-demo-api:*"
+    },
+    {
+      "Sid": "DescribeTaskDefinitions",
+      "Effect": "Allow",
+      "Action": [
+        "ecs:DescribeTaskDefinition"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "DeregisterTaskDefinitions",
+      "Effect": "Allow",
+      "Action": [
+        "ecs:DeregisterTaskDefinition"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "ManageExactDemoApiService",
+      "Effect": "Allow",
+      "Action": [
+        "ecs:CreateService",
+        "ecs:DescribeServices",
+        "ecs:UpdateService",
+        "ecs:DeleteService",
+        "ecs:TagResource",
+        "ecs:UntagResource"
+      ],
+      "Resource": "arn:aws:ecs:ap-northeast-1:<ACCOUNT_ID>:service/ec-portfolio-demo/ec-portfolio-demo-api"
+    }
+  ]
+}
+```
+
+`scripts/policy-gate.sh canonical` of this block as written (placeholder
+included): `b2089da66621d1693e6a4ea7b53d4fb2181e98f1ab15abc5811ee432edc056ce`.
+8 statements, 30 actions, 1,929 of the 6,144 non-whitespace characters a
+managed policy allows. By the service reference access levels: write 12,
+tagging 6, permissions management 3, read 4, list 5.
+
+- **Exact ARNs.** The log group, the role and the service. The log group is
+  named in both of its forms, `log-group:NAME` and `log-group:NAME:*`, because
+  log group actions can be evaluated against either; the second form reaches
+  only that group's own log streams.
+- **Pattern.** Only the task definition: `task-definition/ec-portfolio-demo-api:*`.
+  Every registration creates a new revision whose number AWS assigns; the
+  family is fixed.
+- **`Resource "*"`.** Only the three actions the service reference lists with
+  no resource type:
+  - `logs:DescribeLogGroups` (list) and `ecs:DescribeTaskDefinition` (read);
+  - `ecs:DeregisterTaskDefinition` (write), the only write on `*`. Terraform
+    calls it when a task definition revision is destroyed or replaced, and AWS
+    offers no resource-level control for it. Setting `skip_destroy = true` on
+    the task definition would remove the need for it, at the cost of leaving
+    old revisions ACTIVE; that choice belongs to the Phase 6C-4 Demo change.
+- **`iam:PassRole`.** Only the task execution role, and only to
+  `ecs-tasks.amazonaws.com`. `RegisterTaskDefinition` passes it as
+  `executionRoleArn`. `CreateService` and `UpdateService` also list
+  `iam:PassRole` in the service reference; with no `role` and no load
+  balancer, the only role this configuration can pass is the same one.
+- **Tags on create.** `ecs:TagResource` for `RegisterTaskDefinition` and
+  `CreateService`, `iam:TagRole` for `CreateRole`, and `logs:TagResource` for
+  `CreateLogGroup`. The CreateLogGroup reference accepts either
+  `logs:TagResource` or the legacy `logs:TagLogGroup`; only the former is
+  granted.
+- **No other condition.** `ecs:enable-execute-command` and `ecs:privileged`
+  exist as condition keys, but how they evaluate when a request omits the
+  field is not documented in a form this change can cite, and a wrong guess
+  in a hand-maintained policy would deny a correct apply. No execute command,
+  no privileged container and no root container are enforced by the Demo root
+  in Phase 6C-4 instead.
+- **Not reached, not granted** (provider source):
+  - `ecs:ListServiceDeployments`, `ecs:DescribeServiceDeployments` and
+    `ecs:StopServiceDeployment`: only with `wait_for_steady_state = true`;
+  - `ecs:DeleteTaskDefinitions`: never called;
+  - `ecs:ListTagsForResource` and `iam:ListRoleTags`: the reads return tags;
+  - `iam:UpdateRole`: only for `max_session_duration` or a boundary;
+  - `iam:RemoveRoleFromInstanceProfile`: the role has no instance profile;
+  - `logs:DeleteRetentionPolicy`, `logs:PutLogGroupDeletionProtection`,
+    `logs:AssociateKmsKey` and `logs:DisassociateKmsKey`: those arguments are
+    not set.
+- **Deliberately absent:**
+  - `iam:CreateServiceLinkedRole`. `AWSServiceRoleForECS` exists since
+    2026-09-28 (Phase 6C-3), and `CreateService` uses it;
+  - `ecs:RunTask`, `ecs:StartTask` and `ecs:ExecuteCommand`;
+  - every cluster, capacity provider and container instance write;
+  - every Auto Scaling, EC2, security group, network, CloudFront, RDS,
+    Route 53, SSM, KMS and ECR write.
+- **Reused, not repeated.** Nothing: no statement of the Apply inline policy or
+  of the other eleven policies covers these resources. The Spot foundation
+  policy's ECS statements stop at the cluster and the capacity provider.
+
+### Plan reads (`policy_plan_ecs_application.tf`)
+
+Only what the refresh of the new resources reads and the existing statements
+do not already allow:
+- `ecs:DescribeTaskDefinition` on `*` (no resource type);
+- `ecs:DescribeServices` on the exact service;
+- `logs:DescribeLogGroups` on `*` (no resource type);
+- `logs:ListTagsForResource` on the exact log group. The log group read sets no
+  tags, so the tag interceptor lists them;
+- `iam:ListRolePolicies` and `iam:ListAttachedRolePolicies` on the task
+  execution role. `iam:GetRole` and `iam:GetRolePolicy` are already allowed on
+  `*` by the baseline.
+
+No write, tagging or permissions management action, by the service reference
+access levels. Rendered offline with the provider, the Plan inline policy grows
+from 37 to 42 statements and from 7,384 to 8,251 of the 10,240 non-whitespace
+characters; every existing statement renders unchanged. The canonical SHA-256
+of the addition is `adcae7ca88333f5402c81c03805ec8616da5388ba74a67a4503991b63ba3f925`.
+
+### Task execution role (Demo root, Phase 6C-4)
+
+Not an access-root document. These are the runtime permissions of
+`aws_iam_role.ecs_task_execution`, which the Demo root writes as its three
+inline policies. They are reviewed here so that the Terraform identity above
+and the identity the ECS agent uses at run time are not confused.
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "GetEcrAuthorizationToken",
+      "Effect": "Allow",
+      "Action": [
+        "ecr:GetAuthorizationToken"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "PullDemoApiImage",
+      "Effect": "Allow",
+      "Action": [
+        "ecr:BatchCheckLayerAvailability",
+        "ecr:GetDownloadUrlForLayer",
+        "ecr:BatchGetImage"
+      ],
+      "Resource": "arn:aws:ecr:ap-northeast-1:<ACCOUNT_ID>:repository/ec-portfolio-demo-api"
+    },
+    {
+      "Sid": "ReadApiRuntimeSecrets",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:GetParameters"
+      ],
+      "Resource": [
+        "arn:aws:ssm:ap-northeast-1:<ACCOUNT_ID>:parameter/ec-portfolio/demo/db/master-password",
+        "arn:aws:ssm:ap-northeast-1:<ACCOUNT_ID>:parameter/ec-portfolio/demo/app/auth-jwt-secret"
+      ]
+    },
+    {
+      "Sid": "WriteApiTaskLogs",
+      "Effect": "Allow",
+      "Action": [
+        "logs:CreateLogStream",
+        "logs:PutLogEvents"
+      ],
+      "Resource": "arn:aws:logs:ap-northeast-1:<ACCOUNT_ID>:log-group:/ec-portfolio/demo/ecs/api:log-stream:*"
+    }
+  ]
+}
+```
+
+Canonical `77dcb0cccd66dd1b32d4c59bd4a8ebbc1752c957f7b7f90c758aa2bcb9da3374`,
+4 statements, 7 actions.
+
+- `ecr:GetAuthorizationToken` has no resource type; the pull actions are on
+  the one repository.
+- `ssm:GetParameters`, the action the ECS agent calls, on the database password
+  and the JWT secret only. No `kms:Decrypt`: both parameters use the AWS
+  managed key `alias/aws/ssm`, and the ECS guide requires `kms:Decrypt` only
+  for a customer managed key. The On-Demand host already reads the same two
+  parameters with no KMS permission.
+- `logs:CreateLogStream` and `logs:PutLogEvents` on the log group's streams
+  only.
+- Trust: `ecs-tasks.amazonaws.com`. No task role: the API makes no AWS call.
+- Prerequisite for the Phase 6C-4 Demo change, found during this review: the
+  ECS guide requires `ECS_ENABLE_AWSLOGS_EXECUTIONROLE_OVERRIDE=true` in the
+  agent configuration for tasks on the EC2 launch type to use Parameter Store
+  secrets. `bootstrap-spot-host.sh` does not write it yet.
+
+### Order after merge
+
+Each step is approved separately; any AccessDenied or unexpected plan is a STOP.
+
+1. An administrator renders the JSON above from merged `main`, checks its
+   canonical SHA-256 against the one recorded here, fills `<ACCOUNT_ID>` and
+   creates the policy. AccessAdmin has no `iam:CreatePolicy`.
+2. The administrator attaches it to `ECPortfolioTerraformApply` as a customer
+   managed policy reference in the Identity Center console and provisions. The
+   Apply reserved role then carries 12 customer managed policies.
+3. Discovery: Apply lists the 12 references and nothing else changed.
+4. `ECPortfolioAccessAdmin` update from merged `main`, as in
+   [Changing the `ECPortfolioAccessAdmin` policy](#changing-the-ecportfolioaccessadmin-policy),
+   now with 17 customer managed policies.
+5. This root: a plan that changes only
+   `aws_ssoadmin_permission_set_inline_policy.plan` (5 statements added), then
+   apply, convergence and a discovery.
+6. The Demo root: the Phase 6C-4 plan and apply.
