@@ -1,0 +1,24 @@
+[Unit]
+Description=Finish a new ECS Spot host and report its launch lifecycle action (EC Portfolio Demo)
+# Runs after user data has finished, whatever ecs.service is ordered against on
+# this AMI. The pre-bootstrap inside user data only queues this unit, so
+# nothing in cloud-final ever waits for the ECS agent, its registration or the
+# API task.
+After=cloud-final.service ecs.service
+Wants=ecs.service
+# No [Install] section, on purpose. The launch lifecycle action this unit
+# reports exists only on the first boot; it is started once by the
+# pre-bootstrap, and a reboot does not run it again.
+
+[Service]
+Type=oneshot
+# No leading '-': a missing environment file must fail the unit rather than
+# run the post-bootstrap with nothing. The launch hook then times out into its
+# ABANDON default.
+EnvironmentFile=/etc/ec-portfolio/spot-post-bootstrap.env
+ExecStart=/opt/ec-portfolio/runtime/demo/bootstrap-spot-host.sh post
+# Bounded well inside the launch lifecycle hook's heartbeat. On timeout systemd
+# sends SIGTERM; the script's trap takes the host back out of the cluster and
+# reports ABANDON, and TimeoutStopSec leaves room for that report.
+TimeoutStartSec=1800s
+TimeoutStopSec=120s

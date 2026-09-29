@@ -27,6 +27,15 @@
 #
 # Nothing here associates the Elastic IP or touches CloudFront. Taking
 # production traffic is Phase 6C-5.
+#
+# Phase 6C-4a: this loader runs the bootstrap's pre phase only, and never waits
+# for the ECS agent. On the ECS-optimized AMI's packaging ecs.service is
+# ordered After=cloud-final.service, so the agent cannot come up while user
+# data is still running; waiting for it here would only time out. The pre phase
+# builds the host and queues ec-portfolio-spot-post-bootstrap.service, which
+# runs after cloud-final, proves the host and reports the lifecycle action.
+# The loader therefore reports ABANDON when the pre phase fails and nothing at
+# all when it succeeds: from then on the post unit owns the action.
 
 set -euo pipefail
 
@@ -53,13 +62,16 @@ readonly IMDS_TOKEN_TTL_SECONDS=300
 readonly AWS_TIMEOUT_SECONDS="5m"
 readonly TIMEOUT_KILL_AFTER_SECONDS="5s"
 
-# The bundle this host must carry. The four scripts are checked for presence and
-# made executable; the three data files are only checked and normalised. The
-# archive is assembled from file content rather than from files on disk, so
-# every entry arrives with mode 0000 and the modes have to be set here --
+# The bundle this host must carry. The scripts are checked for presence and
+# made executable; the data files are only checked and normalised. The archive
+# is assembled from file content rather than from files on disk, so every entry
+# arrives with mode 0000 and the modes have to be set here --
 # bootstrap-spot-host.sh refuses a bundle whose helpers are not executable.
-readonly BUNDLE_EXECUTABLES="bootstrap-spot-host.sh sync-origin-tls.sh renew-origin-cert.sh configure-origin.sh origin-smoke-check-ecs.sh"
-readonly BUNDLE_DATA_FILES="ec-portfolio-certbot-renew.service ec-portfolio-certbot-renew.timer bundle.sha256"
+# These two lists, spot_bundle_manifest_artifacts in runtime_artifacts.tf and
+# REQUIRED_BUNDLE_ARTIFACTS in bootstrap-spot-host.sh name the same files;
+# spot-runtime-bundle.test.sh fails when they disagree.
+readonly BUNDLE_EXECUTABLES="bootstrap-spot-host.sh sync-origin-tls.sh renew-origin-cert.sh configure-origin.sh origin-smoke-check-ecs.sh imds-guard.sh"
+readonly BUNDLE_DATA_FILES="ec-portfolio-certbot-renew.service ec-portfolio-certbot-renew.timer ec-portfolio-imds-guard.service ec-portfolio-spot-post-bootstrap.service bundle.sha256"
 
 instance_id=""
 
@@ -81,11 +93,13 @@ run_aws() {
         "$AWS_TIMEOUT_SECONDS" aws --region "$AWS_REGION_NAME" "$@"
 }
 
-# CONTINUE is the only thing that puts this instance InService. Everything else
-# -- an explicit ABANDON, a loader that died before it learned its own instance
-# ID, a host that never ran this file at all -- leaves the hook to time out and
-# apply its ABANDON default. The failure modes all converge on "not InService",
-# which is the property that matters.
+# The loader only ever reports ABANDON. CONTINUE -- the only thing that puts
+# this instance InService -- is reported by the post-bootstrap unit once the
+# host has proven itself. Everything else -- an explicit ABANDON, a loader that
+# died before it learned its own instance ID, a host that never ran this file
+# at all -- leaves the hook to time out and apply its ABANDON default. The
+# failure modes all converge on "not InService", which is the property that
+# matters.
 complete_lifecycle_action() {
     local result="$1"
 
@@ -103,15 +117,15 @@ complete_lifecycle_action() {
 }
 
 # The bootstrap's exit code is the useful signal; a failure to report it is not
-# allowed to replace it. A CONTINUE that cannot be delivered is reported and
-# then left alone: the hook times out into ABANDON, which is the safe direction.
+# allowed to replace it. A zero exit means the pre phase has queued the
+# post-bootstrap, which owns the lifecycle action from then on, so nothing is
+# reported here: a second reporter could only race it.
 cleanup() {
     local exit_code=$?
     trap - EXIT
 
     if [ "$exit_code" -eq 0 ]; then
-        complete_lifecycle_action CONTINUE ||
-            warn "The host is ready but CONTINUE could not be reported. The launch hook will time out and abandon this instance."
+        log "The lifecycle action is handed over to ec-portfolio-spot-post-bootstrap.service."
     else
         warn "The bootstrap failed with exit code $exit_code; abandoning this instance so the Auto Scaling group replaces it."
         complete_lifecycle_action ABANDON || true
@@ -215,14 +229,21 @@ normalise_extracted_bundle() {
 # refuses it when executed rather than sourced, and it is cleared here as well
 # so the refusal is never the thing standing between a boot and a redirected
 # restore. The Region is stated rather than left to the CLI to discover.
-run_bootstrap() {
-    log "Running the reviewed bootstrap for cluster $ECS_CLUSTER_NAME_VALUE."
+#
+# The pre phase also receives what the post phase needs to report the lifecycle
+# action -- this instance's ID and the group and hook names -- and writes them
+# to the post unit's environment file.
+run_bootstrap_pre_phase() {
+    log "Running the reviewed bootstrap pre phase for cluster $ECS_CLUSTER_NAME_VALUE."
     env -u SPOT_BOOTSTRAP_PREFIX \
         ECS_CLUSTER_NAME="$ECS_CLUSTER_NAME_VALUE" \
         ORIGIN_TLS_BUCKET="$ORIGIN_TLS_BUCKET_VALUE" \
+        AUTOSCALING_GROUP_NAME="$AUTOSCALING_GROUP_NAME" \
+        LIFECYCLE_HOOK_NAME="$LIFECYCLE_HOOK_NAME" \
+        INSTANCE_ID="$instance_id" \
         AWS_REGION="$AWS_REGION_NAME" \
         AWS_DEFAULT_REGION="$AWS_REGION_NAME" \
-        "$RUNTIME_DIRECTORY/bootstrap-spot-host.sh"
+        "$RUNTIME_DIRECTORY/bootstrap-spot-host.sh" pre
 }
 
 main() {
@@ -232,8 +253,8 @@ main() {
     verify_runtime_archive
     extract_runtime_bundle
     normalise_extracted_bundle
-    run_bootstrap
-    log "The bootstrap reported serving-ready."
+    run_bootstrap_pre_phase
+    log "The bootstrap pre phase completed; the post-bootstrap runs after user data."
 }
 
 main

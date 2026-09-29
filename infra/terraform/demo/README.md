@@ -553,7 +553,7 @@ Applied on 2026-09-28 (24 added) and converged on 2026-09-29: after a refresh-on
 
 `bootstrap-spot-host.sh` is larger than the 16 KiB EC2 raw user-data limit on its own, so the bundle cannot be embedded in the launch template. It is published to S3 instead and the launch template carries only a loader.
 
-Eight files are packed into one `tar.gz` by `data.archive_file.spot_runtime_bundle`: `bootstrap-spot-host.sh`, the six artifacts the bootstrap requires, and a `bundle.sha256` manifest generated from `filesha256` over the same reviewed files. The files are listed one by one rather than swept from `infra/runtime/demo/`, which also holds the standalone host's scripts and every test suite.
+Eleven files are packed into one `tar.gz` by `data.archive_file.spot_runtime_bundle`: `bootstrap-spot-host.sh`, the nine artifacts the bootstrap requires (three of them added in Phase 6C-4a, see below), and a `bundle.sha256` manifest generated from `filesha256` over the same reviewed files. The files are listed one by one rather than swept from `infra/runtime/demo/`, which also holds the standalone host's scripts and every test suite.
 
 The archive is written to `.terraform/ec-portfolio/` so building it never dirties the working tree, and uploaded to a stable key with the object **version** carrying the identity:
 
@@ -575,7 +575,7 @@ reviewed repository files
     -> launch template user_data       (pinned bucket + version ID + hash)
       -> archive verified on the host
         -> bundle.sha256 verified by bootstrap-spot-host.sh
-          -> the six required artifacts
+          -> the nine required artifacts
 ```
 
 ### Bundle rollback
@@ -588,13 +588,13 @@ Reverting the runtime files restores the previous archive hash, which produces a
 
 `bootstrap-spot-host.sh` already keeps a half-built host out of the cluster: it holds the ECS agent back and disables it again on any failure. What it cannot do is make the Auto Scaling group notice, and an EC2 health check will not either — the operating system is healthy on a host whose TLS restore failed.
 
-So the instance is held in `Pending:Wait` by an `autoscaling:EC2_INSTANCE_LAUNCHING` hook while the bootstrap runs, and the loader reports the outcome with `CompleteLifecycleAction`: `CONTINUE` on success, `ABANDON` on any failure. `default_result` is `ABANDON` because the failure that has to be survived is the one where nothing reports at all — a loader that died before it read its own instance ID, or a host that never ran user data. Those must not reach `InService` by timing out.
+So the instance is held in `Pending:Wait` by an `autoscaling:EC2_INSTANCE_LAUNCHING` hook while the bootstrap runs, and the outcome is reported with `CompleteLifecycleAction`. Since Phase 6C-4a there is exactly one reporter at a time: the loader reports `ABANDON` if the pre phase fails, and once the pre phase has queued `ec-portfolio-spot-post-bootstrap.service` that unit reports `CONTINUE`, or `ABANDON` on any failure. `default_result` is `ABANDON` because the failure that has to be survived is the one where nothing reports at all — a loader that died before it read its own instance ID, or a host that never ran user data. Those must not reach `InService` by timing out.
 
-`heartbeat_timeout` is 1800 seconds. The bootstrap's own configured waits already total roughly 1200 (a ten-minute certbot install budget, then 300 seconds each for cluster registration and API readiness), and several steps have no script-level bound at all. It is not a measured figure and should be revisited against the first real launch.
+`heartbeat_timeout` is 3600 seconds (1800 in Phase 6C-3). It is sized from configured bounds, not measured: about 12 minutes of pre phase at worst (the ten-minute certbot install budget plus the rest), then the post unit's `TimeoutStartSec=1800s` and `TimeoutStopSec=120s`, about 44 minutes in all. `bootstrap-spot-host.test.sh` reads the unit file and this resource and fails if the sum stops fitting.
 
 `health_check_grace_period` is a different clock and is deliberately short by comparison: it starts when an instance reaches `InService`, which for this group is after `CONTINUE`, so by then the host has already restored its TLS state, joined the cluster and passed an HTTPS smoke check. It only has to cover EC2 status checks settling.
 
-**Open item for Phase 6C-4.** Whether ECS places a task on a container instance whose EC2 instance is still in `Pending:Wait` is not stated directly in AWS documentation. The indirect evidence is strong — the ECS agent gates registration on Auto Scaling state only when `ECS_WARM_POOLS_CHECK` is `true` (it defaults to `false` and the bootstrap does not set it), and even then it waits for the IMDS target lifecycle state to be `InService`, which it already is during a launch hook. If the assumption is wrong the result is a bounded failure, not a hang: `wait_for_api_readiness` gives up after 300 seconds, the loader abandons, and Auto Scaling rate-limits launches when lifecycle hooks fail consistently. It must still be confirmed against the first real launch.
+**Open item for Phase 6C-4.** Whether ECS places a task on a container instance whose EC2 instance is still in `Pending:Wait` is not stated directly in AWS documentation. The indirect evidence is strong — the ECS agent gates registration on Auto Scaling state only when `ECS_WARM_POOLS_CHECK` is `true` (it defaults to `false` and the bootstrap does not set it), and even then it waits for the IMDS target lifecycle state to be `InService`, which it already is during a launch hook. If the assumption is wrong the result is a bounded failure, not a hang: `wait_for_api_readiness` gives up after 300 seconds, the post-bootstrap abandons, and Auto Scaling rate-limits launches when lifecycle hooks fail consistently. It must still be confirmed against the first real launch.
 
 ### Spot instance role
 
@@ -642,6 +642,59 @@ infra/runtime/demo/bootstrap-spot-host.test.sh
 ```
 
 The bundle contract can also be exercised end to end without AWS: build the archive, extract it, apply the loader's `chmod`, then source the extracted `bootstrap-spot-host.sh` and call `resolve_bundle` and `verify_bundle_checksums`. Those are the host's own verification functions, so a pass means the Terraform-generated manifest satisfies the Phase 6C-2 contract rather than merely resembling it.
+
+## Phase 6C-4a Spot host bootstrap hardening
+
+Code only; not applied. Two problems are fixed before any Spot host is launched.
+
+**The bootstrap no longer waits for the ECS agent from inside user data.** The Amazon Linux ECS AMI packaging of `ecs.service` (`amazon-linux-ami-integrated`) carries `After=cloud-final.service`. On such an AMI an agent started from user data cannot come up until user data has finished, so the Phase 6C-3 bootstrap — which started the agent and then waited for registration and API readiness inside user data — would time out on every launch and abandon the host. Whether the pinned AMI carries that ordering was not verified against a live instance; the structure below is correct either way.
+
+| Phase | Runs in | Does | Reports |
+| --- | --- | --- | --- |
+| pre | user data, started by the loader | bundle check, TLS restore, certbot, IMDS guard (installed and proven), `ecs.config`, `systemctl enable ecs`, `systemctl start --no-block ec-portfolio-spot-post-bootstrap.service` | nothing; the loader reports `ABANDON` if pre fails |
+| post | `ec-portfolio-spot-post-bootstrap.service`, `After=cloud-final.service ecs.service`, `Wants=ecs.service` | cluster registration, API readiness, HTTPS origin and smoke, renewal timer | `CONTINUE`, or `ABANDON` on any failure or on its start timeout (SIGTERM is trapped) |
+
+```
+cloud-final.service ── loader ── pre phase ──(start --no-block)──┐
+                                                                 ▼
+ec-portfolio-imds-guard.service ──Before= / RequiredBy=──▶ ecs.service
+                                                                 │
+                                   After=cloud-final.service ecs.service
+                                                                 ▼
+                               ec-portfolio-spot-post-bootstrap.service ──▶ CONTINUE | ABANDON
+```
+
+The post unit has no `[Install]` section: the launch lifecycle action exists only on the first boot, so a reboot does not run it again.
+
+**Host-network containers cannot reach IMDS.** The launch template's hop limit of 1 does not apply to host network mode. `imds-guard.sh` puts one jump at the top of the filter `OUTPUT` chain for `169.254.169.254/32` into `EC_PORTFOLIO_IMDS`, which returns for UID 0 and rejects every other UID. `ec-portfolio-imds-guard.service` re-applies it at every boot, `Before=ecs.service` and `RequiredBy=ecs.service`, so the agent does not start without it. On first boot the pre phase also proves the effect: root obtains an IMDSv2 token, UIDs 10001 (API) and 999 (Valkey) get a refused connection. A host-network container running as UID 0 is not covered; the Phase 6C-4 task definition must not run any container as root. The runtime README has the full model.
+
+No security group, IAM policy, instance role or chain policy changes.
+
+### Expected plan delta when this is applied
+
+| Resource | Action | Why |
+| --- | --- | --- |
+| `aws_s3_object.spot_runtime_bundle` | update in-place | new `source_hash` (bootstrap, three new artifacts, manifest); a new object version |
+| `aws_launch_template.ecs_spot` | update in-place | `user_data` pins the new version ID and SHA256 and carries the new loader; this creates a **new launch template version**, not a replacement |
+| `aws_autoscaling_group.ecs_spot` | update in-place | `launch_template.version` follows `latest_version` |
+| `aws_autoscaling_lifecycle_hook.ecs_spot_launching` | update in-place | `heartbeat_timeout` 1800 → 3600 |
+
+Expected `0 to add, 4 to change, 0 to destroy`, with output changes to `spot_runtime_bundle_sha256`, `spot_runtime_bundle_version_id` and `ecs_spot_launch_template_version`. Anything else — in particular any change to the On-Demand host, RDS, CloudFront, Route 53 or SSM — is a blocker.
+
+The apply launches no instance: `desired_capacity = 0` is unchanged and still managed by Terraform, managed scaling is `DISABLED`, and the group has no `instance_refresh` block, so a new launch template version only affects instances launched later. The permissions for these four update calls (`s3:PutObject` on the bundle key, `ec2:CreateLaunchTemplateVersion`, `autoscaling:UpdateAutoScalingGroup`, `autoscaling:PutLifecycleHook`) are already in `ECPortfolioTerraformApplySpotFoundation`.
+
+### Local validation without AWS credentials
+
+```
+terraform fmt -check -recursive
+terraform validate
+infra/runtime/demo/bootstrap-spot-host.test.sh
+infra/runtime/demo/imds-guard.test.sh
+infra/runtime/demo/spot-user-data-loader.test.sh
+infra/runtime/demo/spot-runtime-bundle.test.sh
+```
+
+`spot-runtime-bundle.test.sh` checks that `spot_bundle_manifest_artifacts`, the loader's mode lists and `REQUIRED_BUNDLE_ARTIFACTS` name the same files, then builds a bundle from the repository and runs the bootstrap's own `resolve_bundle` and `verify_bundle_checksums` on it. `spot-user-data-loader.test.sh` renders the template, runs it against recording fakes, and checks the rendered upper bound against the 16 KiB user-data limit.
 
 ## Local validation
 

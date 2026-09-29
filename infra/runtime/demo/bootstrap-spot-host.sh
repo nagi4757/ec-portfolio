@@ -1,6 +1,28 @@
 #!/usr/bin/env bash
 
-# Brings a replacement ECS EC2 Spot host from first boot to serving-ready.
+# Brings a replacement ECS EC2 Spot host from first boot to serving-ready, in
+# two phases.
+#
+#   pre   runs inside user data (cloud-final), started by the launch template's
+#         loader. It builds the host -- TLS restore, certbot, the IMDS guard,
+#         the ECS agent configuration -- and then hands over: it enables the
+#         agent for later boots and queues ec-portfolio-spot-post-bootstrap
+#         without waiting for either. It never starts the agent synchronously,
+#         never polls for registration and never waits for the API task. On the
+#         ECS-optimized AMI's packaging, ecs.service is ordered
+#         After=cloud-final.service, so an agent started from user data cannot
+#         come up until user data has finished; waiting for it from here would
+#         only ever time out. The split makes the bootstrap correct whether or
+#         not that ordering is present. A pre failure is reported as ABANDON by
+#         the loader, which still owns the lifecycle action at that point.
+#
+#   post  runs from ec-portfolio-spot-post-bootstrap.service, ordered after
+#         cloud-final.service and ecs.service. It proves the host -- cluster
+#         registration, API readiness, the HTTPS origin and its smoke check --
+#         enables certificate renewal and reports CONTINUE. Once the pre phase
+#         has queued it, the lifecycle action belongs to this phase: any
+#         failure, including systemd's start timeout, takes the host back out
+#         of the cluster and reports ABANDON.
 #
 # The ordering is the contract. A replacement host must restore the origin TLS
 # state that Phase 6B stored in S3 rather than ask Let's Encrypt for a new
@@ -10,10 +32,10 @@
 # certificate. A restore that fails ends the run.
 #
 # The ECS agent is held back for the same reason. If it registered at boot, ECS
-# would place the API task on a host that has no certificate, no Nginx and no
-# renewal timer, and CloudFront would be pointed at it the moment the EIP moved.
-# The agent is disabled first and is only enabled after every gate below has
-# passed, so a half-built host never joins the cluster.
+# would place the API task on a host that has no certificate, no Nginx, no IMDS
+# guard and no renewal timer. The agent is disabled first and is only enabled
+# after every pre gate has passed, so a half-built host never joins the
+# cluster.
 #
 # This script does not associate the Elastic IP. Taking production traffic is a
 # separate, deliberate step: a host proves itself here and is promoted later.
@@ -67,15 +89,27 @@ readonly SERVING_READY_MARKER="$MARKER_DIRECTORY/spot-serving-ready"
 
 readonly SYNC_TARGET="${BOOTSTRAP_PREFIX}/usr/local/sbin/ec-portfolio-sync-origin-tls"
 readonly RENEW_TARGET="${BOOTSTRAP_PREFIX}/usr/local/sbin/ec-portfolio-renew-origin-cert"
+readonly IMDS_GUARD_TARGET="${BOOTSTRAP_PREFIX}/usr/local/sbin/ec-portfolio-imds-guard"
 readonly ENV_DIRECTORY="${BOOTSTRAP_PREFIX}/etc/ec-portfolio"
 readonly ENV_TARGET="$ENV_DIRECTORY/origin-tls.env"
-readonly RENEW_UNIT_TARGET="${BOOTSTRAP_PREFIX}/etc/systemd/system/ec-portfolio-certbot-renew.service"
-readonly RENEW_TIMER_TARGET="${BOOTSTRAP_PREFIX}/etc/systemd/system/ec-portfolio-certbot-renew.timer"
+readonly POST_BOOTSTRAP_ENV_FILE="$ENV_DIRECTORY/spot-post-bootstrap.env"
+readonly SYSTEMD_UNIT_DIRECTORY="${BOOTSTRAP_PREFIX}/etc/systemd/system"
+readonly RENEW_UNIT_TARGET="$SYSTEMD_UNIT_DIRECTORY/ec-portfolio-certbot-renew.service"
+readonly RENEW_TIMER_TARGET="$SYSTEMD_UNIT_DIRECTORY/ec-portfolio-certbot-renew.timer"
+readonly IMDS_GUARD_UNIT="ec-portfolio-imds-guard.service"
+readonly IMDS_GUARD_UNIT_TARGET="$SYSTEMD_UNIT_DIRECTORY/$IMDS_GUARD_UNIT"
+readonly POST_BOOTSTRAP_UNIT="ec-portfolio-spot-post-bootstrap.service"
+readonly POST_BOOTSTRAP_UNIT_TARGET="$SYSTEMD_UNIT_DIRECTORY/$POST_BOOTSTRAP_UNIT"
 
 # The runtime bundle this host must carry. Checked as a set before any checksum
 # is verified: sha256sum --check only validates the entries a manifest happens
 # to list, so a manifest that simply omits a file would pass while the file it
 # should have covered is whatever was delivered.
+#
+# The same list lives in two more places: spot_bundle_manifest_artifacts in
+# infra/terraform/demo/runtime_artifacts.tf, which builds the archive, and the
+# loader in templates/ecs-spot-user-data.sh.tftpl, which sets file modes after
+# extraction. spot-runtime-bundle.test.sh fails when the three disagree.
 readonly REQUIRED_BUNDLE_ARTIFACTS=(
     "sync-origin-tls.sh"
     "renew-origin-cert.sh"
@@ -83,6 +117,9 @@ readonly REQUIRED_BUNDLE_ARTIFACTS=(
     "origin-smoke-check-ecs.sh"
     "ec-portfolio-certbot-renew.service"
     "ec-portfolio-certbot-renew.timer"
+    "imds-guard.sh"
+    "ec-portfolio-imds-guard.service"
+    "ec-portfolio-spot-post-bootstrap.service"
 )
 readonly BUNDLE_MANIFEST_NAME="bundle.sha256"
 
@@ -134,16 +171,23 @@ readonly HELPER_SEAM_ENV=(
 
 readonly DNF_TIMEOUT_SECONDS="10m"
 readonly SYSTEMCTL_TIMEOUT_SECONDS="30s"
+readonly AWS_TIMEOUT_SECONDS="5m"
+readonly IMDS_GUARD_TIMEOUT_SECONDS="60s"
 readonly TIMEOUT_KILL_AFTER_SECONDS="5s"
 
-# Bounded waits. A replacement that cannot reach these states is a failure to
-# report, not something to sit on: the ASG will try again with a new instance.
+# Bounded waits, in the post phase only. A replacement that cannot reach these
+# states is a failure to report, not something to sit on: the ASG will try
+# again with a new instance.
 readonly REGISTRATION_ATTEMPTS="${SPOT_REGISTRATION_ATTEMPTS:-60}"
 readonly REGISTRATION_INTERVAL_SECONDS="${SPOT_REGISTRATION_INTERVAL_SECONDS:-5}"
 readonly READINESS_ATTEMPTS="${SPOT_READINESS_ATTEMPTS:-60}"
 readonly READINESS_INTERVAL_SECONDS="${SPOT_READINESS_INTERVAL_SECONDS:-5}"
 
 script_directory=""
+
+# pre | post, set by main() or by the suite. Decides who reports a failure: the
+# loader for pre, this script for post.
+bootstrap_mode=""
 
 # Cleanup state. Each flag is raised *before* the command that could create the
 # side effect it describes, not after it succeeds: `systemctl enable --now` can
@@ -154,6 +198,7 @@ script_directory=""
 # active and the bootstrap's own disable can fail halfway.
 ecs_agent_may_be_active="false"
 renew_timer_may_be_enabled="false"
+post_bootstrap_may_be_queued="false"
 bootstrap_committed="false"
 
 log() {
@@ -194,6 +239,28 @@ run_aws_child() {
         "$@"
 }
 
+# CompleteLifecycleAction carries both outcomes. Called only by the post phase:
+# until the pre phase queues the post unit, the loader owns the action.
+#
+# The cleanup can reach this before validate_inputs has run, so the identifiers
+# are checked here as well; with any of them missing or malformed nothing is
+# sent, and the hook's ABANDON default decides instead.
+report_lifecycle_action() {
+    local result="$1"
+    [[ "${AUTOSCALING_GROUP_NAME:-}" =~ ^[A-Za-z0-9_.-]{1,255}$ &&
+        "${LIFECYCLE_HOOK_NAME:-}" =~ ^[A-Za-z0-9_.-]{1,255}$ &&
+        "${INSTANCE_ID:-}" =~ ^i-[0-9a-f]{8,17}$ ]] || return 1
+    log "Reporting $result to the launch lifecycle hook."
+    run_aws_child AWS_PAGER="" \
+        timeout --signal=TERM --kill-after="$TIMEOUT_KILL_AFTER_SECONDS" "$AWS_TIMEOUT_SECONDS" \
+        aws autoscaling complete-lifecycle-action \
+        --region "$EXPECTED_AWS_REGION" \
+        --auto-scaling-group-name "$AUTOSCALING_GROUP_NAME" \
+        --lifecycle-hook-name "$LIFECYCLE_HOOK_NAME" \
+        --instance-id "$INSTANCE_ID" \
+        --lifecycle-action-result "$result" >/dev/null
+}
+
 # A failure anywhere before the commit point must leave this host out of the
 # cluster. Without this the agent would keep running after a failed
 # registration, readiness or smoke gate, and ECS would place work on a host that
@@ -202,15 +269,25 @@ run_aws_child() {
 # Cleanup is best effort and must not change the exit code: the reason the
 # bootstrap failed is more useful than a failure to tidy up after it.
 #
-# This does not by itself cause the instance to be replaced. An unregistered
-# host simply receives no work. Making the Auto Scaling group notice and replace
-# it needs a lifecycle hook or a health check, which is Phase 6C-3.
+# In the post phase the cleanup also reports ABANDON, because nothing else will
+# before the hook's heartbeat runs out. The same path runs when systemd stops
+# the unit at its start timeout: the TERM trap below turns the signal into a
+# non-zero exit, so a hung post-bootstrap is abandoned, not left waiting.
 cleanup() {
     local exit_code=$?
+    # Captured first, then the signals ignored, and only then the EXIT trap
+    # cleared, for the reason deploy-api.sh gives: a second TERM must not cut
+    # the cleanup in half.
+    trap '' TERM INT
     trap - EXIT
 
     if (( exit_code != 0 )) && [[ "$bootstrap_committed" != "true" ]]; then
         rm -f "$SERVING_READY_MARKER" 2>/dev/null || true
+        if [[ "$post_bootstrap_may_be_queued" == "true" ]]; then
+            printf '[spot-bootstrap] %s\n' \
+                "Bootstrap failed after the post-bootstrap was queued; cancelling it." >&2
+            run_systemctl stop --no-block "$POST_BOOTSTRAP_UNIT" >/dev/null 2>&1 || true
+        fi
         if [[ "$renew_timer_may_be_enabled" == "true" ]]; then
             printf '[spot-bootstrap] %s\n' \
                 "Bootstrap failed after the renewal timer was touched; disabling it." >&2
@@ -221,11 +298,22 @@ cleanup() {
                 "Bootstrap failed after the ECS agent was touched; taking the host back out of the cluster." >&2
             run_systemctl disable --now ecs >/dev/null 2>&1 || true
         fi
+        if [[ "$bootstrap_mode" == "post" ]]; then
+            report_lifecycle_action ABANDON >/dev/null 2>&1 ||
+                printf '[spot-bootstrap] %s\n' \
+                    "ABANDON could not be reported; the launch hook will time out into its ABANDON default." >&2
+        fi
     fi
 
     exit "$exit_code"
 }
 
+# Bash runs the EXIT trap when an untrapped SIGTERM ends the shell, but the
+# status cleanup() then observes is 0, so it would take the success path. The
+# conventional 128+signal exit makes the failure path run on a signal as well --
+# which is how systemd's start timeout on the post unit becomes an ABANDON.
+trap 'exit 143' TERM
+trap 'exit 130' INT
 trap cleanup EXIT
 
 validate_platform() {
@@ -237,13 +325,17 @@ validate_platform() {
         fail "Amazon Linux 2023 is required."
 
     local command_name
-    for command_name in aws curl dnf grep install mktemp rm sha256sum ss systemctl timeout; do
+    for command_name in aws curl dnf grep install iptables mktemp rm setpriv sha256sum ss systemctl timeout; do
         require_command "$command_name"
     done
 }
 
+# Both phases take the same inputs. The pre phase receives them from the loader
+# and writes them to the post unit's environment file; the post phase receives
+# them back from systemd. Each is checked where it is used, not trusted because
+# the other phase checked it.
 validate_inputs() {
-    (( $# == 0 )) || fail "This script does not accept arguments."
+    (( $# == 0 )) || fail "Inputs are passed through the environment, not as arguments."
 
     [[ -n "${ECS_CLUSTER_NAME:-}" ]] ||
         fail "Required environment variable is missing: ECS_CLUSTER_NAME"
@@ -254,6 +346,24 @@ validate_inputs() {
         fail "Required environment variable is missing: ORIGIN_TLS_BUCKET"
     [[ "$ORIGIN_TLS_BUCKET" =~ ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$ ]] ||
         fail "ORIGIN_TLS_BUCKET is not a valid bucket name."
+
+    # What the post phase needs to report the launch lifecycle action. The
+    # names are the fixed Terraform locals the loader carries; the instance ID
+    # is the loader's own, read from IMDSv2.
+    [[ -n "${AUTOSCALING_GROUP_NAME:-}" ]] ||
+        fail "Required environment variable is missing: AUTOSCALING_GROUP_NAME"
+    [[ "$AUTOSCALING_GROUP_NAME" =~ ^[A-Za-z0-9_.-]{1,255}$ ]] ||
+        fail "AUTOSCALING_GROUP_NAME is not a valid Auto Scaling group name."
+
+    [[ -n "${LIFECYCLE_HOOK_NAME:-}" ]] ||
+        fail "Required environment variable is missing: LIFECYCLE_HOOK_NAME"
+    [[ "$LIFECYCLE_HOOK_NAME" =~ ^[A-Za-z0-9_.-]{1,255}$ ]] ||
+        fail "LIFECYCLE_HOOK_NAME is not a valid lifecycle hook name."
+
+    [[ -n "${INSTANCE_ID:-}" ]] ||
+        fail "Required environment variable is missing: INSTANCE_ID"
+    [[ "$INSTANCE_ID" =~ ^i-[0-9a-f]{8,17}$ ]] ||
+        fail "INSTANCE_ID is not a valid EC2 instance ID."
 
     # Stated, not discovered. If a caller supplies one it must be the Region
     # this deployment lives in; anything else would point the AWS children at a
@@ -277,16 +387,13 @@ resolve_bundle() {
         fail "Cannot resolve the runtime bundle directory."
 
     local name
-    for name in sync-origin-tls.sh renew-origin-cert.sh configure-origin.sh \
-        origin-smoke-check-ecs.sh ec-portfolio-certbot-renew.service \
-        ec-portfolio-certbot-renew.timer; do
+    for name in "${REQUIRED_BUNDLE_ARTIFACTS[@]}"; do
         [[ -f "$script_directory/$name" ]] ||
             fail "The runtime bundle is missing $name. This script does not download artifacts."
-    done
-
-    for name in sync-origin-tls.sh renew-origin-cert.sh configure-origin.sh origin-smoke-check-ecs.sh; do
-        [[ -x "$script_directory/$name" ]] ||
-            fail "Bundled script is not executable: $name"
+        if [[ "$name" == *.sh ]]; then
+            [[ -x "$script_directory/$name" ]] ||
+                fail "Bundled script is not executable: $name"
+        fi
     done
 }
 
@@ -347,6 +454,10 @@ disable_ecs_agent() {
     # is therefore raised before the call, not after a later one -- otherwise a
     # bootstrap that failed right here would exit with the agent still enabled
     # and nothing in the cleanup willing to touch it.
+    #
+    # On an AMI whose ecs.service is ordered After=cloud-final.service, the
+    # agent's boot-time start job is still waiting at this point, and stopping
+    # the unit cancels it; nothing here waits for cloud-final.
     ecs_agent_may_be_active="true"
     run_systemctl disable --now ecs ||
         fail "Unable to disable the ECS agent before bootstrap."
@@ -398,8 +509,66 @@ install_renewal_runtime() {
     install -o root -g root -m 0644 \
         "$script_directory/ec-portfolio-certbot-renew.timer" "$RENEW_TIMER_TARGET" ||
         fail "Unable to install the renewal timer."
+}
 
+# Phase 6C-4a. The API and Valkey tasks run in host network mode, where the
+# launch template's IMDSv2 hop limit does not apply. imds-guard.sh keeps every
+# non-root UID away from 169.254.169.254; its unit is ordered before
+# ecs.service and required by it, so from here on the agent cannot start --
+# on this boot or any later one -- without the rules in place.
+install_imds_guard() {
+    log "Installing the container IMDS guard."
+    install -o root -g root -m 0755 "$script_directory/imds-guard.sh" "$IMDS_GUARD_TARGET" ||
+        fail "Unable to install the IMDS guard."
+    install -o root -g root -m 0644 \
+        "$script_directory/$IMDS_GUARD_UNIT" "$IMDS_GUARD_UNIT_TARGET" ||
+        fail "Unable to install the IMDS guard unit."
+}
+
+# The post phase's inputs, handed over through the unit's EnvironmentFile. None
+# of them is a secret; the file is root-only anyway, like the rest of /etc/ecs.
+install_post_bootstrap() {
+    log "Installing the post-bootstrap unit and its environment."
+    install -d -o root -g root -m 0755 "$ENV_DIRECTORY" ||
+        fail "Unable to create $ENV_DIRECTORY."
+
+    local staged
+    staged="$(mktemp)" || fail "Unable to stage the post-bootstrap environment."
+    {
+        printf 'ECS_CLUSTER_NAME=%s\n' "$ECS_CLUSTER_NAME"
+        printf 'ORIGIN_TLS_BUCKET=%s\n' "$ORIGIN_TLS_BUCKET"
+        printf 'AUTOSCALING_GROUP_NAME=%s\n' "$AUTOSCALING_GROUP_NAME"
+        printf 'LIFECYCLE_HOOK_NAME=%s\n' "$LIFECYCLE_HOOK_NAME"
+        printf 'INSTANCE_ID=%s\n' "$INSTANCE_ID"
+        printf 'AWS_REGION=%s\n' "$EXPECTED_AWS_REGION"
+    } >"$staged"
+    install -o root -g root -m 0600 "$staged" "$POST_BOOTSTRAP_ENV_FILE" ||
+        fail "Unable to install $POST_BOOTSTRAP_ENV_FILE."
+    rm -f "$staged"
+
+    install -o root -g root -m 0644 \
+        "$script_directory/$POST_BOOTSTRAP_UNIT" "$POST_BOOTSTRAP_UNIT_TARGET" ||
+        fail "Unable to install the post-bootstrap unit."
+}
+
+reload_systemd() {
     run_systemctl daemon-reload || fail "systemd daemon-reload failed or timed out."
+}
+
+# The guard's effect is proven rather than assumed: verify obtains an IMDSv2
+# token as root and checks that the container UIDs are refused. A guard that
+# installed but did not work fails the bootstrap before the ECS agent can be
+# started. The guard has no ordering against cloud-final, so starting it from
+# here does not wait on user data.
+#
+# Nothing in the cleanup undoes it: a guard left enabled on a failed host only
+# makes that host stricter, and keeps its agent down on the next boot.
+start_imds_guard() {
+    log "Enabling the IMDS guard and proving its effect."
+    run_systemctl enable --now "$IMDS_GUARD_UNIT" ||
+        fail "The IMDS guard could not be enabled."
+    run_with_timeout "$IMDS_GUARD_TIMEOUT_SECONDS" "$IMDS_GUARD_TARGET" verify ||
+        fail "The IMDS guard did not keep non-root UIDs away from IMDS."
 }
 
 # Deliberately separate from installing the units, and deliberately last. The
@@ -415,7 +584,7 @@ enable_renewal_timer() {
         fail "The renewal timer could not be enabled."
 }
 
-# Written only once every gate above has passed. Until this file exists the
+# Written only once every pre gate above has passed. Until this file exists the
 # agent has no cluster to join, which is what keeps a half-built host out of
 # the cluster.
 write_ecs_config() {
@@ -434,14 +603,25 @@ write_ecs_config() {
     rm -f "$staged"
 }
 
-start_ecs_agent() {
-    log "Enabling the ECS agent."
+# Enabled, not started. The agent comes back on later boots -- after the guard,
+# which ecs.service now requires -- and on this boot it is started by the post
+# unit's Wants=, not from inside user data.
+enable_ecs_agent() {
+    log "Enabling the ECS agent for later boots, without starting it from user data."
     # Already true: disable_ecs_agent raised it at the top of the run. Repeated
-    # here so the invariant is stated where the side effect is, and holds even
-    # if the step order changes. `enable --now` is two operations, and a
-    # non-zero exit can still leave the unit enabled for the next boot.
+    # here so the invariant is stated where the side effect is.
     ecs_agent_may_be_active="true"
-    run_systemctl enable --now ecs || fail "The ECS agent could not be started."
+    run_systemctl enable ecs || fail "The ECS agent could not be enabled."
+}
+
+# The hand-over. --no-block queues the job and returns: the unit is ordered
+# after cloud-final.service, and waiting for it here would wait for this very
+# script to exit. From here on the post phase owns the lifecycle action.
+queue_post_bootstrap() {
+    log "Queueing $POST_BOOTSTRAP_UNIT to run after user data finishes."
+    post_bootstrap_may_be_queued="true"
+    run_systemctl start --no-block "$POST_BOOTSTRAP_UNIT" ||
+        fail "The post-bootstrap could not be queued."
 }
 
 # Registration is only interesting if it is registration with the cluster this
@@ -511,20 +691,30 @@ reset_serving_ready_marker() {
     rm -f "$SERVING_READY_MARKER"
 }
 
-# The last action on the success path, and the only place this file is created.
 # It lives under /run so a reboot clears it: a host that came back up has not
-# re-proven itself and must not be treated as ready.
-mark_serving_ready() {
+# re-proven itself and must not be treated as ready. Written before CONTINUE and
+# removed again by the cleanup if CONTINUE cannot be reported.
+record_serving_ready_marker() {
+    install -d -o root -g root -m 0755 "$MARKER_DIRECTORY" ||
+        fail "Unable to create $MARKER_DIRECTORY."
     install -o root -g root -m 0644 /dev/null "$SERVING_READY_MARKER" ||
         fail "Unable to record the serving-ready marker."
-    bootstrap_committed="true"
-    log "Serving-ready. The Elastic IP is NOT associated by this script."
 }
 
-# The ordering that matters, separated from the platform and privilege checks in
-# main() so the suite can drive it without being root. Production behaviour is
-# unchanged: main() still refuses to run unprivileged or off Amazon Linux 2023.
-run_bootstrap_steps() {
+# The commit point. Only a CONTINUE that Auto Scaling accepted makes this host
+# InService, so only then is the cleanup told to stand down.
+report_continue() {
+    report_lifecycle_action CONTINUE ||
+        fail "CONTINUE could not be reported to the launch lifecycle hook."
+    bootstrap_committed="true"
+    log "Serving-ready and InService. The Elastic IP is NOT associated by this script."
+}
+
+# The pre phase, separated from the platform and privilege checks in main() so
+# the suite can drive it without being root. Nothing here polls the agent or
+# the API task.
+run_pre_bootstrap_steps() {
+    bootstrap_mode="pre"
     disable_ecs_agent
     reset_serving_ready_marker
     resolve_bundle
@@ -534,19 +724,49 @@ run_bootstrap_steps() {
     install_certbot_packages
     verify_global_certbot_config
     install_renewal_runtime
+    install_imds_guard
+    install_post_bootstrap
+    reload_systemd
+    start_imds_guard
     write_ecs_config
-    start_ecs_agent
+    enable_ecs_agent
+    queue_post_bootstrap
+    log "Pre-bootstrap complete. $POST_BOOTSTRAP_UNIT reports the launch lifecycle action."
+}
+
+# The post phase. The agent is already running -- systemd started it for the
+# unit's Wants= -- so any failure from the first line on must take it down.
+run_post_bootstrap_steps() {
+    bootstrap_mode="post"
+    ecs_agent_may_be_active="true"
+    resolve_bundle
+    verify_bundle_checksums
     wait_for_cluster_registration
     wait_for_api_readiness
     configure_origin
     enable_renewal_timer
-    mark_serving_ready
+    record_serving_ready_marker
+    report_continue
 }
 
 main() {
+    (( $# == 1 )) || fail "Usage: bootstrap-spot-host.sh pre|post"
+    local mode="$1"
+    case "$mode" in
+        pre | post) ;;
+        *) fail "Unknown phase: $mode (expected pre or post)." ;;
+    esac
+    # Set before the checks below so a post-phase input failure is reported as
+    # ABANDON too, rather than left to the hook's timeout.
+    bootstrap_mode="$mode"
+
     validate_platform
-    validate_inputs "$@"
-    run_bootstrap_steps
+    validate_inputs
+    if [[ "$mode" == "pre" ]]; then
+        run_pre_bootstrap_steps
+    else
+        run_post_bootstrap_steps
+    fi
 }
 
 # Sourcing exposes the contract functions to the test suite without running a

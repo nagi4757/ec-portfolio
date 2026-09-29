@@ -1,6 +1,6 @@
 # Phase 6C-3: immutable delivery of the Spot runtime bundle.
 #
-# A replacement Spot host has to receive bootstrap-spot-host.sh and the six
+# A replacement Spot host has to receive bootstrap-spot-host.sh and the nine
 # artifacts it requires before it can build itself, and the launch template's
 # user_data cannot carry them: the bootstrap alone is larger than the 16 KiB
 # raw user-data limit. The bundle therefore lives in S3 and the launch template
@@ -20,12 +20,20 @@
 # what an existing launch template version executes.
 
 locals {
-  # The six artifacts bootstrap-spot-host.sh requires, and the manifest it
+  # The nine artifacts bootstrap-spot-host.sh requires, and the manifest it
   # checks them against. The bootstrap verifies that the manifest names each of
   # these exactly once before it runs sha256sum, because sha256sum --check only
   # validates the entries a manifest happens to list: a manifest that simply
   # omitted one would pass while that file was whatever the delivery left
   # behind. Generating the manifest from the same list keeps the two in step.
+  #
+  # The same names appear in REQUIRED_BUNDLE_ARTIFACTS in
+  # bootstrap-spot-host.sh and in the loader's file-mode lists in
+  # templates/ecs-spot-user-data.sh.tftpl. spot-runtime-bundle.test.sh fails
+  # when the three disagree.
+  #
+  # The last three are Phase 6C-4a: the container IMDS guard and its unit, and
+  # the post-bootstrap unit that finishes the host after user data.
   spot_bundle_manifest_artifacts = [
     "sync-origin-tls.sh",
     "renew-origin-cert.sh",
@@ -33,12 +41,15 @@ locals {
     "origin-smoke-check-ecs.sh",
     "ec-portfolio-certbot-renew.service",
     "ec-portfolio-certbot-renew.timer",
+    "imds-guard.sh",
+    "ec-portfolio-imds-guard.service",
+    "ec-portfolio-spot-post-bootstrap.service",
   ]
 
   # bootstrap-spot-host.sh is not a required manifest entry -- it is the
   # consumer of the manifest, not something the manifest is expected to cover.
   # It is protected one level up instead: the archive SHA256 the launch
-  # template pins covers the bootstrap, the manifest and all six artifacts
+  # template pins covers the bootstrap, the manifest and all nine artifacts
   # together, which is the anchor the manifest itself cannot provide.
   spot_bundle_files = concat(
     ["bootstrap-spot-host.sh"],
@@ -54,7 +65,7 @@ locals {
   ])
 }
 
-# Exactly the eight files the bundle contract names, listed one by one rather
+# Exactly the eleven files the bundle contract names, listed one by one rather
 # than swept up from the runtime directory. That directory also holds the
 # standalone host's scripts and every test suite; source_dir would ship all of
 # them to a production host and would quietly grow the bundle whenever an
