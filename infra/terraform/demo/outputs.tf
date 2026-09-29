@@ -246,3 +246,68 @@ output "origin_tls_backup_bucket_name" {
   description = "Name of the private bucket holding the archived origin TLS state. Supply it to sync-origin-tls.sh as ORIGIN_TLS_BUCKET."
   value       = aws_s3_bucket.origin_tls.bucket
 }
+
+output "ecs_cluster_name" {
+  description = "Name of the Demo ECS cluster. Supply it to bootstrap-spot-host.sh as ECS_CLUSTER_NAME."
+  value       = aws_ecs_cluster.demo.name
+}
+
+output "ecs_cluster_arn" {
+  description = "ARN of the Demo ECS cluster."
+  value       = aws_ecs_cluster.demo.arn
+}
+
+output "ecs_spot_capacity_provider_name" {
+  description = "Name of the Spot capacity provider the Phase 6C-4 ECS service must name explicitly."
+  value       = aws_ecs_capacity_provider.ecs_spot.name
+}
+
+output "ecs_spot_launch_template_id" {
+  description = "ID of the ECS EC2 Spot launch template."
+  value       = aws_launch_template.ecs_spot.id
+}
+
+output "ecs_spot_launch_template_version" {
+  description = "Launch template version the Auto Scaling group is pinned to. Not $Latest."
+  value       = aws_launch_template.ecs_spot.latest_version
+}
+
+output "ecs_spot_autoscaling_group_name" {
+  description = "Name of the ECS EC2 Spot Auto Scaling group. Created with desired capacity zero."
+  value       = aws_autoscaling_group.ecs_spot.name
+}
+
+output "ecs_spot_autoscaling_group_arn" {
+  description = "ARN of the ECS EC2 Spot Auto Scaling group."
+  value       = aws_autoscaling_group.ecs_spot.arn
+}
+
+output "ecs_spot_lifecycle_hook_name" {
+  description = "Name of the launch lifecycle hook a booting host completes with CONTINUE or ABANDON."
+  value       = aws_autoscaling_lifecycle_hook.ecs_spot_launching.name
+}
+
+output "ecs_spot_instance_profile_name" {
+  description = "Name of the ECS EC2 Spot instance profile, held separately from the On-Demand origin host profile."
+  value       = aws_iam_instance_profile.ecs_spot.name
+}
+
+output "runtime_artifacts_bucket_name" {
+  description = "Name of the private bucket holding the versioned Spot runtime bundle."
+  value       = aws_s3_bucket.runtime_artifacts.bucket
+}
+
+output "spot_runtime_bundle_object_key" {
+  description = "Stable object key of the Spot runtime bundle. Identity comes from the object version, not this key."
+  value       = aws_s3_object.spot_runtime_bundle.key
+}
+
+output "spot_runtime_bundle_version_id" {
+  description = "S3 object version the current launch template version pins. Do not expire this version while any launch template version references it."
+  value       = aws_s3_object.spot_runtime_bundle.version_id
+}
+
+output "spot_runtime_bundle_sha256" {
+  description = "SHA256 of the runtime bundle archive the loader verifies before executing anything from it."
+  value       = data.archive_file.spot_runtime_bundle.output_sha256
+}
