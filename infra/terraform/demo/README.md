@@ -543,7 +543,7 @@ Sources: [ECR lifecycle policy properties](https://docs.aws.amazon.com/AmazonECR
 
 ## Phase 6C-3 ECS EC2 Spot foundation
 
-Code only. Nothing in this section is applied; the Auto Scaling group is defined with desired capacity `0`, so applying it creates no instance and no Spot charge. The On-Demand origin host, its Elastic IP association, CloudFront, Route 53, RDS, and the existing schedules are untouched by this phase.
+Applied on 2026-09-28 (24 added) and converged on 2026-09-29: after a refresh-only state normalization, the convergence plan reports `No changes`. The Auto Scaling group stays at desired capacity `0`, so no Spot instance runs and there is no Spot charge. The On-Demand origin host, its Elastic IP association, CloudFront, Route 53, RDS, and the existing schedules are untouched by this phase.
 
 ### What exists after apply
 

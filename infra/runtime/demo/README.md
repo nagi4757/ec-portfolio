@@ -407,8 +407,8 @@ certbot は `renewal-hooks/` の script と、renewal 設定内の `pre_hook` / 
 ## ECS EC2 Spot host の AMI pin（Phase 6C）
 
 > ECS cluster / Launch Template / Auto Scaling group は Phase 6C-3 で **Terraform に定義済み** です。
-> ただし apply はまだ行われておらず、AWS 上には存在しません。Auto Scaling group は desired capacity 0 で作成されるため、
-> apply 後も Spot host は 0 台です。現在稼働している origin host は従来どおり単一の On-Demand EC2 です。
+> 2026-09-28 に apply 済みで、2026-09-29 の convergence plan は `No changes` です。Auto Scaling group は desired capacity 0 のため、
+> Spot host は 0 台です。現在稼働している origin host は従来どおり単一の On-Demand EC2 です。
 
 Phase 6C の ECS EC2 host は、Amazon ECS-optimized Amazon Linux 2023 x86_64 AMI を **literal な AMI ID として pin** します。
 
@@ -424,7 +424,7 @@ Phase 6C の ECS EC2 host は、Amazon ECS-optimized Amazon Linux 2023 x86_64 AM
 ## Spot replacement bootstrap（Phase 6C）
 
 > このスクリプトを起動する Launch Template / Auto Scaling group / launch lifecycle hook は Phase 6C-3 で定義済みです。
-> apply は未実施で、AWS 上にはまだ存在しません。
+> 2026-09-28 に apply 済み（convergence 済み）です。Auto Scaling group は desired capacity 0 のため、Spot host はまだ起動しません。
 
 `bootstrap-spot-host.sh` は置換 host を「serving-ready」まで持っていく順序契約です。順序そのものが契約であり、
 `bootstrap-spot-host.test.sh` が marker 順序で検証します。
