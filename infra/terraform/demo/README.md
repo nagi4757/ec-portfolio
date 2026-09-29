@@ -541,6 +541,108 @@ The single destroy was the lifecycle policy resource itself. `aws_ecr_repository
 
 Sources: [ECR lifecycle policy properties](https://docs.aws.amazon.com/AmazonECR/latest/userguide/lifecycle_policy_parameters.html), [Parameter Store parameter types](https://docs.aws.amazon.com/systems-manager/latest/userguide/parameter-store-about-examples.html), [Flyway Spring Boot configuration](https://docs.spring.io/spring-boot/reference/how-to/data-initialization.html)
 
+## Phase 6C-3 ECS EC2 Spot foundation
+
+Code only. Nothing in this section is applied; the Auto Scaling group is defined with desired capacity `0`, so applying it creates no instance and no Spot charge. The On-Demand origin host, its Elastic IP association, CloudFront, Route 53, RDS, and the existing schedules are untouched by this phase.
+
+### What exists after apply
+
+`aws_ecs_cluster.demo`, `aws_ecs_capacity_provider.ecs_spot`, `aws_ecs_cluster_capacity_providers.demo`, `aws_launch_template.ecs_spot`, `aws_autoscaling_group.ecs_spot`, `aws_autoscaling_lifecycle_hook.ecs_spot_launching`, the `ec-portfolio-demo-ecs-spot` instance role and profile, and the private runtime artifact bucket holding one bundle object. No task definition and no ECS service: what runs on this capacity is Phase 6C-4.
+
+### Runtime bundle delivery
+
+`bootstrap-spot-host.sh` is larger than the 16 KiB EC2 raw user-data limit on its own, so the bundle cannot be embedded in the launch template. It is published to S3 instead and the launch template carries only a loader.
+
+Eight files are packed into one `tar.gz` by `data.archive_file.spot_runtime_bundle`: `bootstrap-spot-host.sh`, the six artifacts the bootstrap requires, and a `bundle.sha256` manifest generated from `filesha256` over the same reviewed files. The files are listed one by one rather than swept from `infra/runtime/demo/`, which also holds the standalone host's scripts and every test suite.
+
+The archive is written to `.terraform/ec-portfolio/` so building it never dirties the working tree, and uploaded to a stable key with the object **version** carrying the identity:
+
+- bucket: `ec-portfolio-demo-runtime-artifacts-*`, private, versioned, AES256, Block Public Access on all four settings, bucket policy denying insecure transport only
+- key: `runtime/spot-runtime.tar.gz`
+- the launch template's user_data pins the **exact S3 version ID** and the **archive SHA256**
+
+A key alone is a mutable pointer: replacing the object would silently change what every existing launch template version executes as root. Pinning the version means publishing a new bundle is a reviewed launch template change, and older launch template versions keep running the bundle they were reviewed with.
+
+The expected SHA256 in user_data is `data.archive_file.spot_runtime_bundle.output_sha256`, never a literal. The archive, the uploaded object and the hash the loader demands therefore come from one expression and cannot drift apart. `hashicorp/archive` is pinned to exactly `2.8.1` for the same reason the AMI IDs are pinned: the tar framing that hash covers is provider implementation, not a documented contract, and a minor upgrade that changed it would move the hash with no change to any reviewed file.
+
+### Chain of trust
+
+`bundle.sha256` detects a partial or corrupted delivery. It is not an authenticity check — anyone who can write the bundle can rewrite the manifest to match. The anchor is therefore outside the bundle: the loader verifies the **whole archive**, bootstrap and manifest included, against a SHA256 that comes from Terraform.
+
+```
+reviewed repository files
+  -> data.archive_file output_sha256   (one Terraform value)
+    -> launch template user_data       (pinned bucket + version ID + hash)
+      -> archive verified on the host
+        -> bundle.sha256 verified by bootstrap-spot-host.sh
+          -> the six required artifacts
+```
+
+### Bundle rollback
+
+Reverting the runtime files restores the previous archive hash, which produces a **new** object version carrying the old content rather than reusing the old version ID. Rollback is forward-only, which is why noncurrent versions must survive.
+
+`aws_s3_bucket_lifecycle_configuration.runtime_artifacts` therefore has **no** `noncurrent_version_expiration`, only a 7-day incomplete-multipart cleanup. Expiring an old bundle would break every launch template version still pointing at it, and the breakage would surface at launch as `AccessDenied` rather than `NoSuchVersion`, because the instance role holds no `s3:ListBucket` and S3 cannot return a 404 to a caller that cannot list. A bundle is about 26 KiB, so retaining the history costs nothing worth trading for that failure mode.
+
+### Launch lifecycle
+
+`bootstrap-spot-host.sh` already keeps a half-built host out of the cluster: it holds the ECS agent back and disables it again on any failure. What it cannot do is make the Auto Scaling group notice, and an EC2 health check will not either — the operating system is healthy on a host whose TLS restore failed.
+
+So the instance is held in `Pending:Wait` by an `autoscaling:EC2_INSTANCE_LAUNCHING` hook while the bootstrap runs, and the loader reports the outcome with `CompleteLifecycleAction`: `CONTINUE` on success, `ABANDON` on any failure. `default_result` is `ABANDON` because the failure that has to be survived is the one where nothing reports at all — a loader that died before it read its own instance ID, or a host that never ran user data. Those must not reach `InService` by timing out.
+
+`heartbeat_timeout` is 1800 seconds. The bootstrap's own configured waits already total roughly 1200 (a ten-minute certbot install budget, then 300 seconds each for cluster registration and API readiness), and several steps have no script-level bound at all. It is not a measured figure and should be revisited against the first real launch.
+
+`health_check_grace_period` is a different clock and is deliberately short by comparison: it starts when an instance reaches `InService`, which for this group is after `CONTINUE`, so by then the host has already restored its TLS state, joined the cluster and passed an HTTPS smoke check. It only has to cover EC2 status checks settling.
+
+**Open item for Phase 6C-4.** Whether ECS places a task on a container instance whose EC2 instance is still in `Pending:Wait` is not stated directly in AWS documentation. The indirect evidence is strong — the ECS agent gates registration on Auto Scaling state only when `ECS_WARM_POOLS_CHECK` is `true` (it defaults to `false` and the bootstrap does not set it), and even then it waits for the IMDS target lifecycle state to be `InService`, which it already is during a launch hook. If the assumption is wrong the result is a bounded failure, not a hang: `wait_for_api_readiness` gives up after 300 seconds, the loader abandons, and Auto Scaling rate-limits launches when lifecycle hooks fail consistently. It must still be confirmed against the first real launch.
+
+### Spot instance role
+
+`ec-portfolio-demo-ecs-spot` is separate from `aws_iam_role.ec2` on purpose: extending the On-Demand host's role would let the host currently serving production join the cluster, which it has no reason to do.
+
+The AWS-managed `AmazonEC2ContainerServiceforEC2Role` is not attached. It grants fifteen actions on `*` and cannot be scoped to one cluster. The inline statements cover the same agent contract with the cluster and repository named, and omit four actions the managed policy includes:
+
+| Omitted | Why |
+| --- | --- |
+| `ecs:CreateCluster` | The cluster is a Terraform resource. |
+| `ecs:TagResource` | The agent only calls it when registering with tags, which needs `ECS_CONTAINER_INSTANCE_TAGS` or `ECS_CONTAINER_INSTANCE_PROPAGATE_TAGS_FROM`. The bootstrap sets neither. |
+| `ecs:ListTagsForResource` | Used only by the task metadata endpoint's `/taskWithTags` path. |
+| `ec2:DescribeTags` | Read by the agent only when tag propagation is on. Capacity provider association is decided by ECS from the `AmazonECSManaged` tag, server side. |
+| `logs:*` | No CloudWatch Logs destination exists in this phase. |
+
+`ecs:DiscoverPollEndpoint` is the only ECS action left on `*`; it has no resource type. Runtime bundle access is `s3:GetObjectVersion` on the single object and nothing else — not `s3:GetObject`, because the loader always supplies a version ID and S3 requires the version-scoped action for that request; granting `s3:GetObject` would add the mutable read this design exists to avoid.
+
+The database password and JWT secret parameters are **not** readable by this role. Those belong to the Phase 6C-4 task execution and task roles.
+
+### Capacity provider settings
+
+| Setting | Value | Reason |
+| --- | --- | --- |
+| `managed_scaling` | `DISABLED` | Desired capacity belongs to the Phase 6C-5 schedule. With managed scaling on, ECS and the scheduler would be two controllers fighting over one value. |
+| `managed_termination_protection` | `DISABLED` | Only meaningful for ECS-driven scale-in, which managed scaling would have done. |
+| `managed_draining` | `ENABLED` | The AWS default at creation, and what turns a Spot interruption into a graceful drain. It works regardless of termination protection. ECS attaches its own `EC2_INSTANCE_TERMINATING` hook to implement it — a different transition from the launch hook, so the two do not interact. |
+
+No `default_capacity_provider_strategy` on the cluster: a default would send any `RunTask` that omitted a strategy to the Spot group. The Phase 6C-4 service names its provider explicitly instead.
+
+### Two settings that are load-bearing and easy to lose
+
+`AmazonECSManaged` is declared as an Auto Scaling group `tag` with `propagate_at_launch = true`. ECS adds this tag itself when a capacity provider is associated, so omitting it from Terraform means every subsequent plan tries to remove it, and instances launched without it are not matched to the capacity provider.
+
+The Auto Scaling group pins a **numeric** launch template version through `aws_launch_template.ecs_spot.latest_version`, never `$Latest`. `$Latest` is resolved by AWS at launch time, which would let a template edit change what the group launches without any plan showing it.
+
+### Local validation without AWS credentials
+
+`terraform plan` needs the protected runtime inputs described under [Local validation](#local-validation) and must be run by the operator. Everything below runs without them:
+
+```
+terraform fmt -check -recursive
+terraform validate
+terraform graph              # builds the dependency graph; fails on a cycle
+infra/runtime/demo/bootstrap-spot-host.test.sh
+```
+
+The bundle contract can also be exercised end to end without AWS: build the archive, extract it, apply the loader's `chmod`, then source the extracted `bootstrap-spot-host.sh` and call `resolve_bundle` and `verify_bundle_checksums`. Those are the host's own verification functions, so a pass means the Terraform-generated manifest satisfies the Phase 6C-2 contract rather than merely resembling it.
+
 ## Local validation
 
 Run static checks in the isolated code worktree without AWS credentials or runtime input files:

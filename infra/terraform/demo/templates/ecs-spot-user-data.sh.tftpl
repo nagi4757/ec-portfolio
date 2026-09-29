@@ -1,0 +1,239 @@
+#!/usr/bin/env bash
+
+# Phase 6C-3: the launch template loader for an ECS EC2 Spot host.
+#
+# This file is deliberately small. bootstrap-spot-host.sh is larger than the
+# 16 KiB EC2 raw user-data limit on its own, so the runtime bundle cannot be
+# embedded here. What this loader does instead is fetch one immutable archive,
+# prove it is the archive this launch template version was reviewed with, and
+# only then hand control to the reviewed bootstrap.
+#
+# Authenticity lives here, not in the bundle. bootstrap-spot-host.sh trusts
+# bundle.sha256 because it trusts whatever delivered it, and bundle.sha256 sits
+# next to the files it describes -- anyone able to rewrite the bundle could
+# rewrite the manifest to match. So the chain has to be anchored outside the
+# bundle: this loader checks the whole archive, bootstrap and manifest
+# included, against a SHA256 that comes from Terraform. That value is derived
+# from the reviewed repository files themselves, so the archive in S3, the
+# object version this loader asks for and the hash it demands cannot drift
+# apart.
+#
+# The S3 object is addressed by an exact version ID, never by "the current
+# object at this key". A key alone is a mutable pointer: replacing the object
+# would silently change what every existing launch template version executes as
+# root. Pinning the version means a bundle change is a reviewed launch template
+# change, and older launch template versions keep running the bundle they were
+# reviewed with.
+#
+# Nothing here associates the Elastic IP or touches CloudFront. Taking
+# production traffic is Phase 6C-5.
+
+set -euo pipefail
+
+readonly AWS_REGION_NAME="${aws_region}"
+readonly RUNTIME_BUCKET="${runtime_bucket}"
+readonly RUNTIME_OBJECT_KEY="${runtime_object_key}"
+readonly RUNTIME_OBJECT_VERSION_ID="${runtime_object_version_id}"
+readonly RUNTIME_ARCHIVE_SHA256="${runtime_archive_sha256}"
+readonly RUNTIME_DIRECTORY="${runtime_directory}"
+readonly ARCHIVE_PATH="${archive_path}"
+readonly ECS_CLUSTER_NAME_VALUE="${ecs_cluster_name}"
+readonly ORIGIN_TLS_BUCKET_VALUE="${origin_tls_bucket}"
+
+# Named rather than read back from the Auto Scaling group, because the Auto
+# Scaling group is built from the launch template that carries this file.
+# Referencing those resources here would close that into a dependency cycle
+# Terraform cannot order. Both names are fixed Terraform locals, so the value
+# written here and the resource that is created from it come from one place.
+readonly AUTOSCALING_GROUP_NAME="${autoscaling_group_name}"
+readonly LIFECYCLE_HOOK_NAME="${lifecycle_hook_name}"
+
+readonly IMDS_BASE_URL="http://169.254.169.254/latest"
+readonly IMDS_TOKEN_TTL_SECONDS=300
+readonly AWS_TIMEOUT_SECONDS="5m"
+readonly TIMEOUT_KILL_AFTER_SECONDS="5s"
+
+# The bundle this host must carry. The four scripts are checked for presence and
+# made executable; the three data files are only checked and normalised. The
+# archive is assembled from file content rather than from files on disk, so
+# every entry arrives with mode 0000 and the modes have to be set here --
+# bootstrap-spot-host.sh refuses a bundle whose helpers are not executable.
+readonly BUNDLE_EXECUTABLES="bootstrap-spot-host.sh sync-origin-tls.sh renew-origin-cert.sh configure-origin.sh origin-smoke-check-ecs.sh"
+readonly BUNDLE_DATA_FILES="ec-portfolio-certbot-renew.service ec-portfolio-certbot-renew.timer bundle.sha256"
+
+instance_id=""
+
+log() {
+    printf '[spot-loader] %s\n' "$*"
+}
+
+warn() {
+    printf '[spot-loader] %s\n' "$*" >&2
+}
+
+fail() {
+    printf '[spot-loader] ERROR: %s\n' "$*" >&2
+    exit 1
+}
+
+run_aws() {
+    AWS_PAGER="" timeout --signal=TERM --kill-after="$TIMEOUT_KILL_AFTER_SECONDS" \
+        "$AWS_TIMEOUT_SECONDS" aws --region "$AWS_REGION_NAME" "$@"
+}
+
+# CONTINUE is the only thing that puts this instance InService. Everything else
+# -- an explicit ABANDON, a loader that died before it learned its own instance
+# ID, a host that never ran this file at all -- leaves the hook to time out and
+# apply its ABANDON default. The failure modes all converge on "not InService",
+# which is the property that matters.
+complete_lifecycle_action() {
+    local result="$1"
+
+    if [ -z "$instance_id" ]; then
+        warn "The instance ID is unknown, so no lifecycle action can be reported. The launch hook will time out and apply its ABANDON default."
+        return 0
+    fi
+
+    log "Reporting $result to the launch lifecycle hook."
+    run_aws autoscaling complete-lifecycle-action \
+        --auto-scaling-group-name "$AUTOSCALING_GROUP_NAME" \
+        --lifecycle-hook-name "$LIFECYCLE_HOOK_NAME" \
+        --instance-id "$instance_id" \
+        --lifecycle-action-result "$result" >/dev/null
+}
+
+# The bootstrap's exit code is the useful signal; a failure to report it is not
+# allowed to replace it. A CONTINUE that cannot be delivered is reported and
+# then left alone: the hook times out into ABANDON, which is the safe direction.
+cleanup() {
+    local exit_code=$?
+    trap - EXIT
+
+    if [ "$exit_code" -eq 0 ]; then
+        complete_lifecycle_action CONTINUE ||
+            warn "The host is ready but CONTINUE could not be reported. The launch hook will time out and abandon this instance."
+    else
+        warn "The bootstrap failed with exit code $exit_code; abandoning this instance so the Auto Scaling group replaces it."
+        complete_lifecycle_action ABANDON || true
+    fi
+
+    exit "$exit_code"
+}
+
+trap cleanup EXIT
+
+require_commands() {
+    local command_name
+    for command_name in aws awk chmod curl install sha256sum tar timeout; do
+        command -v "$command_name" >/dev/null 2>&1 ||
+            fail "Required command is not available on this AMI: $command_name"
+    done
+}
+
+# IMDSv2 only. The launch template sets http_tokens=required, so a token request
+# is the only way in; a loader that fell back to IMDSv1 here would be writing a
+# path that the instance configuration does not allow anyway.
+resolve_instance_identity() {
+    local token
+
+    token="$(curl --disable --silent --fail --max-time 5 --retry 3 --retry-delay 1 \
+        -X PUT "$IMDS_BASE_URL/api/token" \
+        -H "X-aws-ec2-metadata-token-ttl-seconds: $IMDS_TOKEN_TTL_SECONDS")" ||
+        fail "Unable to obtain an IMDSv2 token."
+
+    instance_id="$(curl --disable --silent --fail --max-time 5 --retry 3 --retry-delay 1 \
+        -H "X-aws-ec2-metadata-token: $token" \
+        "$IMDS_BASE_URL/meta-data/instance-id")" ||
+        fail "Unable to read the instance ID from IMDS."
+
+    [ -n "$instance_id" ] || fail "IMDS returned an empty instance ID."
+    log "Loading the runtime bundle for $instance_id."
+}
+
+download_runtime_archive() {
+    install -d -o root -g root -m 0755 "$RUNTIME_DIRECTORY" ||
+        fail "Unable to create $RUNTIME_DIRECTORY."
+    rm -f "$ARCHIVE_PATH"
+
+    log "Downloading s3://$RUNTIME_BUCKET/$RUNTIME_OBJECT_KEY version $RUNTIME_OBJECT_VERSION_ID."
+    if ! run_aws s3api get-object \
+        --bucket "$RUNTIME_BUCKET" \
+        --key "$RUNTIME_OBJECT_KEY" \
+        --version-id "$RUNTIME_OBJECT_VERSION_ID" \
+        "$ARCHIVE_PATH" >/dev/null; then
+        # Worth spelling out, because the obvious reading of a 403 here is wrong
+        # as often as it is right. This instance role holds s3:GetObjectVersion
+        # and deliberately no s3:ListBucket, and S3 answers AccessDenied rather
+        # than NoSuchVersion when the caller cannot list the bucket. A version
+        # that no longer exists therefore looks exactly like a policy problem.
+        warn "get-object failed. AccessDenied (403) does not necessarily mean the IAM policy is wrong: without s3:ListBucket, S3 returns 403 rather than 404 for an object version that does not exist. Confirm that version $RUNTIME_OBJECT_VERSION_ID of $RUNTIME_OBJECT_KEY is still present before changing any policy."
+        fail "Unable to download the runtime bundle."
+    fi
+}
+
+verify_runtime_archive() {
+    local actual_sha256
+
+    actual_sha256="$(sha256sum -- "$ARCHIVE_PATH" | awk '{ print $1 }')" ||
+        fail "Unable to checksum the downloaded runtime bundle."
+
+    [ "$actual_sha256" = "$RUNTIME_ARCHIVE_SHA256" ] ||
+        fail "The runtime bundle does not match the SHA256 this launch template was reviewed with. Refusing to extract or execute it."
+
+    log "The runtime bundle matches its reviewed SHA256."
+}
+
+extract_runtime_bundle() {
+    tar --extract --gzip --no-same-owner \
+        --file "$ARCHIVE_PATH" --directory "$RUNTIME_DIRECTORY" ||
+        fail "Unable to extract the runtime bundle."
+}
+
+# Word splitting on the two lists is intended: they are fixed, space-separated
+# names controlled by this file, not caller input.
+# shellcheck disable=SC2086
+normalise_extracted_bundle() {
+    local name
+
+    for name in $BUNDLE_EXECUTABLES; do
+        [ -f "$RUNTIME_DIRECTORY/$name" ] ||
+            fail "The extracted runtime bundle is missing $name."
+        chmod 0755 "$RUNTIME_DIRECTORY/$name" ||
+            fail "Unable to make $name executable."
+    done
+
+    for name in $BUNDLE_DATA_FILES; do
+        [ -f "$RUNTIME_DIRECTORY/$name" ] ||
+            fail "The extracted runtime bundle is missing $name."
+        chmod 0644 "$RUNTIME_DIRECTORY/$name" ||
+            fail "Unable to set the mode on $name."
+    done
+}
+
+# SPOT_BOOTSTRAP_PREFIX is the bootstrap's test seam and would redirect where
+# TLS state is restored and which ECS configuration is written. The bootstrap
+# refuses it when executed rather than sourced, and it is cleared here as well
+# so the refusal is never the thing standing between a boot and a redirected
+# restore. The Region is stated rather than left to the CLI to discover.
+run_bootstrap() {
+    log "Running the reviewed bootstrap for cluster $ECS_CLUSTER_NAME_VALUE."
+    env -u SPOT_BOOTSTRAP_PREFIX \
+        ECS_CLUSTER_NAME="$ECS_CLUSTER_NAME_VALUE" \
+        ORIGIN_TLS_BUCKET="$ORIGIN_TLS_BUCKET_VALUE" \
+        AWS_REGION="$AWS_REGION_NAME" \
+        AWS_DEFAULT_REGION="$AWS_REGION_NAME" \
+        "$RUNTIME_DIRECTORY/bootstrap-spot-host.sh"
+}
+
+main() {
+    require_commands
+    resolve_instance_identity
+    download_runtime_archive
+    verify_runtime_archive
+    extract_runtime_bundle
+    normalise_extracted_bundle
+    run_bootstrap
+    log "The bootstrap reported serving-ready."
+}
+
+main

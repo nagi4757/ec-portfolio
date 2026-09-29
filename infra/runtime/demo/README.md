@@ -404,10 +404,11 @@ certbot は `renewal-hooks/` の script と、renewal 設定内の `pre_hook` / 
 - bucket policy は **insecure transport の拒否のみ**。「instance role 以外を全 Deny」のような広範な Deny は Terraform や管理者の正当な access まで遮断し復旧が困難になるため使用しません。access の絞り込みは identity 側で行います
 - instance role には固定 object 1 件に対する `s3:GetObject` と `s3:PutObject` のみ。`s3:ListBucket` は object path が固定で探索不要なため付与しません。`s3:DeleteObject` も付与しないため、host は archive を置き換えられても履歴を破壊できません
 
-## ECS EC2 Spot host の AMI pin（Phase 6C・計画中）
+## ECS EC2 Spot host の AMI pin（Phase 6C）
 
-> このセクションは **計画段階** の取り決めです。ECS cluster / Launch Template / Auto Scaling group / Spot host は
-> まだ Terraform にも AWS にも存在しません。現在稼働している origin host は従来どおり単一の On-Demand EC2 です。
+> ECS cluster / Launch Template / Auto Scaling group は Phase 6C-3 で **Terraform に定義済み** です。
+> ただし apply はまだ行われておらず、AWS 上には存在しません。Auto Scaling group は desired capacity 0 で作成されるため、
+> apply 後も Spot host は 0 台です。現在稼働している origin host は従来どおり単一の On-Demand EC2 です。
 
 Phase 6C の ECS EC2 host は、Amazon ECS-optimized Amazon Linux 2023 x86_64 AMI を **literal な AMI ID として pin** します。
 
@@ -420,10 +421,10 @@ Phase 6C の ECS EC2 host は、Amazon ECS-optimized Amazon Linux 2023 x86_64 AM
 - pin した image の root snapshot は **30 GiB gp3** です。Launch Template の root volume は
   **snapshot より小さく設定できません**。Phase 6C-3 の下限値はこの実測値に従います。
 
-## Spot replacement bootstrap（Phase 6C・計画中）
+## Spot replacement bootstrap（Phase 6C）
 
-> このセクションも **計画段階** です。ECS cluster / Launch Template / Auto Scaling group / Spot host は
-> まだ Terraform にも AWS にも存在しません。現在の origin host は従来どおり単一の On-Demand EC2 です。
+> このスクリプトを起動する Launch Template / Auto Scaling group / launch lifecycle hook は Phase 6C-3 で定義済みです。
+> apply は未実施で、AWS 上にはまだ存在しません。
 
 `bootstrap-spot-host.sh` は置換 host を「serving-ready」まで持っていく順序契約です。順序そのものが契約であり、
 `bootstrap-spot-host.test.sh` が marker 順序で検証します。
@@ -485,9 +486,14 @@ test の fake `systemctl` も「単に失敗する」のではなく、**enable 
 成功経路で cleanup が走らないことは別の positive control で確認します。
 
 > **重要**: この cleanup が保証するのは「失敗した host に work が配置されないこと」だけです。
-> **失敗した host を ASG が自動で replacement することは 6C-2 では保証しません。**
-> それには Auto Scaling group の lifecycle hook または health check との統合が必要で、**Phase 6C-3 の責務**です。
-> 現状は cluster に登録されないまま instance が残るため、6C-3 でこの統合を入れるまでは手動での確認が必要です。
+> **失敗した host を ASG が自動で replacement することは 6C-2 の責務ではありません。**
+>
+> その統合は Phase 6C-3 で入りました。Auto Scaling group の launch lifecycle hook
+> （`autoscaling:EC2_INSTANCE_LAUNCHING`、`default_result = ABANDON`、heartbeat 1800 秒）が instance を
+> `Pending:Wait` に留め、Launch Template の loader が bootstrap の exit code を
+> `CompleteLifecycleAction` で CONTINUE / ABANDON として報告します。何も報告されないまま heartbeat が尽きた場合も
+> default の ABANDON が適用されるため、「報告できなかった host が InService になる」経路はありません。
+> EC2 health check は OS の健全性しか見ないため、この経路の代わりにはなりません。
 
 ### renewal timer の有効化順序
 
@@ -535,7 +541,18 @@ Region は **`ap-northeast-1` を明示的に渡します**。AWS CLI が local 
 「同じ directory にある」という理由だけで manifest が信頼されるわけではありません。
 
 したがって真正性は bundle をそこに置いた仕組みが担保します。それは Phase 6C-3 の Launch Template / user_data の責務であり、
-本 Phase 6C-2 は **既に信頼された bundle を受け取る host 側の consumer** です。fresh host への配送方法は 6C-3 で別途決定します。
+本 Phase 6C-2 は **既に信頼された bundle を受け取る host 側の consumer** です。
+
+Phase 6C-3 で決定した配送方法は次のとおりです。詳細は
+[`infra/terraform/demo/README.md` の Phase 6C-3 セクション](../../terraform/demo/README.md) を参照してください。
+
+- 8 ファイル（`bootstrap-spot-host.sh` + required 6 種 + `bundle.sha256`）を 1 つの `tar.gz` にまとめ、
+  専用の private / versioned S3 bucket に固定 key で置く
+- Launch Template の user_data は **exact な S3 VersionId** と **archive 全体の SHA256** を pin する
+- loader はその SHA256 を検証してから extract し、`bootstrap-spot-host.sh` を実行する
+- `bundle.sha256` は archive の中にあるため、外側の SHA256 が manifest ごと保護する。
+  これが「manifest は同じ directory にあるから信頼されるのではない」という上の記述に対する解答であり、
+  信頼の起点は archive の外、すなわち reviewed な Terraform の値にある
 
 ### Elastic IP は bootstrap の責務ではない
 
