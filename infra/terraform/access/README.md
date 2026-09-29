@@ -967,7 +967,7 @@ reviewed source.
 
 `scripts/policy-gate.sh canonical` of this block as written (placeholder
 included): `b2089da66621d1693e6a4ea7b53d4fb2181e98f1ab15abc5811ee432edc056ce`.
-8 statements, 30 actions, 1,921 of the 6,144 non-whitespace characters a
+8 statements, 30 actions, 1,929 of the 6,144 non-whitespace characters a
 managed policy allows. By the service reference access levels: write 12,
 tagging 6, permissions management 3, read 4, list 5.
 
