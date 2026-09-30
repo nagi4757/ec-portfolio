@@ -587,6 +587,14 @@ enable_renewal_timer() {
 # Written only once every pre gate above has passed. Until this file exists the
 # agent has no cluster to join, which is what keeps a half-built host out of
 # the cluster.
+#
+# The whole file is written on every run and replaced in one step, so a rerun
+# leaves exactly these lines, each once, in this order.
+#
+# ECS_ENABLE_AWSLOGS_EXECUTIONROLE_OVERRIDE: the Amazon ECS task execution role
+# guide requires it for tasks on the EC2 launch type that take secrets from
+# Systems Manager Parameter Store through the task execution role. The Phase
+# 6C-4 API task does.
 write_ecs_config() {
     log "Writing the ECS agent configuration."
     install -d -o root -g root -m 0755 "$ECS_CONFIG_DIRECTORY" ||
@@ -597,6 +605,7 @@ write_ecs_config() {
     {
         printf 'ECS_CLUSTER=%s\n' "$ECS_CLUSTER_NAME"
         printf 'ECS_ENABLE_SPOT_INSTANCE_DRAINING=true\n'
+        printf 'ECS_ENABLE_AWSLOGS_EXECUTIONROLE_OVERRIDE=true\n'
     } >"$staged"
     install -o root -g root -m 0644 "$staged" "$ECS_CONFIG_FILE" ||
         fail "Unable to install $ECS_CONFIG_FILE."

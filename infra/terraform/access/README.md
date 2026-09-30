@@ -1111,7 +1111,8 @@ Canonical `77dcb0cccd66dd1b32d4c59bd4a8ebbc1752c957f7b7f90c758aa2bcb9da3374`,
 - Prerequisite for the Phase 6C-4 Demo change, found during this review: the
   ECS guide requires `ECS_ENABLE_AWSLOGS_EXECUTIONROLE_OVERRIDE=true` in the
   agent configuration for tasks on the EC2 launch type to use Parameter Store
-  secrets. `bootstrap-spot-host.sh` does not write it yet.
+  secrets. `bootstrap-spot-host.sh` writes it into `/etc/ecs/ecs.config`
+  (Phase 6C-4 bootstrap prerequisite).
 
 ### Order after merge
 

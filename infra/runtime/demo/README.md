@@ -450,7 +450,7 @@ pin した AMI で実際にこの順序付けがあるかは確認していま�
 10. renew helper / env / service / timer を install-only で配置
 11. IMDS guard（script / unit）と post-bootstrap unit・環境ファイルを配置し、`daemon-reload`
 12. **IMDS guard を enable + start し、効果を実測で確認**（root は token を取得でき、UID 10001 / 999 は拒否される）
-13. `/etc/ecs/ecs.config` を atomic に作成
+13. `/etc/ecs/ecs.config` を atomic に作成（`ECS_CLUSTER`、`ECS_ENABLE_SPOT_INSTANCE_DRAINING=true`、`ECS_ENABLE_AWSLOGS_EXECUTIONROLE_OVERRIDE=true` の 3 行。毎回ファイル全体を置き換えるため、再実行しても重複しない）
 14. **ECS agent を enable のみ**（start はしない。以降の boot では guard の後に起動する）
 15. **`ec-portfolio-spot-post-bootstrap.service` を `systemctl start --no-block` で queue**（ここで lifecycle action の報告責任を post に引き渡す）
 
