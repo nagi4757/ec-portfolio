@@ -312,7 +312,9 @@ mkdir -p "$(dirname "$target")"
 if [ -n "$src" ] && [ -e "$src" ]; then cp "$src" "$target"; else : >"$target"; fi
 chmod 755 "$target" 2>/dev/null || true
 case "$target" in
-    */ecs.config) printf "ecs-config\n" >>"$MARKER_FILE" ;;
+    */ecs.config)
+        printf "ecs-config\n" >>"$MARKER_FILE"
+        printf "ecs-config-installed-lines=%s\n" "$(wc -l <"$target" | tr -d " ")" >>"$MARKER_FILE" ;;
     */ec-portfolio-certbot-renew.timer) printf "renew-install\n" >>"$MARKER_FILE" ;;
     */ec-portfolio-imds-guard.service) printf "imds-guard-install\n" >>"$MARKER_FILE" ;;
     */ec-portfolio-spot-post-bootstrap.service) printf "post-install\n" >>"$MARKER_FILE" ;;
@@ -619,9 +621,31 @@ AWS_REGION=ap-northeast-1"
 $post_env"
 assert_absent "$post_env" "leaked" "No caller credential may reach the post-bootstrap environment."
 
-# The ECS configuration names the cluster and nothing else sensitive.
-assert_contains "$(cat "$last_root/etc/ecs/ecs.config")" "ECS_CLUSTER=$CLUSTER" \
-    "The ECS configuration must name the cluster."
+# The ECS configuration is exactly these lines, each once and in this order:
+# the cluster, Spot draining, and the execution role override the API task's
+# Parameter Store secrets need on the EC2 launch type. Nothing else, nothing
+# sensitive.
+expected_ecs_config="ECS_CLUSTER=$CLUSTER
+ECS_ENABLE_SPOT_INSTANCE_DRAINING=true
+ECS_ENABLE_AWSLOGS_EXECUTIONROLE_OVERRIDE=true"
+ecs_config="$(cat "$last_root/etc/ecs/ecs.config" 2>/dev/null || true)"
+[[ "$ecs_config" == "$expected_ecs_config" ]] ||
+    fail "The ECS configuration must be exactly the three expected lines. Got:
+$ecs_config"
+[[ "$(grep -c '^ECS_ENABLE_AWSLOGS_EXECUTIONROLE_OVERRIDE=' "$last_root/etc/ecs/ecs.config")" == 1 ]] ||
+    fail "The execution role override must be set exactly once."
+# Complete at the moment it is installed: one replacement, not a file that is
+# installed and then added to.
+[[ "$(marker_count "ecs-config-installed-lines=3")" == 1 ]] ||
+    fail "The ECS configuration must be installed complete, in one step: $(grep '^ecs-config-installed-lines=' "$current_markers" | tr '\n' ' ')"
+
+# Writing it again leaves the file unchanged: it is replaced, never appended to.
+env PATH="$fake_bin:$PATH" MARKER_FILE="$last_root/rewrite-markers" STATE_DIR="$state_directory" \
+    SPOT_BOOTSTRAP_PREFIX="$last_root" ECS_CLUSTER_NAME="$CLUSTER" \
+    bash -c 'source "$1"; write_ecs_config' _ "$last_root/bundle/bootstrap-spot-host.sh" >/dev/null 2>&1 ||
+    fail "A second write of the ECS configuration must succeed."
+[[ "$(cat "$last_root/etc/ecs/ecs.config" 2>/dev/null || true)" == "$expected_ecs_config" ]] ||
+    fail "A second write must leave the ECS configuration unchanged."
 
 # --- P2. the restore runs with the instance role only ----------------------
 for observation in \
