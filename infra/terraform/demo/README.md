@@ -622,7 +622,7 @@ The database password and JWT secret parameters are **not** readable by this rol
 | `managed_termination_protection` | `DISABLED` | Only meaningful for ECS-driven scale-in, which managed scaling would have done. |
 | `managed_draining` | `ENABLED` | The AWS default at creation, and what turns a Spot interruption into a graceful drain. It works regardless of termination protection. ECS attaches its own `EC2_INSTANCE_TERMINATING` hook to implement it — a different transition from the launch hook, so the two do not interact. |
 
-No `default_capacity_provider_strategy` on the cluster: a default would send any `RunTask` that omitted a strategy to the Spot group. The Phase 6C-4 service names its provider explicitly instead.
+No `default_capacity_provider_strategy` on the cluster: a default would send any `RunTask` that omitted a strategy to the Spot group. The Phase 6C-4 service does not use a strategy either: it is a `DAEMON` on the `EC2` launch type (AWS accepts a launch type or a capacity provider strategy, not both), and its tasks land only on Spot hosts because this capacity provider's group is the cluster's only source of container instances.
 
 ### Two settings that are load-bearing and easy to lose
 
@@ -695,6 +695,38 @@ infra/runtime/demo/spot-runtime-bundle.test.sh
 ```
 
 `spot-runtime-bundle.test.sh` checks that `spot_bundle_manifest_artifacts`, the loader's mode lists and `REQUIRED_BUNDLE_ARTIFACTS` name the same files, then builds a bundle from the repository and runs the bootstrap's own `resolve_bundle` and `verify_bundle_checksums` on it. `spot-user-data-loader.test.sh` renders the template, runs it against recording fakes, and checks the rendered upper bound against the 16 KiB user-data limit.
+
+## Phase 6C-4 ECS application layer
+
+Code only; not applied. `ecs_application.tf` defines what runs on the Spot capacity: one task per container instance, API and Valkey side by side on the host network.
+
+| Resource | Name | Notes |
+| --- | --- | --- |
+| `aws_cloudwatch_log_group.ecs_api` | `/ec-portfolio/demo/ecs/api` | 7-day retention, no KMS key |
+| `aws_iam_role.ecs_task_execution` | `ec-portfolio-demo-ecs-task-execution` | trust `ecs-tasks.amazonaws.com` only; no managed policy |
+| `aws_iam_role_policy.ecs_task_execution_ecr_pull` | `ecr-image-pull` | `ecr:GetAuthorizationToken` on `*`; the three pull actions on `ec-portfolio-demo-api` only |
+| `aws_iam_role_policy.ecs_task_execution_runtime_secrets` | `runtime-secrets-read` | `ssm:GetParameters` on the DB password and the JWT secret only; no `kms:Decrypt` (`alias/aws/ssm`) |
+| `aws_iam_role_policy.ecs_task_execution_logs` | `api-task-logs-write` | `logs:CreateLogStream`, `logs:PutLogEvents` on the log group's streams only |
+| `aws_ecs_task_definition.api` | family `ec-portfolio-demo-api` | `host` network, `EC2`, execution role only (no task role) |
+| `aws_ecs_service.api` | `ec-portfolio-demo-api` in `ec-portfolio-demo` | `DAEMON`, launch type `EC2`, no desired count, no capacity provider strategy, no load balancer, no service connect, execute command off, AZ rebalancing off, no wait for steady state |
+
+The names are the ones the Access IaC grants on (Phase 6C-4 ECS application permissions in `infra/terraform/access/README.md`); a different name fails with an AccessDenied. The three inline policies are the reviewed task execution role document (canonical `77dcb0cccd66dd1b32d4c59bd4a8ebbc1752c957f7b7f90c758aa2bcb9da3374`).
+
+The DAEMON service is what the bootstrap's post phase relies on: every host that registers gets exactly one task, and the post phase waits for registration, then API readiness on `127.0.0.1:8080`, then configures the origin and reports `CONTINUE`.
+
+| Container | Image | User | Listens on | Notes |
+| --- | --- | --- | --- | --- |
+| `valkey` | `valkey/valkey@sha256:16625369f78a3844287f298799bebb7f4e59d0f7f40e789779d60e890f3d4399` (the `8.1.9-alpine` linux/amd64 manifest) | `999:1000` | `127.0.0.1:6379` only | `--bind 127.0.0.1 --protected-mode yes --save '' --appendonly no`; health check `valkey-cli -h 127.0.0.1 -p 6379 ping` |
+| `api` | `<ecr repository>:868efcc04316de89e73174c48d42619cd4466a14` | `10001:10001` | `127.0.0.1:8080` only | starts after `valkey` is `HEALTHY`; `SERVER_ADDRESS=127.0.0.1`, `JAVA_TOOL_OPTIONS=-Djava.net.preferIPv4Stack=true`, `REDIS_HOST=127.0.0.1` |
+
+- Both containers are essential, unprivileged, run with `no-new-privileges`, and log to the log group with the `awslogs` driver through the execution role (`ECS_ENABLE_AWSLOGS_EXECUTIONROLE_OVERRIDE=true`, Phase 6C-4b).
+- The Valkey user comes from the image itself: its `/etc/passwd` reads `valkey:x:999:1000` (linux/amd64 manifest `sha256:16625369f78a3844287f298799bebb7f4e59d0f7f40e789779d60e890f3d4399`). The task definition pins that digest rather than the tag, because a tag is only resolved when the first task starts, which with the group at desired 0 is long after the apply. Neither user is 0, so the IMDS guard rejects both.
+- The API's non-secret environment is the standalone host's, derived from the same resources `runtime_parameters.tf` uses. `DB_PASSWORD` and `APP_AUTH_JWT_SECRET` are ECS `secrets` that name the parameter ARNs; no secret value is in the task definition or the state.
+- The API image is the On-Demand host's last-known-good release, pinned as a constant (a full Git SHA in the `IMMUTABLE` repository): Flyway migrates the shared RDS at startup, so a Spot task must run the same release.
+
+### Expected plan delta when this is applied
+
+`7 to add, 0 to change, 0 to destroy`: the seven resources above. With the Auto Scaling group at desired 0 the service places no task and no instance starts. Anything else is a blocker.
 
 ## Local validation
 

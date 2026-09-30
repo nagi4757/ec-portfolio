@@ -1,7 +1,7 @@
 # Phase 6C-3: the ECS cluster and the Spot capacity provider.
 #
-# No task definition and no service are defined here. This phase builds the
-# capacity side only; what runs on it is Phase 6C-4.
+# No task definition and no service are defined here. This file is the
+# capacity side only; what runs on it is Phase 6C-4, in ecs_application.tf.
 
 resource "aws_ecs_cluster" "demo" {
   name = local.ecs_cluster_name
@@ -52,10 +52,12 @@ resource "aws_ecs_capacity_provider" "ecs_spot" {
 }
 
 # No default_capacity_provider_strategy on the cluster. A default would send
-# any RunTask call that omitted a strategy to the Spot group, including calls
-# made before Phase 6C-4 exists. The Phase 6C-4 service names its provider
-# explicitly instead, which also makes the service definition say where its
-# tasks land.
+# any RunTask call that omitted a strategy to the Spot group. The Phase 6C-4
+# service does not use a strategy either: it is a DAEMON on the EC2 launch
+# type, and AWS accepts a launch type or a capacity provider strategy, not
+# both. Its tasks still land only on Spot hosts, because this capacity
+# provider's Auto Scaling group is the only source of container instances in
+# the cluster.
 #
 # replace_triggered_by is the provider's documented remedy for the deletion
 # order: AWS refuses to delete a capacity provider while a cluster association
