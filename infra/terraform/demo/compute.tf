@@ -53,7 +53,19 @@ resource "aws_eip" "ec2_origin" {
   }
 }
 
-resource "aws_eip_association" "ec2_origin" {
-  allocation_id = aws_eip.ec2_origin.id
-  instance_id   = aws_instance.demo.id
+# Terraform no longer owns which instance holds the origin EIP. Phase 6C-5
+# moves the EIP between the On-Demand host and a validated Spot host as a
+# reviewed operator step; while this association was managed, the next plan
+# after such a move would propose re-attaching the EIP to the On-Demand host.
+#
+# destroy = false only drops the state entry. No DisassociateAddress call is
+# made, so the live association (EIP -> On-Demand host) is left as it is. The
+# EIP allocation itself stays managed above, and so does the Route 53 record
+# that points at its public IP.
+removed {
+  from = aws_eip_association.ec2_origin
+
+  lifecycle {
+    destroy = false
+  }
 }

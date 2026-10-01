@@ -35,7 +35,7 @@ Sources: [Terraform install](https://developer.hashicorp.com/terraform/install),
 
 The two DB AZ inputs must be distinct. The example uses `ap-northeast-1a` and `ap-northeast-1c`; confirm that the selected AZ names are available to the target account before plan/apply. Stable object keys avoid selecting AZs by a changing API list index.
 
-Automatic public IPv4 assignment is disabled by `aws_subnet.public_app.map_public_ip_on_launch = false`, which is the source of truth. EC2 follows that subnet policy, while the explicit `aws_eip.ec2_origin` and `aws_eip_association.ec2_origin` resources provide the stable public origin address. The private DB route table has no Internet Gateway, NAT Gateway, or VPC endpoint route.
+Automatic public IPv4 assignment is disabled by `aws_subnet.public_app.map_public_ip_on_launch = false`, which is the source of truth. EC2 follows that subnet policy, while the explicit `aws_eip.ec2_origin` allocation provides the stable public origin address. Which instance holds that address is no longer managed by Terraform (see [Phase 6C-5b-1](#phase-6c-5b-1-eip-association-ownership)). The private DB route table has no Internet Gateway, NAT Gateway, or VPC endpoint route.
 
 ## Security-group contract
 
@@ -727,6 +727,58 @@ The DAEMON service is what the bootstrap's post phase relies on: every host that
 ### Expected plan delta when this is applied
 
 `7 to add, 0 to change, 0 to destroy`: the seven resources above. With the Auto Scaling group at desired 0 the service places no task and no instance starts. Anything else is a blocker.
+
+## Phase 6C-5b-1 EIP association ownership
+
+Applied on 2026-10-01: the apply removed only the state entry (`0 added, 0 changed, 0 destroyed`). The live association, the EIP, Route 53 and CloudFront were unchanged, and the convergence plan reports `No changes`. Terraform stops owning the EIP association. The address itself and the DNS record that points at it stay managed.
+
+| Address | After this change |
+| --- | --- |
+| `aws_eip.ec2_origin` | still managed: the allocation, its tags and its public IP |
+| `aws_route53_record.origin_demo` | still managed: the `A` record to `aws_eip.ec2_origin.public_ip` |
+| `aws_instance.demo` | still managed, unchanged |
+| `aws_eip_association.ec2_origin` | `removed` with `destroy = false`: dropped from state only |
+
+Phase 6C-5b moves the EIP between the On-Demand host and a validated Spot host as a reviewed operator step. While the association was in state, the first plan after such a move would propose re-attaching the EIP to the On-Demand host. `ignore_changes` cannot prevent that: the association ID changes, the read returns not found, and the resource is created again. `terraform state rm` would do the same as the `removed` block, but as an unreviewed manual step.
+
+The apply makes no association call: no `DisassociateAddress` and no `AssociateAddress`. The live association (EIP to the On-Demand host) stays as it is until the separately approved cutover. From then on Terraform does not restore the association if it goes missing; putting the EIP back is part of the cutover runbook, not of a plan.
+
+### Expected plan delta when this is applied
+
+```
+  # aws_eip_association.ec2_origin will no longer be managed by Terraform, but will not be destroyed
+  # (destroy = false is set in the configuration)
+
+Plan: 0 to add, 0 to change, 0 to destroy.
+```
+
+- In `terraform show -json` of the saved plan, `resource_changes` has exactly one entry that is not `no-op`: `aws_eip_association.ec2_origin` with `actions = ["forget"]`. Every other resource, in particular `aws_eip.ec2_origin`, `aws_instance.demo`, `aws_route53_record.origin_demo` and the CloudFront distributions, is `no-op`, and there is no output change.
+- There is exactly one warning, with exactly this address:
+
+  ```
+  Warning: Some objects will no longer be managed by Terraform
+
+  If you apply this plan, Terraform will discard its tracking information for the following objects, but it will not delete them:
+   - aws_eip_association.ec2_origin
+  ```
+
+  Any other warning, or any other address in that list, is a blocker.
+- In the `-json` UI stream of Terraform 1.16 the forget appears as a `planned_change` with `action` `remove` ("Plan to remove"). It is not counted in `change_summary`, whose `remove` counts destroys and must be `0`. A real destroy appears as `delete` and `1 to destroy`. Gate on the saved plan's `resource_changes` actions, not on the word "remove".
+- A `delete` for the association means the `removed` block lost `destroy = false`. Stop.
+
+After the apply the convergence plan reports `No changes` again. The `removed` block stays in the configuration and is a no-op from then on, with no warning.
+
+### Drift after a cutover
+
+Once the EIP is associated with a Spot host, a refresh shows the association-derived attributes of `aws_eip.ec2_origin` changing (`instance`, `association_id`, `network_interface`, `private_ip`, `private_dns`). The configuration sets none of them, so they are drift only, never a planned change. The convergence drift rule allows exactly these attributes for this one address; the exact list is confirmed at the first cutover. Any other change to `aws_eip.ec2_origin` (`domain`, `tags`, replacement, destroy) or any change to the Route 53 record is a blocker.
+
+### Local validation without AWS credentials
+
+```
+terraform init -backend=false -input=false -lockfile=readonly
+terraform fmt -check -recursive
+terraform validate
+```
 
 ## Local validation
 
