@@ -1132,3 +1132,65 @@ Each step is approved separately; any AccessDenied or unexpected plan is a STOP.
    `aws_ssoadmin_permission_set_inline_policy.plan` (5 statements added), then
    apply, convergence and a discovery.
 6. The Demo root: the Phase 6C-4 plan and apply.
+
+## Phase 6C-5b-2 cutover observability (Plan read)
+
+Before the first traffic cutover the operator has to prove that a request sent
+through CloudFront was served by the Spot host, not inferred from where the EIP
+is. The API logs every request with its `X-Correlation-ID`, and only the ECS
+tasks on the Spot host ship their logs to `/ec-portfolio/demo/ecs/api`; the
+On-Demand host logs locally. So a lookup of a known ID in that log group is the
+proof, and a lookup of an ID served before the cutover is the negative control.
+The read-only cutover observer runs as `ECPortfolioTerraformPlan`.
+
+### Plan read (`policy_plan_cutover_observability.tf`)
+
+One statement, `FilterExactEcsApiLogGroupEvents`: `logs:FilterLogEvents` on
+`arn:aws:logs:ap-northeast-1:<ACCOUNT_ID>:log-group:/ec-portfolio/demo/ecs/api`.
+
+- The observer makes exactly one Logs call, `FilterLogEvents` with a filter
+  pattern on the ID, and reads only the event count and the stream name prefix.
+- `logs:FilterLogEvents` authorizes on the `log-group` resource type, in the
+  standard ARN format without `:*`, and has no dependent action (AWS service
+  reference; the CloudWatch Logs identity-based policy examples grant it on the
+  plain log group ARN). The statement names the exact ARN and nothing else: no
+  `:*`, no other log group, no `*`, no Condition.
+- Not granted, because the observer does not call them: `logs:GetLogEvents`
+  (authorizes on log streams), `logs:DescribeLogStreams`, `logs:StartQuery`.
+  `logs:DescribeLogGroups` stays only in the Phase 6C-4 refresh statement.
+- The log group has no KMS key, so no `kms:Decrypt` is needed.
+- After this change `ECPortfolioTerraformPlan` can read the content of this one
+  log group: request path, method, status and correlation ID. The API writes no
+  secret to it.
+
+No write, tagging or permissions management action, by the service reference
+access levels. Rendered offline with the provider, the Plan inline policy grows
+from 42 to 43 statements and from 8,251 to 8,433 of the 10,240 non-whitespace
+characters; every existing statement renders unchanged. The canonical SHA-256
+of the addition is `f3100b25d4dbc75a1765de73ea79e10b3c078180659b41ddd4a6091375be3585`.
+
+### Verification after apply
+
+The exact-resource restriction is proven offline, on the rendered policy and its
+mutations (`:*`, `*`, another log group, an added read or write action, an added
+Condition or resource each fail the gate). After the apply:
+
+- Positive: the observer's log read check finds 0 events for a random ID on
+  `/ec-portfolio/demo/ecs/api`, with no error.
+- Negative, only where it is meaningful: a `FilterLogEvents` on a different log
+  group is used as a live AccessDenied check only if that log group is first
+  confirmed to exist. A missing log group or stream is not a reliable check:
+  the error text is not a gate.
+
+### Order after merge
+
+Each step is approved separately; any AccessDenied or unexpected plan is a STOP.
+
+1. This root: a plan that changes only
+   `aws_ssoadmin_permission_set_inline_policy.plan` (1 statement added), with no
+   change to any other permission set, managed policy or role. Then apply,
+   convergence and a discovery.
+2. The positive check above.
+
+No customer managed policy, Identity Center console step or
+`ECPortfolioAccessAdmin` change is involved.
