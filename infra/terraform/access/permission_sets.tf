@@ -42,5 +42,13 @@ resource "aws_ssoadmin_permission_set_inline_policy" "apply" {
 
   lifecycle {
     prevent_destroy = true
+
+    # Fail-closed guardrail (policy_guardrails.tf): the origin Elastic IP is
+    # associated only through the customer managed policy
+    # ECPortfolioOriginEipAssociation, never through this inline policy.
+    precondition {
+      condition     = length(local.apply_inline_eip_association_grants) == 0
+      error_message = "The Apply inline policy grants ec2:AssociateAddress or ec2:DisassociateAddress (by name, through a wildcard or through Allow with NotAction) in statement(s) ${join(", ", local.apply_inline_eip_association_grants)}. Origin EIP association belongs only to the customer managed policy ECPortfolioOriginEipAssociation."
+    }
   }
 }
