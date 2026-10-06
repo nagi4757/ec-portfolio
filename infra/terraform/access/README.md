@@ -224,7 +224,8 @@ step 2.
         "arn:aws:iam::<ACCOUNT_ID>:policy/ECPortfolioTerraformApplyPhase5F1",
         "arn:aws:iam::<ACCOUNT_ID>:policy/ECPortfolioTerraformApplyPhase5F2a",
         "arn:aws:iam::<ACCOUNT_ID>:policy/ECPortfolioTerraformApplySpotFoundation",
-        "arn:aws:iam::<ACCOUNT_ID>:policy/ECPortfolioTerraformApplyEcsApplication"
+        "arn:aws:iam::<ACCOUNT_ID>:policy/ECPortfolioTerraformApplyEcsApplication",
+        "arn:aws:iam::<ACCOUNT_ID>:policy/ECPortfolioOriginEipAssociation"
       ]
     },
     {
@@ -278,7 +279,7 @@ policy mutation other than `OriginTlsPolicyVersionWrite`
 the Demo state.
 
 `CustomerManagedPolicyRead`: the Plan and Apply permission sets also carry
-customer managed policies (5 and 12). They are read-only here so that their
+customer managed policies (5 and 13). They are read-only here so that their
 content can be baselined and reviewed; the list is exactly the policies the two
 permission sets reference, as the discovery records them. A new reference means
 a new ARN in this statement, never a wildcard. The eleventh Apply policy,
@@ -287,6 +288,8 @@ attached (see [Phase 6C-3 Spot foundation permissions](#phase-6c-3-spot-foundati
 The twelfth, `ECPortfolioTerraformApplyEcsApplication`, follows the same rule:
 the console update of this statement waits until the discovery shows the
 attachment (see [Phase 6C-4 ECS application permissions](#phase-6c-4-ecs-application-permissions)).
+The thirteenth, `ECPortfolioOriginEipAssociation`, follows the same rule (see
+[Phase 6C-5 D3 origin EIP association](#phase-6c-5-d3-origin-eip-association)).
 
 `OriginTlsPolicyVersionWrite`: rotating the `X-Origin-Verify` token ends with
 CloudFront sending the new token (step `OR4` in the runtime README). That needs
@@ -365,7 +368,7 @@ rendering of it from merged `main`.
 4. Verify read-only, as `ec-portfolio-access-admin`: the step 5 checks of the
    bootstrap, the reserved role reads (`iam:GetRole`, `iam:ListRolePolicies`,
    `iam:GetRolePolicy`, `iam:ListAttachedRolePolicies`), `iam:GetPolicy` and
-   `iam:ListPolicyVersions` on each of the 17 customer managed policies, and
+   `iam:ListPolicyVersions` on each of the 18 customer managed policies, and
    an AccessDenied from `iam:GetPolicy` on an AWS managed policy outside the
    list (for example `arn:aws:iam::aws:policy/ReadOnlyAccess`).
 5. Run the discovery again; its baseline must equal the previous one.
@@ -1194,3 +1197,168 @@ Each step is approved separately; any AccessDenied or unexpected plan is a STOP.
 
 No customer managed policy, Identity Center console step or
 `ECPortfolioAccessAdmin` change is involved.
+
+## Phase 6C-5 D3 origin EIP association
+
+Phase 6C-5 moves the origin Elastic IP between the On-Demand host and a
+validated Spot host as a reviewed operator step: the promotion to Spot and the
+return to On-Demand, both with `aws ec2 associate-address`. Since Phase 6C-5b-1
+the Demo root no longer manages the association (`removed` block in
+`compute.tf`), so no Terraform plan or apply calls `ec2:AssociateAddress`. Until
+now the operator's call was allowed by the adopted inline statement
+`Ec2DemoApply` on `*`, limited only by `aws:RequestedRegion`: any Elastic IP to
+any instance or network interface in the region.
+
+D3 narrows it in two changes:
+
+| Change | Permission set | What | Where |
+| --- | --- | --- | --- |
+| 1 | `ECPortfolioTerraformApply` | new customer managed policy `ECPortfolioOriginEipAssociation`, attached as its thirteenth | created and attached by an administrator from the document below; this root manages neither |
+| 1 | `ECPortfolioAccessAdmin` | `CustomerManagedPolicyRead` lists the new policy (17 → 18 ARNs) | the document above; no new write |
+| 2 | `ECPortfolioTerraformApply` | `ec2:AssociateAddress` removed from the inline statement `Ec2DemoApply`, and a guardrail that fails when the Apply inline policy grants `ec2:AssociateAddress` or `ec2:DisassociateAddress` | `policy_apply.tf` and `policy_guardrails.tf`, applied by this root |
+
+Change 2 is a separate change, made only after change 1 has been attached and
+has converged. Change 1 adds the narrow grant while the broad one still exists,
+so the operator never loses the permission in between; the narrowing takes
+effect when change 2 removes the broad grant.
+
+The new statements cannot go into the inline policy: rendered offline with the
+provider, it already has 10,203 of the 10,240 non-whitespace characters
+Identity Center allows. Change 1 does not change the Apply inline policy or its
+twelve existing customer managed policies. The IAM quota "Managed policies per
+role" has an applied account-level value of 20 (confirmed on 2026-09-29), so a
+thirteenth policy fits. The name has no `TerraformApply`: the policy is for the
+operator's address moves, not for Terraform.
+
+### `ECPortfolioOriginEipAssociation`
+
+Maintained by hand; this root does not manage it. The document below is the
+reviewed source.
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AssociateExactOriginEip",
+      "Effect": "Allow",
+      "Action": "ec2:AssociateAddress",
+      "Resource": "arn:aws:ec2:ap-northeast-1:<ACCOUNT_ID>:elastic-ip/eipalloc-06e3397a111101313"
+    },
+    {
+      "Sid": "AssociateOriginEipToOnDemandHost",
+      "Effect": "Allow",
+      "Action": "ec2:AssociateAddress",
+      "Resource": "arn:aws:ec2:ap-northeast-1:<ACCOUNT_ID>:instance/i-01aab176822e4e38c"
+    },
+    {
+      "Sid": "AssociateOriginEipToSpotHost",
+      "Effect": "Allow",
+      "Action": "ec2:AssociateAddress",
+      "Resource": "arn:aws:ec2:ap-northeast-1:<ACCOUNT_ID>:instance/*",
+      "Condition": {
+        "StringEquals": {
+          "ec2:InstanceMarketType": "spot"
+        },
+        "ArnEquals": {
+          "ec2:InstanceProfile": "arn:aws:iam::<ACCOUNT_ID>:instance-profile/ec-portfolio-demo-ecs-spot"
+        }
+      }
+    }
+  ]
+}
+```
+
+`scripts/policy-gate.sh canonical` of this block as written (placeholder
+included): `46b035a061fbe2e2eb96d45459e037508a920f6c9fee54571c49fd21c93e6eee`.
+3 statements, 1 action (write by the service reference access level), 709 of
+the 6,144 non-whitespace characters a managed policy allows.
+
+EC2 authorizes each resource of a request separately. For `AssociateAddress`
+the service reference lists three resource types, none of them required:
+`elastic-ip`, `instance` and `network-interface`. A call is allowed only when
+every resource it is evaluated against is allowed, so each statement names one
+resource type:
+
+- **`AssociateExactOriginEip`.** The exact allocation of `aws_eip.ec2_origin`.
+  No other Elastic IP can be associated, now or later.
+- **`AssociateOriginEipToOnDemandHost`.** The exact ARN of `aws_instance.demo`,
+  the target of the planned return and of a failure rollback. Its ID is stable:
+  the instance has `prevent_destroy`, and a planned replacement has to update
+  this ARN in the same change.
+- **`AssociateOriginEipToSpotHost`.** The promotion target. Every scale-up
+  launches a new Spot host, and interruption or capacity rebalance replaces it,
+  so no instance ID can be written in advance. Both conditions must hold, and a missing key
+  fails closed. Both keys are listed for the `instance` resource of
+  `AssociateAddress` in the service reference.
+  - `ec2:InstanceMarketType` = `spot`. It is fixed for the life of an instance;
+    the On-Demand host is `on-demand`.
+  - `ec2:InstanceProfile` = the Spot host profile `ec-portfolio-demo-ecs-spot`,
+    which only the Spot launch template uses; the On-Demand host uses
+    `ec-portfolio-demo-ec2`. No Apply policy grants
+    `ec2:AssociateIamInstanceProfile` or
+    `ec2:ReplaceIamInstanceProfileAssociation`, so the profile of an existing
+    instance cannot be changed to match.
+- **Reassociation.** `--allow-reassociation`, which is also the default, moves
+  the address from its current holder without `ec2:DisassociateAddress`. The
+  first cutover on 2026-10-05 moved it both ways while no Apply policy granted
+  `ec2:DisassociateAddress`. The current holder is always the On-Demand host or
+  a Spot host, and both are allowed here, so a move still works if EC2 also
+  authorizes the current holder.
+
+What it does not stop: Apply can still launch an instance that meets the Spot
+conditions itself. It has `ec2:RunInstances` on `*` in `Ec2DemoApply` and
+`iam:PassRole` on the Spot role in `ECPortfolioTerraformApplySpotFoundation`.
+The policy keeps the address off unrelated instances and every other address
+off any instance; narrowing instance launch is outside D3.
+
+Deliberately absent:
+
+| Not granted | Why |
+| --- | --- |
+| `network-interface`, as an ARN or `*` | The operator associates with `--instance-id`. Whether EC2 also authorizes the instance's network interface on that path is not documented; the verification below settles it. `network-interface/*` would open `--network-interface-id` as a way round the instance conditions |
+| `ec2:DisassociateAddress` | Never needed, because of reassociation. A disassociation would leave the origin without an address and the On-Demand host without egress |
+| `ec2:ResourceTag/aws:autoscaling:groupName` | Auto Scaling sets this tag and users cannot edit it, but no AWS document states that an `aws:`-prefixed tag is evaluated in this condition. Added only after a live dry-run on a Spot host proves it |
+| `ec2:LaunchTemplate` | A key of the `instance` resource type, but not one of the `AssociateAddress` instance keys; it would be absent and deny |
+| `ec2:SourceInstanceARN` | The instance a request comes from, not the target. An Identity Center session has none |
+| Tag conditions such as `Name` | Apply has `ec2:CreateTags` and `ec2:DeleteTags` on `*`, so it could tag any instance to match |
+
+### Verification
+
+Offline, the document above is checked against its canonical SHA-256 and
+against mutations, each of which must fail: a `*` resource, another Elastic
+IP, an instance pattern without both conditions, a weakened or wrong
+condition, `on-demand`, another action, a `network-interface` resource, an
+excluded key, NotAction, NotResource or Deny.
+
+Live, after change 2 has been applied, with the address on the On-Demand host
+and no cutover running, as `ECPortfolioTerraformApply`, dry-run only:
+
+| Check | Call | Expected | Otherwise |
+| --- | --- | --- | --- |
+| Positive | `aws ec2 associate-address --dry-run --allocation-id eipalloc-06e3397a111101313 --instance-id i-01aab176822e4e38c --allow-reassociation` | `DryRunOperation` | STOP: a resource on this path, most likely the network interface, is not allowed |
+| Negative | the same call with `--network-interface-id <On-Demand primary network interface>` instead of `--instance-id` | `UnauthorizedOperation` | STOP: the network interface path is open |
+
+The association ID must be the same afterwards. The Spot path is verified by
+the promotion dry-run of the next canary or cutover, before any real promotion.
+Until then D3 is recorded as "On-Demand path verified / Spot path pending live
+verification".
+
+### Order after merge
+
+Each step is approved separately; any AccessDenied or unexpected plan is a STOP.
+
+1. An administrator renders the JSON above from merged `main`, checks its
+   canonical SHA-256 against the one recorded here, fills `<ACCOUNT_ID>` and
+   creates the policy. AccessAdmin has no `iam:CreatePolicy`.
+2. The administrator attaches it to `ECPortfolioTerraformApply` as a customer
+   managed policy reference in the Identity Center console and provisions. The
+   Apply reserved role then carries 13 customer managed policies.
+3. Discovery: Apply lists the 13 references and nothing else changed.
+4. `ECPortfolioAccessAdmin` update from merged `main`, as in
+   [Changing the `ECPortfolioAccessAdmin` policy](#changing-the-ecportfolioaccessadmin-policy),
+   now with 18 customer managed policies. Then the new policy is read back: one
+   version, the default, attached once, and its document with the account ID
+   replaced by `<ACCOUNT_ID>` has the canonical SHA-256 recorded here.
+5. This root: a convergence plan with `No changes`.
+6. Change 2, then the live verification above.
