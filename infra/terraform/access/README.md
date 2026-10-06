@@ -475,11 +475,26 @@ profile or retry:
 
 ## Guardrails
 
-`policy_guardrails.tf` reports, as check blocks, an inline policy that exceeds
-the Identity Center size limit (10,240 non-whitespace characters), allows a
-whole service or `*`, combines Allow with NotAction, or grants an Identity
-Center, identity store or Organizations action. They are warnings while existing
-policies are adopted and become blocking preconditions after cleanup.
+`policy_guardrails.tf` holds two kinds of guardrail.
+
+- **Check blocks: warnings.** An inline policy that exceeds the Identity Center
+  size limit (10,240 non-whitespace characters), allows a whole service or `*`,
+  combines Allow with NotAction, or grants an Identity Center, identity store or
+  Organizations action is reported as a warning. These do not stop a plan or an
+  apply. They stay warnings while existing policies are adopted and become
+  blocking preconditions after cleanup.
+- **The Phase 6C-5 D3 Apply inline EIP guardrail: fail-closed.** It is a
+  `lifecycle.precondition` on `aws_ssoadmin_permission_set_inline_policy.apply`
+  (`permission_sets.tf`), with its condition in `policy_guardrails.tf`. It fails
+  when an Allow statement of the Apply inline policy grants
+  `ec2:AssociateAddress` or `ec2:DisassociateAddress`: by name in any case,
+  through a `*` or `?` wildcard, through Allow with NotAction, or through an
+  action name with characters outside an IAM action name. A violation stops the
+  plan and the apply, so the document is never written to the permission set.
+  It covers the Apply inline policy only; the customer managed policy
+  `ECPortfolioOriginEipAssociation` grants `ec2:AssociateAddress` by design and
+  is outside this root (see
+  [Phase 6C-5 D3 origin EIP association](#phase-6c-5-d3-origin-eip-association)).
 
 ## Changing a policy after adoption
 
@@ -1215,7 +1230,7 @@ D3 narrows it in two changes:
 | --- | --- | --- | --- |
 | 1 | `ECPortfolioTerraformApply` | new customer managed policy `ECPortfolioOriginEipAssociation`, attached as its thirteenth | created and attached by an administrator from the document below; this root manages neither |
 | 1 | `ECPortfolioAccessAdmin` | `CustomerManagedPolicyRead` lists the new policy (17 → 18 ARNs) | the document above; no new write |
-| 2 | `ECPortfolioTerraformApply` | `ec2:AssociateAddress` removed from the inline statement `Ec2DemoApply`, and a guardrail that fails when the Apply inline policy grants `ec2:AssociateAddress` or `ec2:DisassociateAddress` | `policy_apply.tf` and `policy_guardrails.tf`, applied by this root |
+| 2 | `ECPortfolioTerraformApply` | `ec2:AssociateAddress` removed from the inline statement `Ec2DemoApply`, and a fail-closed guardrail (a `lifecycle.precondition` on the Apply inline policy resource) that stops the plan and the apply when the Apply inline policy grants `ec2:AssociateAddress` or `ec2:DisassociateAddress` | `policy_apply.tf`, `policy_guardrails.tf` and `permission_sets.tf`, applied by this root |
 
 Change 2 is a separate change, made only after change 1 has been attached and
 has converged. Change 1 adds the narrow grant while the broad one still exists,
@@ -1362,3 +1377,39 @@ Each step is approved separately; any AccessDenied or unexpected plan is a STOP.
    replaced by `<ACCOUNT_ID>` has the canonical SHA-256 recorded here.
 5. This root: a convergence plan with `No changes`.
 6. Change 2, then the live verification above.
+
+### Change 2
+
+- `policy_apply.tf`: `ec2:AssociateAddress` is removed from `Ec2DemoApply`.
+  Every other action, the Resource, the Condition and the statement order stay.
+- `policy_guardrails.tf` and `permission_sets.tf`: the fail-closed guardrail
+  described under [Guardrails](#guardrails).
+
+Rendered offline with the provider, the Apply inline policy keeps its 46
+statements and goes from 10,203 to 10,180 of the 10,240 non-whitespace
+characters; only `Ec2DemoApply` differs. The Plan inline policy renders
+unchanged. With the account ID written as `<ACCOUNT_ID>`, the canonical SHA-256
+of the rendered Apply inline policy goes from
+`a7423ca67de68a9612022d97354c0f3c391e61edd51dbff4a3c7015ac133bd95` (equal to
+the live export) to
+`1a2ca52a265999b555ffc47eca97b2093ae72c10288dcba038e2300bf160377d`.
+
+The precondition is tested offline with `terraform test`, the four data sources
+that would call AWS overridden and the policy documents rendered by the
+provider. The Apply inline policy as written passes. Twelve mutants that grant
+either action (by name, as a case variant, through a wildcard, through Allow
+with NotAction, through an unmatchable action name) fail exactly this
+precondition. A Deny statement naming both actions, an action that only shares
+the prefix, and the action in the Plan inline policy do not.
+
+#### Order after merge (change 2)
+
+Each step is approved separately; any AccessDenied or unexpected plan is a STOP.
+
+1. This root: a plan that changes only
+   `aws_ssoadmin_permission_set_inline_policy.apply` (the one action removed),
+   `Plan: 0 to add, 1 to change, 0 to destroy.`, with no change to the Plan
+   inline policy, any customer managed policy or any role. Then apply, a
+   discovery and a convergence plan with `No changes`.
+   `ECPortfolioOriginEipAssociation` stays attached and unchanged.
+2. The live verification above.

@@ -63,7 +63,6 @@ data "aws_iam_policy_document" "apply" {
       "ec2:GetManagedPrefixListEntries",
       "ec2:RunInstances",
       "ec2:AllocateAddress",
-      "ec2:AssociateAddress",
       "ec2:CreateTags",
       "ec2:DeleteTags",
       "ec2:ModifyInstanceCreditSpecification",
