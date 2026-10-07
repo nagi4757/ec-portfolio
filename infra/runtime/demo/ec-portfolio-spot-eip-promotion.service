@@ -1,0 +1,21 @@
+[Unit]
+Description=Move the origin Elastic IP to this Spot host after Auto Scaling accepted it (EC Portfolio Demo)
+# Queued by the post-bootstrap after its CONTINUE was accepted, and started
+# only once that unit has finished. Both markers are written by the
+# post-bootstrap and live under /run, so a host that rebooted has neither.
+After=ec-portfolio-spot-post-bootstrap.service
+ConditionPathExists=/run/ec-portfolio-demo/spot-serving-ready
+ConditionPathExists=/run/ec-portfolio-demo/spot-continue-accepted
+# No [Install] section, on purpose. The promotion belongs to the boot on which
+# the host was accepted; a reboot does not run it again.
+
+[Service]
+Type=oneshot
+# The post-bootstrap's own environment: EIP_ALLOCATION_ID, INSTANCE_ID,
+# AUTOSCALING_GROUP_NAME and AWS_REGION. A missing file fails the unit.
+EnvironmentFile=/etc/ec-portfolio/spot-post-bootstrap.env
+ExecStart=/opt/ec-portfolio/runtime/demo/promote-origin-eip.sh
+# Three attempts of the smoke check, three reads, a dry run and the
+# association, with the retry interval, fit well inside this. A promotion that
+# does not finish leaves the address where it is.
+TimeoutStartSec=900s

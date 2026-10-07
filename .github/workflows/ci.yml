@@ -155,6 +155,7 @@ jobs:
           infra/runtime/demo/imds-guard.test.sh
           infra/runtime/demo/spot-user-data-loader.test.sh
           infra/runtime/demo/spot-runtime-bundle.test.sh
+          infra/runtime/demo/promote-origin-eip.test.sh
 
       - name: Test origin verification token rotation contract
         run: |
