@@ -100,3 +100,76 @@ locals {
     ]))
   ]
 }
+
+# Phase 6C-5c-1: the runtime orchestration services (Step Functions, DynamoDB,
+# EventBridge and EventBridge Scheduler) are written only through the customer
+# managed policy ECPortfolioTerraformApplyRuntimeOrchestration (see README). The
+# two inline policies this root owns keep to what they hold today:
+#   - the Plan inline policy may name, from these services, only the exact read
+#     actions listed below;
+#   - the Apply inline policy may name no Step Functions, DynamoDB or EventBridge
+#     action, and of EventBridge Scheduler only the actions it already had. In
+#     particular it never gains scheduler:UpdateSchedule or
+#     scheduler:DeleteSchedule, which the customer managed policy grants on the
+#     three Phase 6C-5c schedules only.
+# An action counts as one of these services when the part before ":" matches
+# the service name as an IAM wildcard, in any case. "*", an action without ":",
+# an action with characters outside an IAM action name and any Allow with
+# NotAction count as well, so a grant cannot reach these services by being
+# broad or malformed. Allowed names are compared exactly, case included.
+#
+# Like the Phase 6C-5 D3 guardrail, these fail closed: they are lifecycle
+# preconditions on the two inline policy resources (permission_sets.tf). The
+# locals below are their conditions: the Sids of the offending Allow statements.
+locals {
+  runtime_orchestration_services = ["states", "dynamodb", "events", "scheduler"]
+
+  plan_inline_runtime_orchestration_actions = [
+    "states:DescribeStateMachine",
+    "states:ListStateMachineVersions",
+    "states:ListTagsForResource",
+    "states:ValidateStateMachineDefinition",
+    "dynamodb:DescribeTable",
+    "dynamodb:DescribeContinuousBackups",
+    "dynamodb:DescribeTimeToLive",
+    "dynamodb:ListTagsOfResource",
+    "events:DescribeRule",
+    "events:ListTargetsByRule",
+    "events:ListTagsForResource",
+    "scheduler:GetSchedule",
+    "scheduler:GetScheduleGroup",
+    "scheduler:ListTagsForResource",
+  ]
+
+  apply_inline_runtime_orchestration_actions = [
+    "scheduler:ListSchedules",
+    "scheduler:ListScheduleGroups",
+    "scheduler:CreateScheduleGroup",
+    "scheduler:GetScheduleGroup",
+    "scheduler:ListTagsForResource",
+    "scheduler:TagResource",
+    "scheduler:CreateSchedule",
+    "scheduler:GetSchedule",
+  ]
+
+  inline_policy_documents_for_runtime_orchestration = {
+    plan  = { document = data.aws_iam_policy_document.plan.json, allowed = local.plan_inline_runtime_orchestration_actions }
+    apply = { document = data.aws_iam_policy_document.apply.json, allowed = local.apply_inline_runtime_orchestration_actions }
+  }
+
+  runtime_orchestration_inline_grants = {
+    for name, policy in local.inline_policy_documents_for_runtime_orchestration : name => [
+      for statement in jsondecode(policy.document).Statement :
+      try(statement.Sid, "(statement without Sid)")
+      if statement.Effect == "Allow" && (can(statement.NotAction) || anytrue([
+        for action in try(tolist(statement.Action), [try(statement.Action, "")]) :
+        !contains(policy.allowed, action) && (
+          !can(regex("^[A-Za-z0-9:*?_-]+$", action)) || !strcontains(action, ":") || anytrue([
+            for service in local.runtime_orchestration_services :
+            can(regex(format("(?i)^%s$", replace(replace(split(":", action)[0], "*", ".*"), "?", ".")), service))
+          ])
+        )
+      ]))
+    ]
+  }
+}

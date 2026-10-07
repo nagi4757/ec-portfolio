@@ -28,6 +28,14 @@ resource "aws_ssoadmin_permission_set_inline_policy" "plan" {
   # either, so a removal has to go through a removed block instead.
   lifecycle {
     prevent_destroy = true
+
+    # Fail-closed guardrail (policy_guardrails.tf): from the Phase 6C-5c runtime
+    # orchestration services the Plan inline policy names only the exact reads
+    # its plans make.
+    precondition {
+      condition     = length(local.runtime_orchestration_inline_grants.plan) == 0
+      error_message = "The Plan inline policy grants a Step Functions, DynamoDB, EventBridge or EventBridge Scheduler action outside its read allowlist (by name, through a wildcard or through Allow with NotAction) in statement(s) ${join(", ", local.runtime_orchestration_inline_grants.plan)}."
+    }
   }
 }
 
@@ -49,6 +57,15 @@ resource "aws_ssoadmin_permission_set_inline_policy" "apply" {
     precondition {
       condition     = length(local.apply_inline_eip_association_grants) == 0
       error_message = "The Apply inline policy grants ec2:AssociateAddress or ec2:DisassociateAddress (by name, through a wildcard or through Allow with NotAction) in statement(s) ${join(", ", local.apply_inline_eip_association_grants)}. Origin EIP association belongs only to the customer managed policy ECPortfolioOriginEipAssociation."
+    }
+
+    # Fail-closed guardrail (policy_guardrails.tf): the Phase 6C-5c runtime
+    # orchestration is written only through the customer managed policy
+    # ECPortfolioTerraformApplyRuntimeOrchestration, never through this inline
+    # policy.
+    precondition {
+      condition     = length(local.runtime_orchestration_inline_grants.apply) == 0
+      error_message = "The Apply inline policy grants a Step Functions, DynamoDB or EventBridge action, or an EventBridge Scheduler action it did not have (by name, through a wildcard or through Allow with NotAction) in statement(s) ${join(", ", local.runtime_orchestration_inline_grants.apply)}. The runtime orchestration belongs only to the customer managed policy ECPortfolioTerraformApplyRuntimeOrchestration."
     }
   }
 }
