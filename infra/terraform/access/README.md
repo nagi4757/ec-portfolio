@@ -225,7 +225,8 @@ step 2.
         "arn:aws:iam::<ACCOUNT_ID>:policy/ECPortfolioTerraformApplyPhase5F2a",
         "arn:aws:iam::<ACCOUNT_ID>:policy/ECPortfolioTerraformApplySpotFoundation",
         "arn:aws:iam::<ACCOUNT_ID>:policy/ECPortfolioTerraformApplyEcsApplication",
-        "arn:aws:iam::<ACCOUNT_ID>:policy/ECPortfolioOriginEipAssociation"
+        "arn:aws:iam::<ACCOUNT_ID>:policy/ECPortfolioOriginEipAssociation",
+        "arn:aws:iam::<ACCOUNT_ID>:policy/ECPortfolioTerraformApplyRuntimeOrchestration"
       ]
     },
     {
@@ -279,7 +280,7 @@ policy mutation other than `OriginTlsPolicyVersionWrite`
 the Demo state.
 
 `CustomerManagedPolicyRead`: the Plan and Apply permission sets also carry
-customer managed policies (5 and 13). They are read-only here so that their
+customer managed policies (5 and 14). They are read-only here so that their
 content can be baselined and reviewed; the list is exactly the policies the two
 permission sets reference, as the discovery records them. A new reference means
 a new ARN in this statement, never a wildcard. The eleventh Apply policy,
@@ -290,6 +291,9 @@ the console update of this statement waits until the discovery shows the
 attachment (see [Phase 6C-4 ECS application permissions](#phase-6c-4-ecs-application-permissions)).
 The thirteenth, `ECPortfolioOriginEipAssociation`, follows the same rule (see
 [Phase 6C-5 D3 origin EIP association](#phase-6c-5-d3-origin-eip-association)).
+The fourteenth, `ECPortfolioTerraformApplyRuntimeOrchestration`, follows the same
+rule (see
+[Phase 6C-5c-1 runtime orchestration permissions](#phase-6c-5c-1-runtime-orchestration-permissions)).
 
 `OriginTlsPolicyVersionWrite`: rotating the `X-Origin-Verify` token ends with
 CloudFront sending the new token (step `OR4` in the runtime README). That needs
@@ -368,7 +372,7 @@ rendering of it from merged `main`.
 4. Verify read-only, as `ec-portfolio-access-admin`: the step 5 checks of the
    bootstrap, the reserved role reads (`iam:GetRole`, `iam:ListRolePolicies`,
    `iam:GetRolePolicy`, `iam:ListAttachedRolePolicies`), `iam:GetPolicy` and
-   `iam:ListPolicyVersions` on each of the 18 customer managed policies, and
+   `iam:ListPolicyVersions` on each of the 19 customer managed policies, and
    an AccessDenied from `iam:GetPolicy` on an AWS managed policy outside the
    list (for example `arn:aws:iam::aws:policy/ReadOnlyAccess`).
 5. Run the discovery again; its baseline must equal the previous one.
@@ -495,6 +499,18 @@ profile or retry:
   `ECPortfolioOriginEipAssociation` grants `ec2:AssociateAddress` by design and
   is outside this root (see
   [Phase 6C-5 D3 origin EIP association](#phase-6c-5-d3-origin-eip-association)).
+- **The Phase 6C-5c-1 runtime orchestration guardrails: fail-closed.** Two more
+  `lifecycle.precondition`s, one on each inline policy resource, with their
+  conditions in `policy_guardrails.tf`. From Step Functions, DynamoDB,
+  EventBridge and EventBridge Scheduler, the Plan inline policy may name only
+  its exact read allowlist, and the Apply inline policy may name no Step
+  Functions, DynamoDB or EventBridge action and only the Scheduler actions it
+  already had (never `scheduler:UpdateSchedule` or `scheduler:DeleteSchedule`).
+  A `*`, a service wildcard that matches one of these services, an action name
+  with characters outside an IAM action name and Allow with NotAction all count
+  as a grant. The runtime orchestration is written only through the customer
+  managed policy `ECPortfolioTerraformApplyRuntimeOrchestration` (see
+  [Phase 6C-5c-1 runtime orchestration permissions](#phase-6c-5c-1-runtime-orchestration-permissions)).
 
 ## Changing a policy after adoption
 
@@ -1427,3 +1443,329 @@ Each step is approved separately; any AccessDenied or unexpected plan is a STOP.
    discovery and a convergence plan with `No changes`.
    `ECPortfolioOriginEipAssociation` stays attached and unchanged.
 2. The live verification above.
+
+## Phase 6C-5c-1 runtime orchestration permissions
+
+Phase 6C-5c moves the daily Spot schedule to an orchestrated one: EventBridge
+Scheduler starts three Step Functions state machines (day-open, ready-check,
+day-close), which keep a DynamoDB control table for run idempotency and a lock,
+act through their own role, and report failures through an EventBridge rule to
+the existing SNS topic. This change grants the Terraform identities what the
+Demo root needs to create, read, change and remove those resources. It creates
+none of them, enables no schedule and changes no existing schedule.
+
+The names below are fixed by this change. The Demo root must use exactly these,
+or its plan and apply fail with an AccessDenied.
+
+| Resource | Name |
+| --- | --- |
+| State machines | `ec-portfolio-demo-day-open`, `ec-portfolio-demo-ready-check`, `ec-portfolio-demo-day-close` |
+| Orchestrator role | `ec-portfolio-demo-runtime-orchestrator` (trusted by `states.amazonaws.com`) |
+| Control table | `ec-portfolio-demo-runtime-control` |
+| Failure rule | `ec-portfolio-demo-runtime-orchestration-failed` on the default event bus |
+| Schedules | `ec-portfolio-demo-day-open`, `ec-portfolio-demo-ready-check`, `ec-portfolio-demo-day-close` in the group `ec-portfolio-demo-runtime` |
+
+| Permission set | Change | Where |
+| --- | --- | --- |
+| `ECPortfolioTerraformPlan` | 5 read statements for the Demo root's plans | `policy_plan_runtime_orchestration.tf`, applied by this root |
+| `ECPortfolioTerraformPlan`, `ECPortfolioTerraformApply` | fail-closed guardrails on both inline policies (see [Guardrails](#guardrails)); neither inline document changes because of them | `policy_guardrails.tf`, `permission_sets.tf` |
+| `ECPortfolioTerraformApply` | new customer managed policy `ECPortfolioTerraformApplyRuntimeOrchestration`, attached as its fourteenth | created and attached by an administrator from the document below; this root manages neither |
+| `ECPortfolioAccessAdmin` | `CustomerManagedPolicyRead` lists the new policy (18 → 19 ARNs) | the document above; no new write |
+
+The Apply inline policy is not changed: it has 10,180 of the 10,240
+non-whitespace characters Identity Center allows, so the new grants go into a
+customer managed policy. The Apply permission set then carries 14 of the 20
+customer managed policies the applied IAM quota "Managed policies per role"
+allows (confirmed on 2026-09-29).
+
+Both documents were derived from the API calls AWS provider 6.62 makes for
+`aws_sfn_state_machine`, `aws_dynamodb_table`, `aws_iam_role`,
+`aws_iam_role_policy`, `aws_cloudwatch_event_rule`, `aws_cloudwatch_event_target`
+and `aws_scheduler_schedule` (Create, Read, Update, Delete, CustomizeDiff and the
+tag interceptor), mapped to IAM actions through the AWS service reference. A
+provider upgrade, or arguments these resources do not use yet (state machine
+logging, tracing, `publish`, encryption with a customer managed key, table
+streams, point-in-time recovery, replicas, a dead-letter queue or role on the
+event target), needs the same check again; a missing permission then fails
+closed with an AccessDenied.
+
+### `ECPortfolioTerraformApplyRuntimeOrchestration`
+
+Maintained by hand; this root does not manage it. The document below is the
+reviewed source.
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ManageExactRuntimeStateMachines",
+      "Effect": "Allow",
+      "Action": [
+        "states:CreateStateMachine",
+        "states:DescribeStateMachine",
+        "states:UpdateStateMachine",
+        "states:DeleteStateMachine",
+        "states:ListStateMachineVersions",
+        "states:TagResource",
+        "states:UntagResource",
+        "states:ListTagsForResource"
+      ],
+      "Resource": [
+        "arn:aws:states:ap-northeast-1:<ACCOUNT_ID>:stateMachine:ec-portfolio-demo-day-open",
+        "arn:aws:states:ap-northeast-1:<ACCOUNT_ID>:stateMachine:ec-portfolio-demo-ready-check",
+        "arn:aws:states:ap-northeast-1:<ACCOUNT_ID>:stateMachine:ec-portfolio-demo-day-close"
+      ]
+    },
+    {
+      "Sid": "ValidateStateMachineDefinitions",
+      "Effect": "Allow",
+      "Action": "states:ValidateStateMachineDefinition",
+      "Resource": "*"
+    },
+    {
+      "Sid": "StartRuntimeStateMachineRehearsals",
+      "Effect": "Allow",
+      "Action": [
+        "states:StartExecution",
+        "states:ListExecutions"
+      ],
+      "Resource": [
+        "arn:aws:states:ap-northeast-1:<ACCOUNT_ID>:stateMachine:ec-portfolio-demo-day-open",
+        "arn:aws:states:ap-northeast-1:<ACCOUNT_ID>:stateMachine:ec-portfolio-demo-ready-check",
+        "arn:aws:states:ap-northeast-1:<ACCOUNT_ID>:stateMachine:ec-portfolio-demo-day-close"
+      ]
+    },
+    {
+      "Sid": "ObserveRuntimeStateMachineExecutions",
+      "Effect": "Allow",
+      "Action": [
+        "states:DescribeExecution",
+        "states:GetExecutionHistory",
+        "states:StopExecution"
+      ],
+      "Resource": [
+        "arn:aws:states:ap-northeast-1:<ACCOUNT_ID>:execution:ec-portfolio-demo-day-open:*",
+        "arn:aws:states:ap-northeast-1:<ACCOUNT_ID>:execution:ec-portfolio-demo-ready-check:*",
+        "arn:aws:states:ap-northeast-1:<ACCOUNT_ID>:execution:ec-portfolio-demo-day-close:*"
+      ]
+    },
+    {
+      "Sid": "ManageExactRuntimeOrchestratorRole",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateRole",
+        "iam:GetRole",
+        "iam:UpdateRoleDescription",
+        "iam:UpdateAssumeRolePolicy",
+        "iam:DeleteRole",
+        "iam:TagRole",
+        "iam:UntagRole",
+        "iam:ListRolePolicies",
+        "iam:ListAttachedRolePolicies",
+        "iam:ListInstanceProfilesForRole",
+        "iam:PutRolePolicy",
+        "iam:GetRolePolicy",
+        "iam:DeleteRolePolicy"
+      ],
+      "Resource": "arn:aws:iam::<ACCOUNT_ID>:role/ec-portfolio-demo-runtime-orchestrator"
+    },
+    {
+      "Sid": "PassRuntimeOrchestratorRoleToStepFunctions",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": "arn:aws:iam::<ACCOUNT_ID>:role/ec-portfolio-demo-runtime-orchestrator",
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": "states.amazonaws.com"
+        }
+      }
+    },
+    {
+      "Sid": "ManageExactRuntimeControlTable",
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:CreateTable",
+        "dynamodb:DescribeTable",
+        "dynamodb:UpdateTable",
+        "dynamodb:DeleteTable",
+        "dynamodb:DescribeTimeToLive",
+        "dynamodb:UpdateTimeToLive",
+        "dynamodb:DescribeContinuousBackups",
+        "dynamodb:TagResource",
+        "dynamodb:UntagResource",
+        "dynamodb:ListTagsOfResource"
+      ],
+      "Resource": "arn:aws:dynamodb:ap-northeast-1:<ACCOUNT_ID>:table/ec-portfolio-demo-runtime-control"
+    },
+    {
+      "Sid": "ManageExactRuntimeFailureRule",
+      "Effect": "Allow",
+      "Action": [
+        "events:PutRule",
+        "events:DescribeRule",
+        "events:DeleteRule",
+        "events:PutTargets",
+        "events:RemoveTargets",
+        "events:ListTargetsByRule",
+        "events:TagResource",
+        "events:UntagResource",
+        "events:ListTagsForResource"
+      ],
+      "Resource": "arn:aws:events:ap-northeast-1:<ACCOUNT_ID>:rule/ec-portfolio-demo-runtime-orchestration-failed"
+    },
+    {
+      "Sid": "ManageExactRuntimeSchedules",
+      "Effect": "Allow",
+      "Action": [
+        "scheduler:CreateSchedule",
+        "scheduler:GetSchedule",
+        "scheduler:UpdateSchedule",
+        "scheduler:DeleteSchedule"
+      ],
+      "Resource": [
+        "arn:aws:scheduler:ap-northeast-1:<ACCOUNT_ID>:schedule/ec-portfolio-demo-runtime/ec-portfolio-demo-day-open",
+        "arn:aws:scheduler:ap-northeast-1:<ACCOUNT_ID>:schedule/ec-portfolio-demo-runtime/ec-portfolio-demo-ready-check",
+        "arn:aws:scheduler:ap-northeast-1:<ACCOUNT_ID>:schedule/ec-portfolio-demo-runtime/ec-portfolio-demo-day-close"
+      ]
+    }
+  ]
+}
+
+```
+
+`scripts/policy-gate.sh canonical` of this block as written (placeholder
+included): `95bb39181d737393509f40ada6aba759ad69cf64d83ad8a5fb28f8d4d4deb721`.
+9 statements, 51 actions, 3,565 of the 6,144 non-whitespace characters a managed
+policy allows.
+
+- **Exact ARNs.** The three state machines, their executions, the role, the
+  table, the rule and the three schedules. Executions are named
+  `execution:<state machine>:*`: AWS assigns the execution name part, the state
+  machine is fixed.
+- **`Resource "*"`.** Only `ValidateStateMachineDefinitions`. The provider's
+  CustomizeDiff calls `states:ValidateStateMachineDefinition` whenever a
+  definition changes, including on create and again during the apply, and the
+  service reference lists no resource type for it. It validates a document and
+  touches no resource.
+- **`iam:PassRole`.** Only the orchestrator role, and only to
+  `states.amazonaws.com`, which `CreateStateMachine` and `UpdateStateMachine`
+  name as dependent actions. The schedules pass the existing scheduler role,
+  which the inline statement `PassSchedulerRole` already allows to
+  `scheduler.amazonaws.com`.
+- **Schedules.** `scheduler:UpdateSchedule` and `scheduler:DeleteSchedule` exist
+  only here, and only on the three new schedules: the existing four
+  (`ec-portfolio-demo-rds-start`, `-ec2-start`, `-ec2-stop`, `-rds-stop`) cannot
+  be changed or deleted with this permission set. `CreateSchedule` and
+  `GetSchedule` are repeated on the exact ARNs so that this document states the
+  whole schedule permission; the inline statement `SchedulerApply` already
+  allows both on `ec-portfolio-demo-*`.
+- **Rehearsal.** `states:StartExecution` and `ListExecutions` on the three state
+  machines, and `DescribeExecution`, `GetExecutionHistory` and `StopExecution` on
+  their executions, so that the operator can run a rehearsal (each run with a
+  new `scheduledTime`), follow it and stop one that misbehaves. An execution acts
+  with the orchestrator role, whose own policy is written by the Demo root and
+  reviewed there.
+- **Tags on create.** `states:TagResource` for `CreateStateMachine` (a dependent
+  action), `iam:TagRole` for `CreateRole`, `dynamodb:TagResource` for
+  `CreateTable` and `events:TagResource` for `PutRule`. Tag reads go through
+  `states:ListTagsForResource`, `dynamodb:ListTagsOfResource` and
+  `events:ListTagsForResource`.
+- **Deliberately absent:**
+  - every DynamoDB item action (`GetItem`, `PutItem`, `DeleteItem`, `UpdateItem`,
+    `Query`, `Scan` and the batch and transaction forms). Terraform does not
+    read or write items; an operator break-glass on the `maintenance` or
+    `lock#runtime` item is a separate decision;
+  - `dynamodb:UpdateContinuousBackups`, `states:PublishStateMachineVersion`,
+    state machine aliases, activities, and Step Functions or EventBridge log
+    delivery (`logs:*Delivery*` would need `*`): the resources do not use them;
+  - `iam:AttachRolePolicy`, `iam:DetachRolePolicy`, permissions boundaries and
+    `iam:CreateServiceLinkedRole`: the role carries inline policies only;
+  - every EC2, Auto Scaling and RDS action, in particular
+    `ec2:DisassociateAddress`, `ec2:TerminateInstances`,
+    `autoscaling:CompleteLifecycleAction`, `autoscaling:UpdateAutoScalingGroup`
+    and `autoscaling:SetDesiredCapacity`. What the state machines may do at run
+    time is the orchestrator role's policy, not a Terraform permission;
+  - `UpdateSchedule` and `DeleteSchedule` on any existing schedule.
+- **Reused, not repeated.** The orchestrator role's `iam:GetRole` and
+  `iam:GetRolePolicy` reads are also allowed elsewhere; the scheduler role's new
+  `states:StartExecution` statement is written with the inline
+  `iam:PutRolePolicy` on that role (`IamDemoCreate`); the SNS topic policy that
+  lets the rule publish is written with the inline `sns:SetTopicAttributes`.
+- **What it does not stop.** Apply can write any policy into the orchestrator
+  role and pass it to Step Functions, as it already can for the Spot host role
+  and EC2. A permissions boundary on the role would close that; it is a separate
+  change.
+
+### Plan reads (`policy_plan_runtime_orchestration.tf`)
+
+Only what the Demo root's plans read and the existing statements do not
+already allow:
+- `states:DescribeStateMachine`, `ListStateMachineVersions` and
+  `ListTagsForResource` on the three state machines;
+- `states:ValidateStateMachineDefinition` on `*`: saved plans are made as
+  `ECPortfolioTerraformPlan`, and a plan that adds or edits a state machine runs
+  the provider's definition validation;
+- `dynamodb:DescribeTable`, `DescribeContinuousBackups`, `DescribeTimeToLive` and
+  `ListTagsOfResource` on the table;
+- `iam:ListRolePolicies` and `iam:ListAttachedRolePolicies` on the role;
+- `events:DescribeRule`, `ListTargetsByRule` and `ListTagsForResource` on the
+  rule.
+
+No write, tagging or permissions management action, by the service reference
+access levels. Rendered offline with the provider, the Plan inline policy grows
+from 43 to 48 statements and from 8,433 to 9,739 of the 10,240
+non-whitespace characters; every existing statement renders unchanged. The
+canonical SHA-256 of the addition is `c3403ef9f60a2eb8486cb68a0a5e36a692017d3d9f361258c727dc75df423d42`. The Apply inline
+policy renders unchanged.
+
+### Verification
+
+Offline, before merge:
+- the Plan and Apply inline documents of `main` and of this change rendered
+  with the provider: the Apply inline policy is unchanged, every Plan statement
+  of `main` renders unchanged, the addition is exactly the five statements
+  above and fits the size limit;
+- the guardrails with `terraform test`, the four AWS data sources overridden:
+  the root as written plans cleanly, and mutants that add a Step Functions,
+  DynamoDB, EventBridge or Scheduler write to the Plan inline policy, or any of
+  those services' actions (or `scheduler:UpdateSchedule` and `DeleteSchedule`)
+  to the Apply inline policy, by name, as a case variant, through a wildcard,
+  through an unmatchable name or through Allow with NotAction, fail exactly the
+  matching precondition; a Deny statement, an unrelated read and an action that
+  only shares a prefix do not; with a precondition removed its mutant plans;
+- the document above against its canonical SHA-256 and a shape gate, with
+  mutants that each must fail: `*` or a pattern instead of an exact ARN, a
+  fourth state machine, an existing schedule, a schedule wildcard, DynamoDB item
+  or backup actions, `iam:PassRole` without its condition or to another service
+  or role, a role wildcard, `iam:AttachRolePolicy`, the forbidden EC2 and Auto
+  Scaling actions, an action wildcard, a second `*` resource, NotAction,
+  NotResource, Deny, `PublishStateMachineVersion`, an execution wildcard across
+  state machines, another rule.
+
+Live, after the Demo change that creates these resources (Phase 6C-5c-3): its
+plan and apply succeed with no AccessDenied, and the convergence plan as
+`ECPortfolioTerraformPlan` reports `No changes`.
+
+### Order after merge
+
+Each step is approved separately; any AccessDenied or unexpected plan is a STOP.
+
+1. An administrator renders the JSON above from merged `main`, checks its
+   canonical SHA-256 against the one recorded here, fills `<ACCOUNT_ID>` and
+   creates the policy. AccessAdmin has no `iam:CreatePolicy`.
+2. The administrator attaches it to `ECPortfolioTerraformApply` as a customer
+   managed policy reference in the Identity Center console and provisions. The
+   Apply reserved role then carries 14 customer managed policies.
+3. Discovery: Apply lists the 14 references and nothing else changed.
+4. `ECPortfolioAccessAdmin` update from merged `main`, as in
+   [Changing the `ECPortfolioAccessAdmin` policy](#changing-the-ecportfolioaccessadmin-policy),
+   now with 19 customer managed policies. Then the new policy is read back: one
+   version, the default, attached once, and its document with the account ID
+   replaced by `<ACCOUNT_ID>` has the canonical SHA-256 recorded here.
+5. This root: a plan that changes only
+   `aws_ssoadmin_permission_set_inline_policy.plan` (5 statements added),
+   `Plan: 0 to add, 1 to change, 0 to destroy.`, with no change to the Apply
+   inline policy. Then apply, a discovery and a convergence plan with
+   `No changes`.
+6. The Demo root: the Phase 6C-5c-3 change, separately approved.
