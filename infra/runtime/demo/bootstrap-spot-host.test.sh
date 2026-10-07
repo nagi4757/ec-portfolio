@@ -22,6 +22,7 @@ readonly BUCKET="ec-portfolio-demo-origin-tls-776c2eab754b36a00164763604"
 readonly ASG_NAME="ec-portfolio-demo-ecs-spot"
 readonly HOOK_NAME="ec-portfolio-demo-ecs-spot-launching"
 readonly INSTANCE="i-0123456789abcdef0"
+readonly ALLOCATION="eipalloc-0123456789abcdef0"
 
 work_directory=""
 
@@ -110,6 +111,19 @@ post_body="$(function_body run_post_bootstrap_steps)"
 for required in wait_for_cluster_registration wait_for_api_readiness configure_origin \
     enable_renewal_timer report_continue; do
     assert_contains "$post_body" "$required" "The post phase must call $required."
+done
+
+# Phase 6C-5c-2: the promotion is handed over only after the commit point, and
+# queued without blocking. The hand-over itself never reports anything.
+[[ "$(grep -nE '^[[:space:]]*(report_continue|hand_over_promotion)$' <<<"$post_body" | cut -d: -f2 | tr -d ' ' | tr '\n' ' ')" == "report_continue hand_over_promotion " ]] ||
+    fail "The post phase must call hand_over_promotion right after report_continue."
+hand_over_body="$(function_body hand_over_promotion)"
+assert_contains "$hand_over_body" 'run_systemctl start --no-block "$PROMOTION_UNIT"' \
+    "The promotion must be queued without blocking."
+for forbidden in report_lifecycle_action fail exit; do
+    if grep -qwE "$forbidden" <<<"$hand_over_body"; then
+        fail "hand_over_promotion runs after the commit point and must not call $forbidden."
+    fi
 done
 
 # The signal traps are what turn systemd's start timeout into an ABANDON.
@@ -211,6 +225,10 @@ case "$*" in
         printf "post-queue-attempted\n" >>"$MARKER_FILE"
         [[ -e "$STATE_DIR/fail-post-queue" ]] && exit 1
         printf "post-queued\n" >>"$MARKER_FILE" ;;
+    "start --no-block ec-portfolio-spot-eip-promotion.service")
+        printf "promotion-queue-attempted\n" >>"$MARKER_FILE"
+        [[ -e "$STATE_DIR/fail-promotion-queue" ]] && exit 1
+        printf "promotion-queued\n" >>"$MARKER_FILE" ;;
     "stop --no-block ec-portfolio-spot-post-bootstrap.service")
         printf "post-cancelled\n" >>"$MARKER_FILE" ;;
     "daemon-reload")
@@ -319,6 +337,10 @@ case "$target" in
     */ec-portfolio-imds-guard.service) printf "imds-guard-install\n" >>"$MARKER_FILE" ;;
     */ec-portfolio-spot-post-bootstrap.service) printf "post-install\n" >>"$MARKER_FILE" ;;
     */spot-post-bootstrap.env) printf "post-env\n" >>"$MARKER_FILE" ;;
+    */ec-portfolio-spot-eip-promotion.service) printf "promotion-unit-install\n" >>"$MARKER_FILE" ;;
+    */spot-continue-accepted)
+        [ -e "$STATE_DIR/fail-continue-marker" ] && { rm -f "$target"; exit 1; }
+        printf "continue-accepted\n" >>"$MARKER_FILE" ;;
 esac
 exit 0'
 
@@ -429,6 +451,8 @@ GUARD
     : >"$bundle/ec-portfolio-certbot-renew.timer"
     : >"$bundle/ec-portfolio-imds-guard.service"
     : >"$bundle/ec-portfolio-spot-post-bootstrap.service"
+    printf '#!/usr/bin/env bash\nprintf "promotion-script-ran\\n" >>"$MARKER_FILE"\nexit 0\n' >"$bundle/promote-origin-eip.sh"
+    : >"$bundle/ec-portfolio-spot-eip-promotion.service"
 
     # A manifest naming every required artifact exactly once, by relative path.
     : >"$bundle/bundle.sha256"
@@ -777,6 +801,40 @@ run_pre pre-cleanup-not-on-success
 (( $(marker_count ecs-stop-attempted) == 1 )) || fail "The success path must not retry the disable."
 if marker_present post-cancelled; then fail "The success path must not cancel the post-bootstrap."; fi
 
+# --- P9. without an allocation, no promotion unit is installed ---------------
+# pre-success above ran with no EIP_ALLOCATION_ID.
+current_markers="$work_directory/pre-success/markers"
+if marker_present promotion-unit-install; then fail "Without EIP_ALLOCATION_ID the promotion unit must not be installed."; fi
+if grep -q "^EIP_ALLOCATION_ID=" "$work_directory/pre-success/etc/ec-portfolio/spot-post-bootstrap.env"; then
+    fail "Without EIP_ALLOCATION_ID the post environment must not name one."
+fi
+
+# --- P10. with an allocation, the unit and its input are installed ----------
+prepare_case pre-promotion-opt-in
+: >"$state_directory/units/ecs.enabled"
+run_phase pre EIP_ALLOCATION_ID="$ALLOCATION"
+(( last_status == 0 )) || fail "The opted-in pre phase must exit 0. Output: $(cat "$last_root/output")"
+marker_present promotion-unit-install || fail "With EIP_ALLOCATION_ID the promotion unit must be installed."
+grep -qxF "EIP_ALLOCATION_ID=$ALLOCATION" "$last_root/etc/ec-portfolio/spot-post-bootstrap.env" ||
+    fail "The post environment must carry the allocation for the promotion unit."
+[[ "$(observed_order 'promotion-unit-install|daemon-reload|post-queued')" == "promotion-unit-install daemon-reload post-queued " ]] ||
+    fail "The promotion unit must be installed before the daemon-reload: $(markers)"
+for absent in promotion-queue-attempted continue-accepted lifecycle-CONTINUE-attempted; do
+    if marker_present "$absent"; then fail "The pre phase must not produce $absent."; fi
+done
+
+# --- P11. a stale continue-accepted marker never survives into a new run ------
+# /run is cleared by a reboot, but the pre phase does not rely on it: the
+# promotion unit must not see an accepted CONTINUE that this boot never made.
+prepare_case pre-stale-continue-marker
+: >"$state_directory/units/ecs.enabled"
+mkdir -p "$last_root/run/ec-portfolio-demo"
+: >"$last_root/run/ec-portfolio-demo/spot-continue-accepted"
+run_phase pre EIP_ALLOCATION_ID="$ALLOCATION"
+(( last_status == 0 )) || fail "The pre phase must exit 0. Output: $(cat "$last_root/output")"
+[[ ! -e "$last_root/run/ec-portfolio-demo/spot-continue-accepted" ]] ||
+    fail "The pre phase must remove a stale continue-accepted marker."
+
 # ===========================================================================
 # POST PHASE
 # ===========================================================================
@@ -899,6 +957,54 @@ if grep -q '^lifecycle-' "$current_markers"; then
     fail "No lifecycle action may be sent for an instance ID that failed validation."
 fi
 
+# --- Q6. after an accepted CONTINUE: the marker, then the queued promotion ---
+prepare_case post-promotion-opt-in
+: >"$state_directory/units/ecs.enabled"
+: >"$state_directory/units/imds-guard.enabled"
+run_phase post EIP_ALLOCATION_ID="$ALLOCATION"
+(( last_status == 0 )) || fail "The opted-in post phase must exit 0. Output: $(cat "$last_root/output")"
+[[ "$(observed_order 'lifecycle-CONTINUE|continue-accepted|promotion-queued')" == "lifecycle-CONTINUE continue-accepted promotion-queued " ]] ||
+    fail "The promotion must be queued after the accepted CONTINUE and its marker: $(markers)"
+(( $(marker_count promotion-queue-attempted) == 1 )) || fail "The promotion must be queued exactly once."
+if marker_present promotion-script-ran; then fail "The post phase must queue the promotion, never run it."; fi
+serving_ready_exists || fail "The opted-in post phase must keep serving-ready."
+
+# --- Q7. without an allocation the marker is written and nothing is queued --
+current_markers="$work_directory/post-success/markers"
+marker_present continue-accepted || fail "An accepted CONTINUE must leave the continue-accepted marker."
+if marker_present promotion-queue-attempted; then fail "Without EIP_ALLOCATION_ID nothing may be queued."; fi
+
+# --- Q8. no accepted CONTINUE, no marker and no promotion -------------------
+prepare_case post-promotion-continue-refused fail-lifecycle-CONTINUE
+: >"$state_directory/units/ecs.enabled"
+run_phase post EIP_ALLOCATION_ID="$ALLOCATION"
+(( last_status != 0 )) || fail "A refused CONTINUE must fail the post phase."
+for absent in continue-accepted promotion-queue-attempted; do
+    if marker_present "$absent"; then fail "A refused CONTINUE must not produce $absent."; fi
+done
+[[ ! -e "$last_root/run/ec-portfolio-demo/spot-continue-accepted" ]] ||
+    fail "A refused CONTINUE must not leave the continue-accepted marker."
+marker_present lifecycle-ABANDON || fail "A refused CONTINUE must still report ABANDON."
+
+# --- Q9. a promotion that cannot be handed over never undoes the host -------
+for case_spec in "queue:fail-promotion-queue" "marker:fail-continue-marker"; do
+    name="${case_spec%%:*}"
+    prepare_case "post-promotion-$name-fails" "${case_spec#*:}"
+    : >"$state_directory/units/ecs.enabled"
+    run_phase post EIP_ALLOCATION_ID="$ALLOCATION"
+    (( last_status == 0 )) || fail "A failed promotion $name hand-over must not fail the committed post phase."
+    marker_present lifecycle-CONTINUE || fail "The $name case must have committed first, or it tests nothing."
+    for absent in lifecycle-ABANDON-attempted ecs-stop-attempted renew-disable post-cancelled; do
+        if marker_present "$absent"; then fail "A failed promotion $name hand-over must not produce $absent."; fi
+    done
+    serving_ready_exists || fail "A failed promotion $name hand-over must keep serving-ready."
+    unit_left_enabled ecs || fail "A failed promotion $name hand-over must keep the agent enabled."
+done
+current_markers="$work_directory/post-promotion-marker-fails/markers"
+if marker_present promotion-queue-attempted; then
+    fail "Without the continue-accepted marker the promotion must not be queued."
+fi
+
 # ===========================================================================
 # BOTH PHASES
 # ===========================================================================
@@ -911,10 +1017,15 @@ valid_inputs=(
 env PATH="$fake_bin:$PATH" "${valid_inputs[@]}" \
     bash -c 'source "$1"; validate_inputs' _ "$BOOTSTRAP_SCRIPT" >/dev/null 2>&1 ||
     fail "validate_inputs must accept the valid inputs (positive control)."
+env PATH="$fake_bin:$PATH" "${valid_inputs[@]}" EIP_ALLOCATION_ID="$ALLOCATION" \
+    bash -c 'source "$1"; validate_inputs' _ "$BOOTSTRAP_SCRIPT" >/dev/null 2>&1 ||
+    fail "validate_inputs must accept a valid EIP_ALLOCATION_ID (positive control)."
 for bad_env in "ECS_CLUSTER_NAME=" "ORIGIN_TLS_BUCKET=" "ECS_CLUSTER_NAME=not valid" \
     "ORIGIN_TLS_BUCKET=NotAValidBucket" "AUTOSCALING_GROUP_NAME=" "AUTOSCALING_GROUP_NAME=has space" \
     "LIFECYCLE_HOOK_NAME=" "LIFECYCLE_HOOK_NAME=bad;name" "INSTANCE_ID=" "INSTANCE_ID=i-XYZ" \
-    "INSTANCE_ID=i-0123456789abcdef0 extra" "AWS_REGION=us-east-1"; do
+    "INSTANCE_ID=i-0123456789abcdef0 extra" "AWS_REGION=us-east-1" \
+    "EIP_ALLOCATION_ID=eipalloc-XYZ" "EIP_ALLOCATION_ID=i-0123456789abcdef0" \
+    "EIP_ALLOCATION_ID=eipalloc-0123456789abcdef0 extra"; do
     if env PATH="$fake_bin:$PATH" "${valid_inputs[@]}" "$bad_env" \
         bash -c 'source "$1"; validate_inputs' _ "$BOOTSTRAP_SCRIPT" >/dev/null 2>&1; then
         fail "validate_inputs must reject: $bad_env"
@@ -999,13 +1110,16 @@ default_paths="$(env PATH="$fake_bin:$PATH" bash -c '
     source "$1"
     printf "%s\n" "$LETSENCRYPT_DIRECTORY" "$ECS_CONFIG_FILE" "$SERVING_READY_MARKER" \
         "$SYNC_TARGET" "$IMDS_GUARD_TARGET" "$IMDS_GUARD_UNIT_TARGET" \
-        "$POST_BOOTSTRAP_UNIT_TARGET" "$POST_BOOTSTRAP_ENV_FILE"
+        "$POST_BOOTSTRAP_UNIT_TARGET" "$POST_BOOTSTRAP_ENV_FILE" \
+        "$CONTINUE_ACCEPTED_MARKER" "$PROMOTION_UNIT_TARGET"
 ' _ "$BOOTSTRAP_SCRIPT")"
 for expected in "/etc/letsencrypt" "/etc/ecs/ecs.config" \
     "/run/ec-portfolio-demo/spot-serving-ready" "/usr/local/sbin/ec-portfolio-sync-origin-tls" \
     "/usr/local/sbin/ec-portfolio-imds-guard" "/etc/systemd/system/ec-portfolio-imds-guard.service" \
     "/etc/systemd/system/ec-portfolio-spot-post-bootstrap.service" \
-    "/etc/ec-portfolio/spot-post-bootstrap.env"; do
+    "/etc/ec-portfolio/spot-post-bootstrap.env" \
+    "/run/ec-portfolio-demo/spot-continue-accepted" \
+    "/etc/systemd/system/ec-portfolio-spot-eip-promotion.service"; do
     grep -qxF -- "$expected" <<<"$default_paths" ||
         fail "With no prefix the script must use the host path $expected."
 done

@@ -20,6 +20,12 @@ locals {
     origin_tls_bucket         = aws_s3_bucket.origin_tls.bucket
     autoscaling_group_name    = local.ecs_spot_name
     lifecycle_hook_name       = local.ecs_spot_lifecycle_hook_name
+
+    # Phase 6C-5c-2: opts every host launched from this template version into
+    # promoting itself (promote-origin-eip.sh) once Auto Scaling accepted its
+    # CONTINUE. An empty value would leave the host to the operator, as in
+    # Phase 6C-5a and 6C-5b.
+    origin_eip_allocation_id = aws_eip.ec2_origin.allocation_id
   }
 
   spot_user_data = templatefile(local.spot_user_data_template, local.spot_user_data_variables)

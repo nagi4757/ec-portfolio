@@ -283,3 +283,69 @@ resource "aws_iam_role_policy" "ecs_spot_lifecycle_completion" {
     ]
   })
 }
+
+# Phase 6C-5c-2: the host moves the origin Elastic IP to itself, once, after Auto
+# Scaling accepted its CONTINUE (promote-origin-eip.sh, queued by the post
+# phase). EC2 authorizes AssociateAddress per resource, so each statement names
+# one resource type, the same shape as the Apply permission set's customer
+# managed policy ECPortfolioOriginEipAssociation:
+#   - the exact allocation of aws_eip.ec2_origin, and no other address;
+#   - an instance that is a Spot instance AND carries this role's instance
+#     profile. Every scale-up and every replacement is a new instance, so no ID
+#     can be written in advance. The On-Demand host is "on-demand" and carries
+#     ec-portfolio-demo-ec2, so it is never a target. This role has no
+#     ec2:CreateTags, no instance profile association or replacement and no
+#     RunInstances, so a host cannot widen either condition.
+#
+# The current holder -- the On-Demand host, or an earlier Spot host -- is not
+# named. Reassociation moves the address without ec2:DisassociateAddress, and
+# whether EC2 also authorizes the current holder on that path is settled by the
+# promotion's own dry run before any real call: an UnauthorizedOperation there
+# ends the promotion with no association made. Returning the address to the
+# On-Demand host is not this role's job.
+#
+# Not granted: ec2:DisassociateAddress, a network-interface resource (the call
+# names the instance), any other address. The two reads have no resource-level
+# permissions.
+resource "aws_iam_role_policy" "ecs_spot_origin_eip_promotion" {
+  name = "origin-eip-promotion"
+  role = aws_iam_role.ecs_spot.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "AssociateExactOriginEip"
+        Effect   = "Allow"
+        Action   = "ec2:AssociateAddress"
+        Resource = "arn:${data.aws_partition.current.partition}:ec2:${local.aws_region}:${data.aws_caller_identity.current.account_id}:elastic-ip/${aws_eip.ec2_origin.allocation_id}"
+      },
+      {
+        Sid      = "AssociateOriginEipToSpotHost"
+        Effect   = "Allow"
+        Action   = "ec2:AssociateAddress"
+        Resource = "arn:${data.aws_partition.current.partition}:ec2:${local.aws_region}:${data.aws_caller_identity.current.account_id}:instance/*"
+        Condition = {
+          StringEquals = {
+            "ec2:InstanceMarketType" = "spot"
+          }
+          ArnEquals = {
+            "ec2:InstanceProfile" = aws_iam_instance_profile.ecs_spot.arn
+          }
+        }
+      },
+      {
+        Sid      = "ReadOriginEipHolder"
+        Effect   = "Allow"
+        Action   = "ec2:DescribeAddresses"
+        Resource = "*"
+      },
+      {
+        Sid      = "ReadSpotGroupCapacity"
+        Effect   = "Allow"
+        Action   = "autoscaling:DescribeAutoScalingGroups"
+        Resource = "*"
+      },
+    ]
+  })
+}

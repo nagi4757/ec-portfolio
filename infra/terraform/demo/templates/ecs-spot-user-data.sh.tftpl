@@ -26,7 +26,8 @@
 # reviewed with.
 #
 # Nothing here associates the Elastic IP or touches CloudFront. Taking
-# production traffic is Phase 6C-5.
+# production traffic is Phase 6C-5; since Phase 6C-5c-2 the host does it itself,
+# after its CONTINUE was accepted, through the bundle's promotion unit.
 #
 # Phase 6C-4a: this loader runs the bootstrap's pre phase only, and never waits
 # for the ECS agent. On the ECS-optimized AMI's packaging ecs.service is
@@ -57,6 +58,12 @@ readonly ORIGIN_TLS_BUCKET_VALUE="${origin_tls_bucket}"
 readonly AUTOSCALING_GROUP_NAME="${autoscaling_group_name}"
 readonly LIFECYCLE_HOOK_NAME="${lifecycle_hook_name}"
 
+# Phase 6C-5c-2: the origin Elastic IP this host may move to itself once Auto
+# Scaling has accepted its CONTINUE. Passed through to the bootstrap, which
+# installs and queues the promotion only when it is set; this loader itself
+# never calls EC2.
+readonly EIP_ALLOCATION_ID_VALUE="${origin_eip_allocation_id}"
+
 readonly IMDS_BASE_URL="http://169.254.169.254/latest"
 readonly IMDS_TOKEN_TTL_SECONDS=300
 readonly AWS_TIMEOUT_SECONDS="5m"
@@ -70,8 +77,8 @@ readonly TIMEOUT_KILL_AFTER_SECONDS="5s"
 # These two lists, spot_bundle_manifest_artifacts in runtime_artifacts.tf and
 # REQUIRED_BUNDLE_ARTIFACTS in bootstrap-spot-host.sh name the same files;
 # spot-runtime-bundle.test.sh fails when they disagree.
-readonly BUNDLE_EXECUTABLES="bootstrap-spot-host.sh sync-origin-tls.sh renew-origin-cert.sh configure-origin.sh origin-smoke-check-ecs.sh imds-guard.sh"
-readonly BUNDLE_DATA_FILES="ec-portfolio-certbot-renew.service ec-portfolio-certbot-renew.timer ec-portfolio-imds-guard.service ec-portfolio-spot-post-bootstrap.service bundle.sha256"
+readonly BUNDLE_EXECUTABLES="bootstrap-spot-host.sh sync-origin-tls.sh renew-origin-cert.sh configure-origin.sh origin-smoke-check-ecs.sh imds-guard.sh promote-origin-eip.sh"
+readonly BUNDLE_DATA_FILES="ec-portfolio-certbot-renew.service ec-portfolio-certbot-renew.timer ec-portfolio-imds-guard.service ec-portfolio-spot-post-bootstrap.service ec-portfolio-spot-eip-promotion.service bundle.sha256"
 
 instance_id=""
 
@@ -241,6 +248,7 @@ run_bootstrap_pre_phase() {
         AUTOSCALING_GROUP_NAME="$AUTOSCALING_GROUP_NAME" \
         LIFECYCLE_HOOK_NAME="$LIFECYCLE_HOOK_NAME" \
         INSTANCE_ID="$instance_id" \
+        EIP_ALLOCATION_ID="$EIP_ALLOCATION_ID_VALUE" \
         AWS_REGION="$AWS_REGION_NAME" \
         AWS_DEFAULT_REGION="$AWS_REGION_NAME" \
         "$RUNTIME_DIRECTORY/bootstrap-spot-host.sh" pre

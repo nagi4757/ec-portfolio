@@ -22,6 +22,7 @@ readonly LOADER_TEMPLATE="$SCRIPT_DIRECTORY/../../terraform/demo/templates/ecs-s
 readonly INSTANCE="i-0123456789abcdef0"
 readonly ASG_NAME="ec-portfolio-demo-ecs-spot"
 readonly HOOK_NAME="ec-portfolio-demo-ecs-spot-launching"
+readonly ALLOCATION="eipalloc-0123456789abcdef0"
 readonly CLUSTER="ec-portfolio-demo"
 readonly ORIGIN_BUCKET="ec-portfolio-demo-origin-tls-776c2eab754b36a00164763604"
 
@@ -54,7 +55,7 @@ assert_absent() {
 work_directory="$(mktemp -d /tmp/ec-portfolio-spot-loader-test.XXXXXX)"
 template="$(cat "$LOADER_TEMPLATE")"
 
-# templatefile() with the eleven variables compute_spot.tf passes. Any ${...}
+# templatefile() with the twelve variables compute_spot.tf passes. Any ${...}
 # left afterwards is a variable the test does not know about, which would be a
 # template error in Terraform as well.
 #
@@ -66,9 +67,9 @@ render() {
     local text="$template" placeholder index=0 value
     local names="aws_region runtime_bucket runtime_object_key runtime_object_version_id
         runtime_archive_sha256 runtime_directory archive_path ecs_cluster_name
-        origin_tls_bucket autoscaling_group_name lifecycle_hook_name"
+        origin_tls_bucket autoscaling_group_name lifecycle_hook_name origin_eip_allocation_id"
     local -a values=("$@")
-    (( ${#values[@]} == 11 )) || fail "render needs 11 values."
+    (( ${#values[@]} == 12 )) || fail "render needs 12 values."
     for placeholder in $names; do
         value="${values[$index]}"
         placeholder="\${$placeholder}"
@@ -84,7 +85,7 @@ render() {
 # ---------------------------------------------------------------------------
 
 code="$(sed -e 's/^[[:space:]]*#.*$//' <<<"$template")"
-for forbidden in "systemctl" "51678" "8080" "readiness" "ecs.service" "wait_for_"; do
+for forbidden in "systemctl" "51678" "8080" "readiness" "ecs.service" "wait_for_" "associate-address" "AssociateAddress"; do
     assert_absent "$code" "$forbidden" \
         "User data must not start, poll or wait for the ECS agent or the API task: $forbidden"
 done
@@ -104,7 +105,7 @@ assert_contains "$code" '"$RUNTIME_DIRECTORY/bootstrap-spot-host.sh" pre' \
 upper_bound="$(render ap-northeast-1 "$(printf '%063d' 0)" runtime/spot-runtime.tar.gz \
     "$(printf '%01024d' 0)" "$(printf '%064d' 0)" /opt/ec-portfolio/runtime/demo \
     /run/ec-portfolio-demo-spot-runtime.tar.gz "$CLUSTER" "$(printf '%063d' 0)" \
-    "$ASG_NAME" "$HOOK_NAME")"
+    "$ASG_NAME" "$HOOK_NAME" "$ALLOCATION")"
 upper_bytes="$(printf '%s\n' "$upper_bound" | wc -c | tr -d ' ')"
 (( upper_bytes <= 16384 )) ||
     fail "The rendered loader can reach $upper_bytes bytes, above the 16 KiB raw user-data limit."
@@ -203,7 +204,7 @@ build_archive() {
 {
     printf 'bootstrap-args %s\n' "$*"
     for name in ECS_CLUSTER_NAME ORIGIN_TLS_BUCKET AUTOSCALING_GROUP_NAME LIFECYCLE_HOOK_NAME \
-        INSTANCE_ID AWS_REGION AWS_DEFAULT_REGION SPOT_BOOTSTRAP_PREFIX; do
+        INSTANCE_ID AWS_REGION AWS_DEFAULT_REGION SPOT_BOOTSTRAP_PREFIX EIP_ALLOCATION_ID; do
         printf 'bootstrap-env %s=%s\n' "$name" "${!name-<unset>}"
     done
 } >>"$STATE/calls"
@@ -233,7 +234,7 @@ run_loader() {
     rm -rf "$work_directory/opt"
     render ap-northeast-1 ec-portfolio-demo-runtime-artifacts-test runtime/spot-runtime.tar.gz \
         test-version-id "$digest" "$runtime" "$work_directory/run-archive.tar.gz" \
-        "$CLUSTER" "$ORIGIN_BUCKET" "$ASG_NAME" "$HOOK_NAME" >"$work_directory/loader.sh"
+        "$CLUSTER" "$ORIGIN_BUCKET" "$ASG_NAME" "$HOOK_NAME" "$ALLOCATION" >"$work_directory/loader.sh"
 
     # A hostile seam in the environment: the loader must not pass it on.
     env PATH="$fake_bin:$PATH" STATE="$state" TEST_INSTANCE_ID="$INSTANCE" \
@@ -256,6 +257,7 @@ assert_contains "$calls" "bootstrap-args pre" "The loader must run the bootstrap
 for expected in "ECS_CLUSTER_NAME=$CLUSTER" "ORIGIN_TLS_BUCKET=$ORIGIN_BUCKET" \
     "AUTOSCALING_GROUP_NAME=$ASG_NAME" "LIFECYCLE_HOOK_NAME=$HOOK_NAME" \
     "INSTANCE_ID=$INSTANCE" "AWS_REGION=ap-northeast-1" "AWS_DEFAULT_REGION=ap-northeast-1" \
+    "EIP_ALLOCATION_ID=$ALLOCATION" \
     "SPOT_BOOTSTRAP_PREFIX=<unset>"; do
     assert_contains "$calls" "bootstrap-env $expected" "The pre phase must receive $expected."
 done

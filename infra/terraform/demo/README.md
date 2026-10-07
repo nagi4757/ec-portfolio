@@ -553,7 +553,7 @@ Applied on 2026-09-28 (24 added) and converged on 2026-09-29: after a refresh-on
 
 `bootstrap-spot-host.sh` is larger than the 16 KiB EC2 raw user-data limit on its own, so the bundle cannot be embedded in the launch template. It is published to S3 instead and the launch template carries only a loader.
 
-Eleven files are packed into one `tar.gz` by `data.archive_file.spot_runtime_bundle`: `bootstrap-spot-host.sh`, the nine artifacts the bootstrap requires (three of them added in Phase 6C-4a, see below), and a `bundle.sha256` manifest generated from `filesha256` over the same reviewed files. The files are listed one by one rather than swept from `infra/runtime/demo/`, which also holds the standalone host's scripts and every test suite.
+Thirteen files are packed into one `tar.gz` by `data.archive_file.spot_runtime_bundle`: `bootstrap-spot-host.sh`, the eleven artifacts the bootstrap requires (three of them added in Phase 6C-4a and two in Phase 6C-5c-2, see below), and a `bundle.sha256` manifest generated from `filesha256` over the same reviewed files. The files are listed one by one rather than swept from `infra/runtime/demo/`, which also holds the standalone host's scripts and every test suite.
 
 The archive is written to `.terraform/ec-portfolio/` so building it never dirties the working tree, and uploaded to a stable key with the object **version** carrying the identity:
 
@@ -575,7 +575,7 @@ reviewed repository files
     -> launch template user_data       (pinned bucket + version ID + hash)
       -> archive verified on the host
         -> bundle.sha256 verified by bootstrap-spot-host.sh
-          -> the nine required artifacts
+          -> the eleven required artifacts
 ```
 
 ### Bundle rollback
@@ -779,6 +779,48 @@ terraform init -backend=false -input=false -lockfile=readonly
 terraform fmt -check -recursive
 terraform validate
 ```
+
+## Phase 6C-5c-2 Spot origin EIP promotion
+
+A Spot host launched from the new launch template version moves the origin Elastic IP to itself, once, after Auto Scaling has accepted its `CONTINUE`. Until now that move was an operator step (Phase 6C-5b). The bootstrap still never associates the address: the post phase only leaves a `continue-accepted` marker and queues `ec-portfolio-spot-eip-promotion.service`, which runs `promote-origin-eip.sh` from the same runtime bundle (see the runtime README).
+
+| Address | Change |
+| --- | --- |
+| `aws_iam_role_policy.ecs_spot_origin_eip_promotion` | new inline policy `origin-eip-promotion` on the Spot host role |
+| `aws_s3_object.spot_runtime_bundle` | new object version: the bundle carries `promote-origin-eip.sh` and its unit (13 files) |
+| `aws_launch_template.ecs_spot` | new version: the loader passes `EIP_ALLOCATION_ID` (`aws_eip.ec2_origin.allocation_id`) and pins the new bundle |
+| `aws_autoscaling_group.ecs_spot` | `launch_template.version` moves to the new version; capacity is unchanged |
+
+`origin-eip-promotion`:
+
+| Sid | Action | Resource / condition |
+| --- | --- | --- |
+| `AssociateExactOriginEip` | `ec2:AssociateAddress` | `elastic-ip/<allocation of aws_eip.ec2_origin>` |
+| `AssociateOriginEipToSpotHost` | `ec2:AssociateAddress` | `instance/*` with `ec2:InstanceMarketType = spot` and `ec2:InstanceProfile = ` the Spot host profile |
+| `ReadOriginEipHolder` | `ec2:DescribeAddresses` | `*` (no resource-level permissions) |
+| `ReadSpotGroupCapacity` | `autoscaling:DescribeAutoScalingGroups` | `*` (no resource-level permissions) |
+
+- The same shape as the Apply permission set's `ECPortfolioOriginEipAssociation` for its Spot statement. The On-Demand host is `on-demand` and carries `ec-portfolio-demo-ec2`, so it is never a target; returning the address to it is the day-close's and the operator's job, not this role's.
+- The current holder is not named. Reassociation needs no `ec2:DisassociateAddress`. Whether EC2 also authorizes the current holder on that path is not documented, so the promotion asks first with `associate-address --dry-run` and makes the real call only on `DryRunOperation`. An `UnauthorizedOperation` there ends the promotion with no association made, and the permission model is reviewed again; nothing is widened by reflex.
+- Not granted: `ec2:DisassociateAddress`, a `network-interface` resource, any other address, any tag, profile or instance launch permission that would let a host widen the conditions.
+- The promotion moves the address only while the group's desired capacity is at least 1 and this instance is `InService`, so a host that finishes after the night's scale-down does not take the address back. It never completes a lifecycle action, terminates or stops anything, or takes the ECS agent down: a failed promotion leaves a healthy host `InService` and the address with its current holder.
+
+### Expected plan delta when this is applied
+
+```
+Plan: 1 to add, 3 to change, 0 to destroy.
+```
+
+- add: `aws_iam_role_policy.ecs_spot_origin_eip_promotion`.
+- update in place: `aws_s3_object.spot_runtime_bundle` (`source_hash`, `version_id`), `aws_launch_template.ecs_spot` (`user_data`, `latest_version`), `aws_autoscaling_group.ecs_spot` (`launch_template[0].version` only).
+- No change to `aws_eip.ec2_origin`, `aws_instance.demo`, `aws_route53_record.origin_demo`, the CloudFront distributions, the lifecycle hook or the group's `min_size`, `max_size` and `desired_capacity`. Any replace or destroy is a blocker.
+- The Apply permission set already covers every call: `iam:PutRolePolicy` and `iam:GetRolePolicy` on the Spot role, the launch template version, the group update and the bundle object come from `ECPortfolioTerraformApplySpotFoundation`. The Plan permission set already reads the role's inline policies. No access root change is needed.
+
+Apply only while the group is at desired 0 and no cutover is running. From then on every Spot launch promotes itself after `CONTINUE`; the operator-only mode of Phase 6C-5a and 6C-5b is gone for new launches. Returning to it is a revert of this change and an apply, which publishes a launch template version without `EIP_ALLOCATION_ID`; a host built from it installs no promotion unit.
+
+### Verification at the first launch
+
+The promotion's own dry run is the live verification of the Spot path of the role ("Spot path pending live verification" in the access README): the address moving to the new host after `InService` means EC2 answered `DryRunOperation` and the association was verified. On the host the outcome is in `/run/ec-portfolio-demo/`: `spot-eip-promoted`, or `spot-eip-promotion-failed` holding one reason word (for example `dry-run-unauthorized`). If the address does not move, the operator associates it as in Phase 6C-5b and the cause is investigated before the next launch.
 
 ## Local validation
 

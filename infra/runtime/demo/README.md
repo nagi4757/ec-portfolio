@@ -647,6 +647,40 @@ UID は推測ではなく image から確認しています。
 serving-ready になった host は、まだ production traffic を受けていません。EIP の付け替えは別の意図的な手順
 （Phase 6C-5）であり、このスクリプトに `AssociateAddress` 相当の呼び出しは存在しません。test がその不在を検証します。
 
+### CONTINUE 後の Elastic IP promotion（Phase 6C-5c-2）
+
+Phase 6C-5c-2 以降、Launch Template が `EIP_ALLOCATION_ID` を渡した host は、自分自身へ origin EIP を移します。
+ただし bootstrap の中では行いません。bootstrap の契約（`AssociateAddress` を呼ばない）は変わりません。
+
+1. post phase が `CONTINUE` を報告し、Auto Scaling がそれを受け付けた後（commit point の後）にだけ、
+   `/run/ec-portfolio-demo/spot-continue-accepted` marker を書きます。
+2. `EIP_ALLOCATION_ID` がある場合だけ、`ec-portfolio-spot-eip-promotion.service` を `--no-block` で queue します。
+   unit は `After=ec-portfolio-spot-post-bootstrap.service` で、`spot-serving-ready` と `spot-continue-accepted` の両 marker
+   （`ConditionPathExists`）がなければ起動しません。`[Install]` はなく、reboot 後は動きません。
+3. `EIP_ALLOCATION_ID` がない host には unit 自体を install せず、queue もしません（Phase 6C-5a/5b の operator 手動 mode）。
+4. commit 後の hand-over の失敗（marker 書き込み、queue）は warning だけで、ABANDON・agent 停止・post unit の失敗にはなりません。
+
+`promote-origin-eip.sh` の順序は契約です。どこかで止まれば、それ以降の呼び出しは行いません。
+
+| 順 | 内容 | 失敗時 |
+| --- | --- | --- |
+| 1 | 入力（`EIP_ALLOCATION_ID`、`INSTANCE_ID`、`AUTOSCALING_GROUP_NAME`、Region）と 2 つの marker | AWS 呼び出し 0 |
+| 2 | IMDSv2 の instance ID が `INSTANCE_ID` と一致 | AWS 呼び出し 0 |
+| 3 | `origin-smoke-check-ecs.sh` を再実行 | EIP API 呼び出し 0、retry |
+| 4 | `describe-auto-scaling-groups`: desired ≥ 1 かつ自 instance が `InService` | 移動しない（final）。夜の scale-down 後に取り返さないため |
+| 5 | `describe-addresses`: 既に自分が holder なら何もしない | — |
+| 6 | `associate-address --dry-run`。`DryRunOperation` のときだけ次へ | `UnauthorizedOperation` は final（実 call 0） |
+| 7 | `associate-address --allow-reassociation`（`--instance-id` は自分） | retry |
+| 8 | `describe-addresses` で holder == 自分を確認 | retry |
+
+- 一時的な error は最大 3 回まで retry します。権限不足、group が不要とした host、`DryRunOperation` 以外の dry-run 結果は retry しません。
+- 失敗しても host は `InService` の capacity として残り、EIP は現在の holder のままです。lifecycle action の完了、terminate、
+  stop、disassociate、ECS agent の停止は一切行いません（test が静的・動的に検証します）。
+- 結果は `/run/ec-portfolio-demo/spot-eip-promoted`（instance ID）または `spot-eip-promotion-failed`（理由 1 語）に残ります。
+  AWS CLI の error 文（account や encoded authorization message を含む）は出力しません。
+- AWS child は bootstrap と同じく instance role だけを identity とし、Region を明示し、endpoint・trust store・seam の変数を消してから実行します。
+- `promote-origin-eip.test.sh` が順序、retry 上限、final 条件、引数、禁止 action、identity の分離、unit の静的契約を検証します。
+
 ### ECS host 向け origin smoke
 
 `origin-smoke-check.sh` は standalone Docker host 用で、container 名と `docker port` の binding を検証します。

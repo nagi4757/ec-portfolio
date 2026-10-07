@@ -39,6 +39,11 @@
 #
 # This script does not associate the Elastic IP. Taking production traffic is a
 # separate, deliberate step: a host proves itself here and is promoted later.
+# Since Phase 6C-5c-2 "later" can be automatic, but it is still not here: once
+# CONTINUE has been accepted, the post phase leaves a continue-accepted marker
+# and, only when the launch template opted in with EIP_ALLOCATION_ID, queues
+# ec-portfolio-spot-eip-promotion.service (promote-origin-eip.sh). Nothing in
+# this file calls EC2.
 #
 # Artifact transport is out of scope. The runtime bundle is expected to already
 # be present in this script's own directory, delivered by whatever placed this
@@ -86,6 +91,7 @@ readonly ECS_CONFIG_DIRECTORY="${BOOTSTRAP_PREFIX}/etc/ecs"
 readonly ECS_CONFIG_FILE="$ECS_CONFIG_DIRECTORY/ecs.config"
 readonly MARKER_DIRECTORY="${BOOTSTRAP_PREFIX}/run/ec-portfolio-demo"
 readonly SERVING_READY_MARKER="$MARKER_DIRECTORY/spot-serving-ready"
+readonly CONTINUE_ACCEPTED_MARKER="$MARKER_DIRECTORY/spot-continue-accepted"
 
 readonly SYNC_TARGET="${BOOTSTRAP_PREFIX}/usr/local/sbin/ec-portfolio-sync-origin-tls"
 readonly RENEW_TARGET="${BOOTSTRAP_PREFIX}/usr/local/sbin/ec-portfolio-renew-origin-cert"
@@ -100,6 +106,8 @@ readonly IMDS_GUARD_UNIT="ec-portfolio-imds-guard.service"
 readonly IMDS_GUARD_UNIT_TARGET="$SYSTEMD_UNIT_DIRECTORY/$IMDS_GUARD_UNIT"
 readonly POST_BOOTSTRAP_UNIT="ec-portfolio-spot-post-bootstrap.service"
 readonly POST_BOOTSTRAP_UNIT_TARGET="$SYSTEMD_UNIT_DIRECTORY/$POST_BOOTSTRAP_UNIT"
+readonly PROMOTION_UNIT="ec-portfolio-spot-eip-promotion.service"
+readonly PROMOTION_UNIT_TARGET="$SYSTEMD_UNIT_DIRECTORY/$PROMOTION_UNIT"
 
 # The runtime bundle this host must carry. Checked as a set before any checksum
 # is verified: sha256sum --check only validates the entries a manifest happens
@@ -120,6 +128,8 @@ readonly REQUIRED_BUNDLE_ARTIFACTS=(
     "imds-guard.sh"
     "ec-portfolio-imds-guard.service"
     "ec-portfolio-spot-post-bootstrap.service"
+    "promote-origin-eip.sh"
+    "ec-portfolio-spot-eip-promotion.service"
 )
 readonly BUNDLE_MANIFEST_NAME="bundle.sha256"
 
@@ -203,6 +213,10 @@ bootstrap_committed="false"
 
 log() {
     printf '[spot-bootstrap] %s\n' "$*"
+}
+
+warn() {
+    printf '[spot-bootstrap] WARNING: %s\n' "$*" >&2
 }
 
 fail() {
@@ -364,6 +378,15 @@ validate_inputs() {
         fail "Required environment variable is missing: INSTANCE_ID"
     [[ "$INSTANCE_ID" =~ ^i-[0-9a-f]{8,17}$ ]] ||
         fail "INSTANCE_ID is not a valid EC2 instance ID."
+
+    # Phase 6C-5c-2, optional. The launch template opts a host into promoting
+    # itself by naming the origin Elastic IP's allocation. Without it no
+    # promotion unit is installed or queued, and the host only serves once an
+    # operator moves the address.
+    if [[ -n "${EIP_ALLOCATION_ID:-}" ]]; then
+        [[ "$EIP_ALLOCATION_ID" =~ ^eipalloc-[0-9a-f]{8,17}$ ]] ||
+            fail "EIP_ALLOCATION_ID is not a valid Elastic IP allocation ID."
+    fi
 
     # Stated, not discovered. If a caller supplies one it must be the Region
     # this deployment lives in; anything else would point the AWS children at a
@@ -541,6 +564,9 @@ install_post_bootstrap() {
         printf 'LIFECYCLE_HOOK_NAME=%s\n' "$LIFECYCLE_HOOK_NAME"
         printf 'INSTANCE_ID=%s\n' "$INSTANCE_ID"
         printf 'AWS_REGION=%s\n' "$EXPECTED_AWS_REGION"
+        if [[ -n "${EIP_ALLOCATION_ID:-}" ]]; then
+            printf 'EIP_ALLOCATION_ID=%s\n' "$EIP_ALLOCATION_ID"
+        fi
     } >"$staged"
     install -o root -g root -m 0600 "$staged" "$POST_BOOTSTRAP_ENV_FILE" ||
         fail "Unable to install $POST_BOOTSTRAP_ENV_FILE."
@@ -549,6 +575,14 @@ install_post_bootstrap() {
     install -o root -g root -m 0644 \
         "$script_directory/$POST_BOOTSTRAP_UNIT" "$POST_BOOTSTRAP_UNIT_TARGET" ||
         fail "Unable to install the post-bootstrap unit."
+
+    # Opt-in only: a host that was not given an allocation has no promotion
+    # unit to start, by anyone. It reads the same environment file.
+    if [[ -n "${EIP_ALLOCATION_ID:-}" ]]; then
+        install -o root -g root -m 0644 \
+            "$script_directory/$PROMOTION_UNIT" "$PROMOTION_UNIT_TARGET" ||
+            fail "Unable to install the Elastic IP promotion unit."
+    fi
 }
 
 reload_systemd() {
@@ -697,7 +731,7 @@ configure_origin() {
 reset_serving_ready_marker() {
     install -d -o root -g root -m 0755 "$MARKER_DIRECTORY" ||
         fail "Unable to create $MARKER_DIRECTORY."
-    rm -f "$SERVING_READY_MARKER"
+    rm -f "$SERVING_READY_MARKER" "$CONTINUE_ACCEPTED_MARKER"
 }
 
 # It lives under /run so a reboot clears it: a host that came back up has not
@@ -717,6 +751,28 @@ report_continue() {
         fail "CONTINUE could not be reported to the launch lifecycle hook."
     bootstrap_committed="true"
     log "Serving-ready and InService. The Elastic IP is NOT associated by this script."
+}
+
+# Phase 6C-5c-2. After the commit point, and only then: the marker that tells
+# the promotion unit Auto Scaling accepted CONTINUE, and -- when the launch
+# template opted in -- the promotion queued behind this unit (its After= makes
+# it start once this one has finished). Nothing here may fail the bootstrap any
+# more. The host is InService, and a host that cannot promote itself is still
+# healthy capacity, so a problem is logged, never turned into an ABANDON.
+hand_over_promotion() {
+    [[ "$bootstrap_committed" == "true" ]] || return 0
+    if ! install -o root -g root -m 0644 /dev/null "$CONTINUE_ACCEPTED_MARKER"; then
+        warn "The continue-accepted marker could not be written; the Elastic IP stays with its current holder."
+        return 0
+    fi
+    if [[ -z "${EIP_ALLOCATION_ID:-}" ]]; then
+        log "No EIP_ALLOCATION_ID: this host does not promote itself. The Elastic IP stays with its current holder."
+        return 0
+    fi
+    log "Queueing $PROMOTION_UNIT to run after this unit."
+    run_systemctl start --no-block "$PROMOTION_UNIT" ||
+        warn "$PROMOTION_UNIT could not be queued; the Elastic IP stays with its current holder."
+    return 0
 }
 
 # The pre phase, separated from the platform and privilege checks in main() so
@@ -756,6 +812,7 @@ run_post_bootstrap_steps() {
     enable_renewal_timer
     record_serving_ready_marker
     report_continue
+    hand_over_promotion
 }
 
 main() {
