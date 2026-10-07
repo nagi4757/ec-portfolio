@@ -1215,6 +1215,20 @@ No customer managed policy, Identity Center console step or
 
 ## Phase 6C-5 D3 origin EIP association
 
+Applied: change 1 on 2026-10-06 (`ECPortfolioOriginEipAssociation` created and
+attached by an administrator; the convergence plan reported `No changes`) and
+change 2 on 2026-10-07 (`0 added, 1 changed, 0 destroyed`, only
+`aws_ssoadmin_permission_set_inline_policy.apply`). The Apply inline policy no
+longer grants `ec2:AssociateAddress`, and the convergence plan after change 2
+reports `No changes`. The live verification below passed on 2026-10-07: the
+positive dry-run with `--instance-id` returned `DryRunOperation`, the negative
+dry-run with the On-Demand host's network interface returned
+`UnauthorizedOperation`, and the association was unchanged. EC2 does not
+require a `network-interface` grant on the `--instance-id` path, so the
+`ECPortfolioOriginEipAssociation` document needs no change. D3 is recorded as
+"On-Demand path verified / Spot path pending live verification": the Spot path
+is verified by the promotion dry-run of the next canary or cutover.
+
 Phase 6C-5 moves the origin Elastic IP between the On-Demand host and a
 validated Spot host as a reviewed operator step: the promotion to Spot and the
 return to On-Demand, both with `aws ec2 associate-address`. Since Phase 6C-5b-1
