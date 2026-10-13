@@ -19,6 +19,13 @@
 # The name is fixed by the Phase 6C-4 design; the Demo root must keep exactly
 # this log group: /ec-portfolio/demo/ecs/api.
 data "aws_iam_policy_document" "plan_cutover_observability" {
+  # The Phase 6C-5c small sizing metric read (policy_plan_small_sizing_metrics.tf)
+  # is the other read-only observation of the Demo runtime, and joins the Plan
+  # inline policy through this document.
+  source_policy_documents = [
+    data.aws_iam_policy_document.plan_small_sizing_metrics.json,
+  ]
+
   statement {
     sid    = "FilterExactEcsApiLogGroupEvents"
     effect = "Allow"

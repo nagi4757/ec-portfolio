@@ -1213,6 +1213,66 @@ Each step is approved separately; any AccessDenied or unexpected plan is a STOP.
 No customer managed policy, Identity Center console step or
 `ECPortfolioAccessAdmin` change is involved.
 
+## Phase 6C-5c small instance sizing metrics (Plan read)
+
+The Spot-only service window (08:00–22:00 on weekdays) fits the monthly Budget
+only if the Spot host can move from `t3a.medium` (4 GiB) to a 2 GiB type, and
+nothing measured so far says whether the ECS task fits. The tasks that ran on
+Spot hosts left their memory and CPU only in the default `AWS/ECS` and
+`AWS/EC2` CloudWatch metrics: Container Insights is disabled on the cluster, no
+CloudWatch agent runs on the hosts, and this change turns on neither. The
+read-only sizing query runs as `ECPortfolioTerraformPlan`.
+
+### Plan read (`policy_plan_small_sizing_metrics.tf`)
+
+One statement, `ReadCloudWatchMetricDataInTokyo`: `cloudwatch:GetMetricData` on
+`*`, with the condition `StringEquals` `aws:RequestedRegion` =
+`ap-northeast-1`.
+
+- The query makes one kind of CloudWatch call, `GetMetricData`, with known
+  namespaces, metric names and dimensions: `AWS/ECS` `MemoryUtilization`,
+  `MemoryReservation` and `CPUUtilization` of the cluster and the API service,
+  and `AWS/EC2` `CPUUtilization` and the CPU credit metrics of the hosts.
+- `cloudwatch:GetMetricData` has no resource-level permissions and no condition
+  key that narrows it to a namespace (AWS service reference), so the resource
+  is `*`. The global `aws:RequestedRegion` condition keeps the grant to Tokyo.
+- Not granted: `cloudwatch:ListMetrics` (the dimensions are known, and a metric
+  without data comes back as an empty result), `cloudwatch:GetMetricStatistics`,
+  `cloudwatch:GetMetricWidgetImage`, and the alarm and dashboard reads.
+- After this change `ECPortfolioTerraformPlan` can read the metric values of
+  the account in Tokyo: numbers only, no log content and no configuration.
+- The document joins the Plan inline policy through
+  `plan_cutover_observability`, the other read-only observation of the Demo
+  runtime, so the top-level list in `policy_plan.tf` is unchanged.
+
+No write, tagging or permissions management action, by the service reference
+access levels. Rendered offline with the provider, the Plan inline policy grows
+from 43 to 44 statements and from 8,433 to 8,613 of the 10,240 non-whitespace
+characters; every existing statement and the whole Apply inline policy render
+unchanged. The canonical SHA-256 of the addition is
+`90a44e0add586e50c3ec989d7d546f076d528a632d49b5ad2e2bb0f88cad679f`.
+
+### Verification after apply
+
+- Positive: one `GetMetricData` call as `ECPortfolioTerraformPlan` in
+  `ap-northeast-1`, for one `AWS/ECS` metric of the cluster, returns without an
+  error.
+- Negative: the same call with `--region us-east-1` is denied by the region
+  condition.
+
+### Order after merge
+
+Each step is approved separately; any AccessDenied or unexpected plan is a STOP.
+
+1. This root: a plan that changes only
+   `aws_ssoadmin_permission_set_inline_policy.plan` (1 statement added), with no
+   change to any other permission set, managed policy or role. Then apply,
+   convergence and a discovery.
+2. The positive and negative checks above.
+
+No customer managed policy, Identity Center console step or
+`ECPortfolioAccessAdmin` change is involved.
+
 ## Phase 6C-5 D3 origin EIP association
 
 Applied: change 1 on 2026-10-06 (`ECPortfolioOriginEipAssociation` created and
