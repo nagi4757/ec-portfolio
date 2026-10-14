@@ -213,6 +213,7 @@ step 2.
         "arn:aws:iam::<ACCOUNT_ID>:policy/ECPortfolioTerraformPlanPhase5F1Read",
         "arn:aws:iam::<ACCOUNT_ID>:policy/ECPortfolioTerraformPlanPhase5F2aRead",
         "arn:aws:iam::<ACCOUNT_ID>:policy/ECPortfolioTerraformPlanRuntimeInputRead",
+        "arn:aws:iam::<ACCOUNT_ID>:policy/ECPortfolioTerraformPlanMeasurementStack",
         "arn:aws:iam::<ACCOUNT_ID>:policy/ECPortfolioDbPortForwarding",
         "arn:aws:iam::<ACCOUNT_ID>:policy/ECPortfolioEc2SessionAccess",
         "arn:aws:iam::<ACCOUNT_ID>:policy/ECPortfolioPhase5BFrontendDeploy",
@@ -225,7 +226,8 @@ step 2.
         "arn:aws:iam::<ACCOUNT_ID>:policy/ECPortfolioTerraformApplyPhase5F2a",
         "arn:aws:iam::<ACCOUNT_ID>:policy/ECPortfolioTerraformApplySpotFoundation",
         "arn:aws:iam::<ACCOUNT_ID>:policy/ECPortfolioTerraformApplyEcsApplication",
-        "arn:aws:iam::<ACCOUNT_ID>:policy/ECPortfolioOriginEipAssociation"
+        "arn:aws:iam::<ACCOUNT_ID>:policy/ECPortfolioOriginEipAssociation",
+        "arn:aws:iam::<ACCOUNT_ID>:policy/ECPortfolioTerraformApplyMeasurementStack"
       ]
     },
     {
@@ -279,7 +281,7 @@ policy mutation other than `OriginTlsPolicyVersionWrite`
 the Demo state.
 
 `CustomerManagedPolicyRead`: the Plan and Apply permission sets also carry
-customer managed policies (5 and 13). They are read-only here so that their
+customer managed policies (6 and 14). They are read-only here so that their
 content can be baselined and reviewed; the list is exactly the policies the two
 permission sets reference, as the discovery records them. A new reference means
 a new ARN in this statement, never a wildcard. The eleventh Apply policy,
@@ -290,6 +292,9 @@ the console update of this statement waits until the discovery shows the
 attachment (see [Phase 6C-4 ECS application permissions](#phase-6c-4-ecs-application-permissions)).
 The thirteenth, `ECPortfolioOriginEipAssociation`, follows the same rule (see
 [Phase 6C-5 D3 origin EIP association](#phase-6c-5-d3-origin-eip-association)).
+So do the sixth Plan policy, `ECPortfolioTerraformPlanMeasurementStack`, and the
+fourteenth Apply policy, `ECPortfolioTerraformApplyMeasurementStack` (see
+[Phase 6C-5c measurement stack permissions](#phase-6c-5c-measurement-stack-permissions)).
 
 `OriginTlsPolicyVersionWrite`: rotating the `X-Origin-Verify` token ends with
 CloudFront sending the new token (step `OR4` in the runtime README). That needs
@@ -368,7 +373,7 @@ rendering of it from merged `main`.
 4. Verify read-only, as `ec-portfolio-access-admin`: the step 5 checks of the
    bootstrap, the reserved role reads (`iam:GetRole`, `iam:ListRolePolicies`,
    `iam:GetRolePolicy`, `iam:ListAttachedRolePolicies`), `iam:GetPolicy` and
-   `iam:ListPolicyVersions` on each of the 18 customer managed policies, and
+   `iam:ListPolicyVersions` on each of the 20 customer managed policies, and
    an AccessDenied from `iam:GetPolicy` on an AWS managed policy outside the
    list (for example `arn:aws:iam::aws:policy/ReadOnlyAccess`).
 5. Run the discovery again; its baseline must equal the previous one.
@@ -1487,3 +1492,704 @@ Each step is approved separately; any AccessDenied or unexpected plan is a STOP.
    discovery and a convergence plan with `No changes`.
    `ECPortfolioOriginEipAssociation` stays attached and unchanged.
 2. The live verification above.
+
+## Phase 6C-5c measurement stack permissions
+
+Phase 6C-5c has to decide whether the Spot host can move from `t3a.medium`
+(4 GiB) to `t3a.small` (2 GiB). The host's own memory is in no metric the
+production cluster reports, and measuring on the production Spot capacity would
+change the production task definition, which restarts the API on every host. The
+measurement therefore runs on a separate stack in the Demo root: its own ECS
+cluster, Spot launch template and Auto Scaling group, host role and instance
+profile, task execution role and log group, and a task that runs the production
+API and Valkey containers with GC logging, a memory probe and a read-only load
+driver. The stack sits behind a code constant that is `false` on `main`; turning
+it on is its own reviewed change, and so is turning it off.
+
+This change grants the Terraform identities what the Demo root needs to create,
+read, resize and remove exactly those resources. It creates none of them and
+changes neither inline policy, so a plan of this root reports `No changes`.
+
+The names below are fixed by this change. The Demo root must use exactly these,
+or its plan and apply fail with an AccessDenied.
+
+| Resource | Name |
+| --- | --- |
+| ECS cluster | `ec-portfolio-demo-measure` |
+| Service | `ec-portfolio-demo-api-measure` in cluster `ec-portfolio-demo-measure` |
+| Task definition family | `ec-portfolio-demo-api-measure` |
+| Log group | `/ec-portfolio/demo/ecs/measure` |
+| Host role and instance profile | `ec-portfolio-demo-ecs-spot-measure` (trusted by `ec2.amazonaws.com`) |
+| Task execution role | `ec-portfolio-demo-ecs-task-execution-measure` (trusted by `ecs-tasks.amazonaws.com`) |
+| Launch template `Name` tag, Auto Scaling group | `ec-portfolio-demo-ecs-spot-measure` |
+
+| Permission set | Change | Where |
+| --- | --- | --- |
+| `ECPortfolioTerraformApply` | new customer managed policy `ECPortfolioTerraformApplyMeasurementStack` | created and attached by an administrator from the document below; this root manages neither |
+| `ECPortfolioTerraformPlan` | new customer managed policy `ECPortfolioTerraformPlanMeasurementStack`, read only | the same |
+| `ECPortfolioAccessAdmin` | `CustomerManagedPolicyRead` lists both new policies (18 → 20 ARNs) | the document above; no new write |
+
+Neither document goes into an inline policy. The Apply inline policy has 10,180
+of the 10,240 non-whitespace characters Identity Center allows. The Plan inline
+policy has 8,613; the pending Phase 6C-5c-1 runtime orchestration change adds
+about 1,300, which would leave about 320, fewer than the 1,993 these Plan reads
+need.
+
+The discovery of 2026-10-13 records no AWS managed policy and no permissions
+boundary on either permission set, 5 customer managed policy references on Plan
+and 13 on Apply. After this change they are 6 and 14 (15 if the Phase 6C-5c-1
+policy is attached first), within the applied IAM quota "Managed policies per
+role" of 20 (confirmed on 2026-09-29). The counts are read again by the
+discovery before the attachment.
+
+Both documents follow the calls AWS provider 6.62 makes for the production
+equivalents of these resources, already mapped for the Phase 6C-3 and 6C-4
+policies (`aws_ecs_cluster`, `aws_ecs_service`, `aws_ecs_task_definition`,
+`aws_cloudwatch_log_group`, `aws_iam_role`, `aws_iam_role_policy`,
+`aws_iam_instance_profile`, `aws_launch_template`, `aws_autoscaling_group`,
+`aws_autoscaling_lifecycle_hook`), plus `aws_autoscaling_schedule`. Resource
+types and condition keys were checked against the AWS service reference. They
+were not traced against the provider for these new resources: a missing
+permission fails closed with an AccessDenied on the first apply, which is a STOP.
+The group is created at desired 0, so a partial apply launches nothing.
+
+### `ECPortfolioTerraformApplyMeasurementStack`
+
+Maintained by hand; this root does not manage it. The document below is the
+reviewed source.
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "CreateMeasurementEcsCluster",
+      "Effect": "Allow",
+      "Action": [
+        "ecs:CreateCluster"
+      ],
+      "Resource": "arn:aws:ecs:ap-northeast-1:<ACCOUNT_ID>:cluster/ec-portfolio-demo-measure",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestTag/Name": "ec-portfolio-demo-measure",
+          "aws:RequestTag/Project": "ec-portfolio",
+          "aws:RequestTag/Environment": "demo"
+        }
+      }
+    },
+    {
+      "Sid": "ReadDeleteExactMeasurementEcsCluster",
+      "Effect": "Allow",
+      "Action": [
+        "ecs:DescribeClusters",
+        "ecs:DeleteCluster"
+      ],
+      "Resource": "arn:aws:ecs:ap-northeast-1:<ACCOUNT_ID>:cluster/ec-portfolio-demo-measure"
+    },
+    {
+      "Sid": "ManageExactMeasurementEcsService",
+      "Effect": "Allow",
+      "Action": [
+        "ecs:CreateService",
+        "ecs:DescribeServices",
+        "ecs:UpdateService",
+        "ecs:DeleteService"
+      ],
+      "Resource": "arn:aws:ecs:ap-northeast-1:<ACCOUNT_ID>:service/ec-portfolio-demo-measure/ec-portfolio-demo-api-measure"
+    },
+    {
+      "Sid": "RegisterMeasurementTaskDefinitionFamily",
+      "Effect": "Allow",
+      "Action": [
+        "ecs:RegisterTaskDefinition"
+      ],
+      "Resource": "arn:aws:ecs:ap-northeast-1:<ACCOUNT_ID>:task-definition/ec-portfolio-demo-api-measure:*"
+    },
+    {
+      "Sid": "TagMeasurementEcsResourcesOnCreateOnly",
+      "Effect": "Allow",
+      "Action": [
+        "ecs:TagResource"
+      ],
+      "Resource": [
+        "arn:aws:ecs:ap-northeast-1:<ACCOUNT_ID>:cluster/ec-portfolio-demo-measure",
+        "arn:aws:ecs:ap-northeast-1:<ACCOUNT_ID>:service/ec-portfolio-demo-measure/ec-portfolio-demo-api-measure",
+        "arn:aws:ecs:ap-northeast-1:<ACCOUNT_ID>:task-definition/ec-portfolio-demo-api-measure:*"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "ecs:CreateAction": [
+            "CreateCluster",
+            "CreateService",
+            "RegisterTaskDefinition"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "ManageExactMeasurementLogGroup",
+      "Effect": "Allow",
+      "Action": [
+        "logs:CreateLogGroup",
+        "logs:PutRetentionPolicy",
+        "logs:DeleteLogGroup",
+        "logs:ListTagsForResource",
+        "logs:TagResource"
+      ],
+      "Resource": [
+        "arn:aws:logs:ap-northeast-1:<ACCOUNT_ID>:log-group:/ec-portfolio/demo/ecs/measure",
+        "arn:aws:logs:ap-northeast-1:<ACCOUNT_ID>:log-group:/ec-portfolio/demo/ecs/measure:*"
+      ]
+    },
+    {
+      "Sid": "ManageExactMeasurementRoles",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateRole",
+        "iam:GetRole",
+        "iam:DeleteRole",
+        "iam:TagRole",
+        "iam:ListRolePolicies",
+        "iam:ListAttachedRolePolicies",
+        "iam:ListInstanceProfilesForRole",
+        "iam:PutRolePolicy",
+        "iam:GetRolePolicy",
+        "iam:DeleteRolePolicy"
+      ],
+      "Resource": [
+        "arn:aws:iam::<ACCOUNT_ID>:role/ec-portfolio-demo-ecs-spot-measure",
+        "arn:aws:iam::<ACCOUNT_ID>:role/ec-portfolio-demo-ecs-task-execution-measure"
+      ]
+    },
+    {
+      "Sid": "ManageExactMeasurementInstanceProfile",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateInstanceProfile",
+        "iam:GetInstanceProfile",
+        "iam:AddRoleToInstanceProfile",
+        "iam:RemoveRoleFromInstanceProfile",
+        "iam:DeleteInstanceProfile",
+        "iam:TagInstanceProfile"
+      ],
+      "Resource": "arn:aws:iam::<ACCOUNT_ID>:instance-profile/ec-portfolio-demo-ecs-spot-measure"
+    },
+    {
+      "Sid": "PassMeasurementHostRoleToEc2",
+      "Effect": "Allow",
+      "Action": [
+        "iam:PassRole"
+      ],
+      "Resource": "arn:aws:iam::<ACCOUNT_ID>:role/ec-portfolio-demo-ecs-spot-measure",
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": "ec2.amazonaws.com"
+        }
+      }
+    },
+    {
+      "Sid": "PassMeasurementExecutionRoleToEcsTasks",
+      "Effect": "Allow",
+      "Action": [
+        "iam:PassRole"
+      ],
+      "Resource": "arn:aws:iam::<ACCOUNT_ID>:role/ec-portfolio-demo-ecs-task-execution-measure",
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": "ecs-tasks.amazonaws.com"
+        }
+      }
+    },
+    {
+      "Sid": "CreateMeasurementLaunchTemplate",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:CreateLaunchTemplate"
+      ],
+      "Resource": "arn:aws:ec2:ap-northeast-1:<ACCOUNT_ID>:launch-template/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestTag/Name": "ec-portfolio-demo-ecs-spot-measure",
+          "aws:RequestTag/Project": "ec-portfolio",
+          "aws:RequestTag/Environment": "demo"
+        }
+      }
+    },
+    {
+      "Sid": "ManageMeasurementLaunchTemplate",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:CreateLaunchTemplateVersion",
+        "ec2:ModifyLaunchTemplate",
+        "ec2:DeleteLaunchTemplate"
+      ],
+      "Resource": "arn:aws:ec2:ap-northeast-1:<ACCOUNT_ID>:launch-template/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/Name": "ec-portfolio-demo-ecs-spot-measure",
+          "aws:ResourceTag/Project": "ec-portfolio"
+        }
+      }
+    },
+    {
+      "Sid": "ManageExactMeasurementAutoScalingGroup",
+      "Effect": "Allow",
+      "Action": [
+        "autoscaling:CreateAutoScalingGroup",
+        "autoscaling:UpdateAutoScalingGroup",
+        "autoscaling:DeleteAutoScalingGroup",
+        "autoscaling:CreateOrUpdateTags",
+        "autoscaling:PutLifecycleHook",
+        "autoscaling:DeleteLifecycleHook",
+        "autoscaling:PutScheduledUpdateGroupAction",
+        "autoscaling:DeleteScheduledAction"
+      ],
+      "Resource": "arn:aws:autoscaling:ap-northeast-1:<ACCOUNT_ID>:autoScalingGroup:*:autoScalingGroupName/ec-portfolio-demo-ecs-spot-measure"
+    },
+    {
+      "Sid": "DescribeMeasurementScheduledActions",
+      "Effect": "Allow",
+      "Action": [
+        "autoscaling:DescribeScheduledActions"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
+```
+
+`scripts/policy-gate.sh canonical` of this block as written (placeholder
+included): `7e318370f0e838b2e7a05b85f158660659ad45179a6a79a94679f823174ebfeb`.
+14 statements, 45 actions, 4,506 of the 6,144 non-whitespace characters a managed
+policy allows.
+
+- **Exact ARNs.** The cluster, the service, the two roles, the instance profile
+  and the log group, in both of its forms (`log-group:NAME` and
+  `log-group:NAME:*`). `ecs:CreateCluster` additionally requires the `Name`,
+  `Project` and `Environment` request tags.
+- **Patterns.** Only where AWS assigns part of the name:
+  - the task definition revision: `task-definition/ec-portfolio-demo-api-measure:*`
+    does not match the production family `ec-portfolio-demo-api`;
+  - the Auto Scaling group ID (the group name is fixed);
+  - the launch template ID (create is request-tag conditioned, changes are
+    resource-tag conditioned on the measurement `Name`).
+- **`Resource "*"`.** Only `autoscaling:DescribeScheduledActions`, which has no
+  resource type in the service reference.
+- **Create, read and delete; update only where the stack needs it.**
+  - `autoscaling:UpdateAutoScalingGroup`: the switch between instance types (a
+    new launch template version), the operator's desired capacity changes and
+    the provider's drain to 0 before a delete;
+  - `ec2:CreateLaunchTemplateVersion` and `ec2:ModifyLaunchTemplate`: the switch;
+  - `ecs:UpdateService`: a new task definition revision, for example when the
+    production API image changes while the stack exists.
+
+  No `ecs:UpdateCluster`, `ecs:PutClusterCapacityProviders`,
+  `iam:UpdateAssumeRolePolicy`, `iam:UpdateRoleDescription` or
+  `logs:DeleteRetentionPolicy`, and no untagging (`ecs:UntagResource`,
+  `iam:UntagRole`, `iam:UntagInstanceProfile`, `logs:UntagResource`,
+  `autoscaling:DeleteTags`): an unexpected update fails closed with an
+  AccessDenied.
+- **Tags on create only.** `ecs:TagResource` is limited by `ecs:CreateAction` to
+  `CreateCluster`, `CreateService` and `RegisterTaskDefinition`. `iam:TagRole`,
+  `iam:TagInstanceProfile`, `logs:TagResource` and
+  `autoscaling:CreateOrUpdateTags` are on the exact resources. The launch
+  template's tags use `ec2:CreateTags` from the inline statement `Ec2DemoApply`.
+- **`iam:PassRole`.** The host role only to `ec2.amazonaws.com` (the launch
+  template, the instance profile and the Auto Scaling launch check), the task
+  execution role only to `ecs-tasks.amazonaws.com` (`RegisterTaskDefinition`
+  passes it as `executionRoleArn`).
+- **Desired capacity.** `autoscaling:SetDesiredCapacity` is not granted. The
+  operator raises and lowers the group with
+  `aws autoscaling update-auto-scaling-group --desired-capacity`, as for the
+  production group. The emergency stop is
+  `aws autoscaling update-auto-scaling-group --auto-scaling-group-name ec-portfolio-demo-ecs-spot-measure --desired-capacity 0`.
+- **Scheduled actions.** `autoscaling:PutScheduledUpdateGroupAction` and
+  `autoscaling:DeleteScheduledAction` on the measurement group only, for the
+  Demo root's backstop that returns the group to desired 0 outside the
+  measurement window.
+- **Deliberately absent:**
+  - every Elastic IP action, in particular `ec2:AssociateAddress` and
+    `ec2:DisassociateAddress`;
+  - capacity provider actions: the measurement cluster has none, and the
+    measurement group carries no `AmazonECSManaged` tag;
+  - `ecs:RunTask`, `ecs:StartTask`, `ecs:ExecuteCommand` and
+    `ecs:DeleteTaskDefinitions`;
+  - `iam:AttachRolePolicy`, `iam:DetachRolePolicy`, permissions boundaries and
+    `iam:CreateServiceLinkedRole` (`AWSServiceRoleForAutoScaling` and
+    `AWSServiceRoleForECS` exist since Phase 6C-3);
+  - every action on a production resource.
+- **Reused, not repeated.**
+  - `ecs:DescribeTaskDefinition`, `ecs:DeregisterTaskDefinition` and
+    `logs:DescribeLogGroups` on `*` (`ECPortfolioTerraformApplyEcsApplication`);
+  - `autoscaling:DescribeAutoScalingGroups`, `DescribeLifecycleHooks` and
+    `DescribeScalingActivities` on `*` (`ECPortfolioTerraformApplySpotFoundation`);
+  - from `Ec2DemoApply`: `ec2:Describe*`, `ec2:CreateTags` and `ec2:RunInstances`
+    (the Auto Scaling launch check on `CreateAutoScalingGroup` and
+    `UpdateAutoScalingGroup`).
+- **No other condition.** `ecs:enable-execute-command` and `ecs:privileged` are
+  not used, for the reason given under `ECPortfolioTerraformApplyEcsApplication`.
+  The Demo root itself sets no execute command and no privileged container.
+
+### `ECPortfolioTerraformPlanMeasurementStack`
+
+Maintained by hand; this root does not manage it. The document below is the
+reviewed source.
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadExactMeasurementEcsCluster",
+      "Effect": "Allow",
+      "Action": [
+        "ecs:DescribeClusters",
+        "ecs:ListContainerInstances"
+      ],
+      "Resource": "arn:aws:ecs:ap-northeast-1:<ACCOUNT_ID>:cluster/ec-portfolio-demo-measure"
+    },
+    {
+      "Sid": "ReadExactMeasurementEcsService",
+      "Effect": "Allow",
+      "Action": [
+        "ecs:DescribeServices"
+      ],
+      "Resource": "arn:aws:ecs:ap-northeast-1:<ACCOUNT_ID>:service/ec-portfolio-demo-measure/ec-portfolio-demo-api-measure"
+    },
+    {
+      "Sid": "ReadMeasurementContainerInstancesAndTasks",
+      "Effect": "Allow",
+      "Action": [
+        "ecs:DescribeContainerInstances",
+        "ecs:DescribeTasks"
+      ],
+      "Resource": [
+        "arn:aws:ecs:ap-northeast-1:<ACCOUNT_ID>:container-instance/ec-portfolio-demo-measure/*",
+        "arn:aws:ecs:ap-northeast-1:<ACCOUNT_ID>:task/ec-portfolio-demo-measure/*"
+      ]
+    },
+    {
+      "Sid": "ListMeasurementClusterTasks",
+      "Effect": "Allow",
+      "Action": [
+        "ecs:ListTasks"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "ArnEquals": {
+          "ecs:cluster": "arn:aws:ecs:ap-northeast-1:<ACCOUNT_ID>:cluster/ec-portfolio-demo-measure"
+        }
+      }
+    },
+    {
+      "Sid": "ReadMeasurementRolePolicyLists",
+      "Effect": "Allow",
+      "Action": [
+        "iam:ListRolePolicies",
+        "iam:ListAttachedRolePolicies"
+      ],
+      "Resource": [
+        "arn:aws:iam::<ACCOUNT_ID>:role/ec-portfolio-demo-ecs-spot-measure",
+        "arn:aws:iam::<ACCOUNT_ID>:role/ec-portfolio-demo-ecs-task-execution-measure"
+      ]
+    },
+    {
+      "Sid": "ReadExactMeasurementLogGroup",
+      "Effect": "Allow",
+      "Action": [
+        "logs:ListTagsForResource",
+        "logs:FilterLogEvents",
+        "logs:DescribeLogStreams"
+      ],
+      "Resource": [
+        "arn:aws:logs:ap-northeast-1:<ACCOUNT_ID>:log-group:/ec-portfolio/demo/ecs/measure",
+        "arn:aws:logs:ap-northeast-1:<ACCOUNT_ID>:log-group:/ec-portfolio/demo/ecs/measure:*"
+      ]
+    },
+    {
+      "Sid": "ReadMeasurementLogStreams",
+      "Effect": "Allow",
+      "Action": [
+        "logs:GetLogEvents"
+      ],
+      "Resource": "arn:aws:logs:ap-northeast-1:<ACCOUNT_ID>:log-group:/ec-portfolio/demo/ecs/measure:log-stream:*"
+    },
+    {
+      "Sid": "ReadAutoScalingActivityForMeasurement",
+      "Effect": "Allow",
+      "Action": [
+        "autoscaling:DescribeScheduledActions",
+        "autoscaling:DescribeScalingActivities",
+        "autoscaling:DescribeAutoScalingInstances"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
+```
+
+`scripts/policy-gate.sh canonical` of this block as written (placeholder
+included): `cb0302816f61d73a7913dc3814bc9aad07290e13f2a72284a70584958ce0378f`.
+8 statements, 15 actions, 1,993 of the 6,144 non-whitespace characters a managed
+policy allows. Every action is a read (`Describe*`, `List*`, `Get*` or
+`logs:FilterLogEvents`) by the service reference access levels.
+
+- **Refresh of the Demo plans.** `ecs:DescribeClusters` and `DescribeServices`
+  on the exact cluster and service, `logs:ListTagsForResource` on the log group,
+  `iam:ListRolePolicies` and `ListAttachedRolePolicies` on the two roles, and
+  `autoscaling:DescribeScheduledActions`.
+- **Observation of a measurement run**, without Terraform:
+  - `ecs:ListContainerInstances`, `DescribeContainerInstances`, `ListTasks` and
+    `DescribeTasks` on the measurement cluster: the host registered and the task
+    is running;
+  - `logs:FilterLogEvents`, `DescribeLogStreams` and `GetLogEvents` on the
+    measurement log group and its streams only: the probe, GC, API and load
+    driver lines;
+  - `autoscaling:DescribeScalingActivities` and `DescribeAutoScalingInstances`:
+    launch and `InService` times, and any ABANDON.
+- **`Resource "*"`.** `ecs:ListTasks` only with the condition `ArnEquals`
+  `ecs:cluster` = the measurement cluster, and the three Auto Scaling describes,
+  which have no resource type.
+- **Reused, not repeated.** `ecs:DescribeTaskDefinition`,
+  `logs:DescribeLogGroups`, `iam:GetRole`, `iam:GetRolePolicy`,
+  `iam:GetInstanceProfile`, `autoscaling:DescribeAutoScalingGroups`,
+  `DescribeLifecycleHooks`, `ec2:Describe*` and `cloudwatch:GetMetricData` are
+  already in the Plan inline policy.
+- After this change `ECPortfolioTerraformPlan` can read the content of the
+  measurement log group. The probe and the load driver print only numbers and
+  fixed names; the API writes its request lines, as it does in the production
+  log group, and no secret.
+
+### Measurement runtime roles (Demo root)
+
+Not access-root documents. The Demo root writes each as the one inline policy of
+its measurement role. They are reviewed here, next to the Terraform permissions
+that create them, so that the identities the measurement host and task use at
+run time are fixed as well. The Demo change renders them and has to match these
+documents canonically, with `<ACCOUNT_ID>`, `<GROUP_ID>` (the measurement Auto
+Scaling group ID), `<RUNTIME_ARTIFACTS_BUCKET>` and `<ORIGIN_TLS_BUCKET>` written
+back in.
+
+#### Host role `ec-portfolio-demo-ecs-spot-measure`: `measurement-host`
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "RegisterWithMeasurementClusterOnly",
+      "Effect": "Allow",
+      "Action": [
+        "ecs:RegisterContainerInstance",
+        "ecs:DeregisterContainerInstance",
+        "ecs:SubmitAttachmentStateChanges",
+        "ecs:SubmitContainerStateChange",
+        "ecs:SubmitTaskStateChange"
+      ],
+      "Resource": "arn:aws:ecs:ap-northeast-1:<ACCOUNT_ID>:cluster/ec-portfolio-demo-measure"
+    },
+    {
+      "Sid": "PollAndDrainMeasurementClusterInstances",
+      "Effect": "Allow",
+      "Action": [
+        "ecs:Poll",
+        "ecs:StartTelemetrySession",
+        "ecs:UpdateContainerInstancesState"
+      ],
+      "Resource": "arn:aws:ecs:ap-northeast-1:<ACCOUNT_ID>:container-instance/ec-portfolio-demo-measure/*"
+    },
+    {
+      "Sid": "DiscoverAgentPollEndpoint",
+      "Effect": "Allow",
+      "Action": "ecs:DiscoverPollEndpoint",
+      "Resource": "*"
+    },
+    {
+      "Sid": "GetEcrAuthorizationToken",
+      "Effect": "Allow",
+      "Action": "ecr:GetAuthorizationToken",
+      "Resource": "*"
+    },
+    {
+      "Sid": "PullDemoApiImage",
+      "Effect": "Allow",
+      "Action": [
+        "ecr:BatchCheckLayerAvailability",
+        "ecr:GetDownloadUrlForLayer",
+        "ecr:BatchGetImage"
+      ],
+      "Resource": "arn:aws:ecr:ap-northeast-1:<ACCOUNT_ID>:repository/ec-portfolio-demo-api"
+    },
+    {
+      "Sid": "ReadPinnedRuntimeBundleVersion",
+      "Effect": "Allow",
+      "Action": "s3:GetObjectVersion",
+      "Resource": "arn:aws:s3:::<RUNTIME_ARTIFACTS_BUCKET>/runtime/spot-runtime.tar.gz"
+    },
+    {
+      "Sid": "ReadOriginTlsArchiveOnly",
+      "Effect": "Allow",
+      "Action": "s3:GetObject",
+      "Resource": "arn:aws:s3:::<ORIGIN_TLS_BUCKET>/origin-tls/letsencrypt.tar.gz"
+    },
+    {
+      "Sid": "ReadOriginVerificationToken",
+      "Effect": "Allow",
+      "Action": "ssm:GetParameter",
+      "Resource": "arn:aws:ssm:ap-northeast-1:<ACCOUNT_ID>:parameter/ec-portfolio/demo/origin/verify-token"
+    },
+    {
+      "Sid": "CompleteOwnLaunchLifecycleAction",
+      "Effect": "Allow",
+      "Action": "autoscaling:CompleteLifecycleAction",
+      "Resource": "arn:aws:autoscaling:ap-northeast-1:<ACCOUNT_ID>:autoScalingGroup:<GROUP_ID>:autoScalingGroupName/ec-portfolio-demo-ecs-spot-measure"
+    }
+  ]
+}
+```
+
+Canonical `cfe48f1bab7adca1143861bdb79615869bcfd2dfdbef62d62f7c9fcff56cc5ad`, 9 statements, 17 actions.
+
+- The production Spot role's ECS agent, image pull, runtime bundle, verification
+  token and lifecycle statements, with the cluster, its container instances and
+  the Auto Scaling group replaced by the measurement ones. A measurement host
+  cannot register with the production cluster, and a production host cannot
+  register with this one: each role names only its own cluster.
+- The origin TLS archive is read only (`s3:GetObject`). The bootstrap restores
+  the certificate for the local HTTPS end-to-end check, and a measurement host
+  can never write it back (`s3:PutObject` is absent).
+- Not granted: the production role's `origin-eip-promotion`
+  (`ec2:AssociateAddress`, `ec2:DescribeAddresses`,
+  `autoscaling:DescribeAutoScalingGroups`), `acme-dns-route53` and
+  `session-manager-core`, and every other EC2, IAM, Route 53, Systems Manager
+  session or S3 write action. The measurement instance profile is not the
+  `ec2:InstanceProfile` the Spot statement of `ECPortfolioOriginEipAssociation`
+  requires either, so the operator's promotion permission cannot target a
+  measurement host.
+
+#### Task execution role `ec-portfolio-demo-ecs-task-execution-measure`: `measurement-task-execution`
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "GetEcrAuthorizationToken",
+      "Effect": "Allow",
+      "Action": "ecr:GetAuthorizationToken",
+      "Resource": "*"
+    },
+    {
+      "Sid": "PullDemoApiImage",
+      "Effect": "Allow",
+      "Action": [
+        "ecr:BatchCheckLayerAvailability",
+        "ecr:GetDownloadUrlForLayer",
+        "ecr:BatchGetImage"
+      ],
+      "Resource": "arn:aws:ecr:ap-northeast-1:<ACCOUNT_ID>:repository/ec-portfolio-demo-api"
+    },
+    {
+      "Sid": "ReadApiRuntimeSecrets",
+      "Effect": "Allow",
+      "Action": "ssm:GetParameters",
+      "Resource": [
+        "arn:aws:ssm:ap-northeast-1:<ACCOUNT_ID>:parameter/ec-portfolio/demo/db/master-password",
+        "arn:aws:ssm:ap-northeast-1:<ACCOUNT_ID>:parameter/ec-portfolio/demo/app/auth-jwt-secret"
+      ]
+    },
+    {
+      "Sid": "WriteMeasurementTaskLogs",
+      "Effect": "Allow",
+      "Action": [
+        "logs:CreateLogStream",
+        "logs:PutLogEvents"
+      ],
+      "Resource": "arn:aws:logs:ap-northeast-1:<ACCOUNT_ID>:log-group:/ec-portfolio/demo/ecs/measure:log-stream:*"
+    }
+  ]
+}
+```
+
+Canonical `cd6ba5bf479ba3547ca7c186133cdf768874b792660300d3ab5d7ef63cedfb44`, 4 statements, 7 actions.
+
+- The three policies of the production task execution role in one document,
+  with the log group replaced by the measurement one. The production log group,
+  and the observers and the cutover proof that read it, never see a measurement
+  event.
+- The same two parameters. The measurement API uses the production database and
+  JWT secret; see the residual risks below.
+
+### Existing grants that reach beyond the measurement resources
+
+This change widens none of them. They are recorded because the measurement
+stack runs next to production with the same Apply identity.
+
+| # | Grant | What it allows here | Control |
+| --- | --- | --- | --- |
+| R1 | `Ec2DemoApply`: `ec2:CreateTags` and `ec2:DeleteTags` on `*` | Retagging the production launch template with the measurement `Name` brings it under the measurement statements, and the reverse brings the measurement template under `ECPortfolioTerraformApplySpotFoundation`. Apply can already change the production template through that policy, so nothing new becomes reachable | Exact saved plans; the Demo measurement plan gate requires every production address to be a no-op |
+| R2 | `Ec2DemoApply`: `ec2:RunInstances` on `*` | With `PassMeasurementHostRoleToEc2`, an instance outside the group with the measurement profile. It could read the origin TLS archive and the verification token, as a production Spot host can; Apply can already pass the production Spot role | Procedure: measurement hosts are launched only by the measurement group |
+| R3 | `Ec2DemoApply`: `ec2:ModifyInstanceCreditSpecification` on `*` | Switching a measurement or production host to `unlimited` credits, which bills sustained CPU | The launch template sets `standard`; each run reads the credit specification (`ec2:DescribeInstanceCreditSpecifications`, Plan) |
+| R4 | `ECPortfolioTerraformApplyEcsApplication`: `ecs:DeregisterTaskDefinition` on `*` | Deregistering a production revision as well as a measurement one; the action has no resource type | Exact saved plans |
+| R5 | This change: `iam:PutRolePolicy` on the two measurement roles | Writing any policy into them, for example an Elastic IP action into the host role. The same holds for every production role Apply manages | The Demo change compares the rendered policies with the documents above; exact saved plans |
+| R6 | The measurement roles at run time | The origin TLS private key, the verification token, the database password and the JWT secret, as the production Spot host reads them. A measurement host is one more holder while it runs | No new ingress, no DNS name or Elastic IP on the host, no session access, host lifetime inside the measurement window |
+
+### Verification
+
+Offline, on every pull request (`scripts/measurement-stack-policy.test.sh` in the
+Access root shell tests). It reads the four documents above from this README:
+
+- each has the canonical SHA-256 recorded with it;
+- a shape gate on each:
+  - Allow only; no NotAction, NotResource or Principal;
+  - exact action names, no wildcard, within the size limit;
+  - no forbidden action: Elastic IP, instance launch and tagging, IAM policy
+    attachment and boundaries, Route 53, Systems Manager sessions and commands,
+    `ecs:ExecuteCommand`, capacity providers, `s3:PutObject`,
+    `autoscaling:SetDesiredCapacity` and the like;
+  - only reads in the Plan document;
+  - `iam:PassRole` only on the two measurement roles, each to its exact service;
+  - `*` only for the actions named above, `ecs:ListTasks` only with its
+    `ecs:cluster` condition;
+  - every other resource from a fixed list of measurement resources (and, for
+    the runtime roles, the shared resources they read); launch templates only
+    under the measurement `Name` tag;
+  - no entry of that list matches a production ARN, with IAM wildcards
+    evaluated;
+- mutants that each must fail the shape gate.
+
+This root: no Terraform file changes, and the Plan and Apply inline policies
+render byte-identical to `main`, so its plan reports `No changes`.
+
+Live, after the Demo change that creates the stack: its plan and apply succeed
+with no AccessDenied, and the convergence plan as `ECPortfolioTerraformPlan`
+reports `No changes`.
+
+### Order after merge
+
+Each step is approved separately; any AccessDenied or unexpected plan is a STOP.
+
+1. Discovery: Plan carries 5 and Apply 13 customer managed policy references
+   (14 if the Phase 6C-5c-1 policy was attached), no AWS managed policy and no
+   boundary, and the baseline equals the previous one.
+2. An administrator renders both JSON documents above from merged `main`, checks
+   each canonical SHA-256 against the one recorded here, fills `<ACCOUNT_ID>`
+   and creates the two policies. AccessAdmin has no `iam:CreatePolicy`.
+3. The administrator attaches `ECPortfolioTerraformApplyMeasurementStack` to
+   `ECPortfolioTerraformApply` and `ECPortfolioTerraformPlanMeasurementStack` to
+   `ECPortfolioTerraformPlan` as customer managed policy references in the
+   Identity Center console, and provisions each, one at a time.
+4. Discovery: Apply lists 14 references (15 with the Phase 6C-5c-1 policy),
+   Plan lists 6, and nothing else changed.
+5. `ECPortfolioAccessAdmin` update from merged `main`, as in
+   [Changing the `ECPortfolioAccessAdmin` policy](#changing-the-ecportfolioaccessadmin-policy),
+   now with 20 customer managed policies. Then both new policies are read back:
+   one version, the default, attached once, and their documents with the
+   account ID replaced by `<ACCOUNT_ID>` have the canonical SHA-256 recorded
+   here.
+6. This root: a convergence plan with `No changes`.
+7. The Demo root: the measurement stack change, separately approved.
+
+After the measurement, the Demo teardown converges first. Then the
+administrator detaches both policies, provisions, deletes them, and a change to
+this README removes them from `CustomerManagedPolicyRead` (20 → 18).

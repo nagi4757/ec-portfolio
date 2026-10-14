@@ -442,3 +442,9 @@ jobs:
           set -euo pipefail
           infra/terraform/access/scripts/policy-gate.test.sh
           infra/terraform/access/scripts/discover-permission-sets.test.sh
+
+      # The measurement stack policies are pasted into the console from the
+      # README, so the suite reads them from there: pinned digests, a shape gate
+      # and mutants the gate must reject.
+      - name: Test Phase 6C-5c measurement stack policies
+        run: infra/terraform/access/scripts/measurement-stack-policy.test.sh
