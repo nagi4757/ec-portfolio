@@ -26,7 +26,7 @@ readonly GATE_SCRIPT="$SCRIPT_DIRECTORY/policy-gate.sh"
 # README, and in the console rendering, all in the same review.
 readonly APPLY_SHA="7e318370f0e838b2e7a05b85f158660659ad45179a6a79a94679f823174ebfeb"
 readonly PLAN_SHA="cb0302816f61d73a7913dc3814bc9aad07290e13f2a72284a70584958ce0378f"
-readonly HOST_SHA="cfe48f1bab7adca1143861bdb79615869bcfd2dfdbef62d62f7c9fcff56cc5ad"
+readonly HOST_SHA="bf82e6b8aa0d156809364451464339e3d59d7db9a7ec1b206fd4e282df972c35"
 readonly EXEC_SHA="cd6ba5bf479ba3547ca7c186133cdf768874b792660300d3ab5d7ef63cedfb44"
 
 readonly APPLY_HEADING='### `ECPortfolioTerraformApplyMeasurementStack`'
@@ -67,8 +67,7 @@ def measurement_resources: [
   iam_arn("role/ec-portfolio-demo-ecs-spot-measure"),
   iam_arn("role/ec-portfolio-demo-ecs-task-execution-measure"),
   iam_arn("instance-profile/ec-portfolio-demo-ecs-spot-measure"),
-  region_arn("autoscaling"; "autoScalingGroup:*:autoScalingGroupName/ec-portfolio-demo-ecs-spot-measure"),
-  region_arn("autoscaling"; "autoScalingGroup:<GROUP_ID>:autoScalingGroupName/ec-portfolio-demo-ecs-spot-measure")
+  region_arn("autoscaling"; "autoScalingGroup:*:autoScalingGroupName/ec-portfolio-demo-ecs-spot-measure")
 ];
 
 # Production resources the runtime roles read, exactly as the production roles do.
@@ -140,7 +139,7 @@ def pass_role_targets: {
 def placeholders: {
   apply: {"<ACCOUNT_ID>": 12},
   plan: {"<ACCOUNT_ID>": 12},
-  host: {"<ACCOUNT_ID>": 12, "<GROUP_ID>": 36, "<RUNTIME_ARTIFACTS_BUCKET>": 63, "<ORIGIN_TLS_BUCKET>": 63},
+  host: {"<ACCOUNT_ID>": 12, "<RUNTIME_ARTIFACTS_BUCKET>": 63, "<ORIGIN_TLS_BUCKET>": 63},
   exec: {"<ACCOUNT_ID>": 12}
 };
 

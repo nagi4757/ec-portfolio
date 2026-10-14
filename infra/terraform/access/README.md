@@ -1965,10 +1965,10 @@ policy allows. Every action is a read (`Describe*`, `List*`, `Get*` or
 Not access-root documents. The Demo root writes each as the one inline policy of
 its measurement role. They are reviewed here, next to the Terraform permissions
 that create them, so that the identities the measurement host and task use at
-run time are fixed as well. The Demo change renders them and has to match these
-documents canonically, with `<ACCOUNT_ID>`, `<GROUP_ID>` (the measurement Auto
-Scaling group ID), `<RUNTIME_ARTIFACTS_BUCKET>` and `<ORIGIN_TLS_BUCKET>` written
-back in.
+run time are fixed as well. Every value in them is known when the Demo root is
+planned, so the Demo change compares its rendered policies with these documents
+canonically before any apply, with `<ACCOUNT_ID>`, `<RUNTIME_ARTIFACTS_BUCKET>`
+and `<ORIGIN_TLS_BUCKET>` written back in.
 
 #### Host role `ec-portfolio-demo-ecs-spot-measure`: `measurement-host`
 
@@ -2042,19 +2042,23 @@ back in.
       "Sid": "CompleteOwnLaunchLifecycleAction",
       "Effect": "Allow",
       "Action": "autoscaling:CompleteLifecycleAction",
-      "Resource": "arn:aws:autoscaling:ap-northeast-1:<ACCOUNT_ID>:autoScalingGroup:<GROUP_ID>:autoScalingGroupName/ec-portfolio-demo-ecs-spot-measure"
+      "Resource": "arn:aws:autoscaling:ap-northeast-1:<ACCOUNT_ID>:autoScalingGroup:*:autoScalingGroupName/ec-portfolio-demo-ecs-spot-measure"
     }
   ]
 }
 ```
 
-Canonical `cfe48f1bab7adca1143861bdb79615869bcfd2dfdbef62d62f7c9fcff56cc5ad`, 9 statements, 17 actions.
+Canonical `bf82e6b8aa0d156809364451464339e3d59d7db9a7ec1b206fd4e282df972c35`, 9 statements, 17 actions.
 
 - The production Spot role's ECS agent, image pull, runtime bundle, verification
   token and lifecycle statements, with the cluster, its container instances and
   the Auto Scaling group replaced by the measurement ones. A measurement host
   cannot register with the production cluster, and a production host cannot
   register with this one: each role names only its own cluster.
+- The Auto Scaling group is named by its fixed name with the group ID as `*`,
+  the same form the Apply policies use. The ID exists only once the group does,
+  and the exact ARN would leave this document unknown in the plan that creates
+  it.
 - The origin TLS archive is read only (`s3:GetObject`). The bootstrap restores
   the certificate for the local HTTPS end-to-end check, and a measurement host
   can never write it back (`s3:PutObject` is absent).
