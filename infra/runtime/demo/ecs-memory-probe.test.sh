@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 
-# Contract tests for the Phase 6C-5c S0 memory probe (ecs-memory-probe.sh) and
-# for its container definition in infra/terraform/demo/ecs_application.tf.
+# Contract tests for the Phase 6C-5c S0 memory probe (ecs-memory-probe.sh).
+#
+# The probe is not part of the production task definition. It is meant for the
+# measurement task of a separate measurement ECS cluster; that stack, and the
+# contract of its container definition, come with their own change.
 #
 # The probe runs against a fixture /proc, a fixture cgroup directory and a fake
 # wget that serves fixture ECS task metadata. The fixture metadata carries an
@@ -10,7 +13,8 @@
 #
 # By default the probe runs under the host's /bin/sh, and under dash when it is
 # installed (BusyBox ash descends from dash). --image also runs it inside the
-# pinned image the task uses (BusyBox sh, awk, wget) the way the task runs it --
+# Valkey image pinned in ecs_application.tf, whose digest the measurement task
+# reuses (BusyBox sh, awk, wget), the way that task would run it --
 # non-root, read-only root filesystem, every capability dropped, no network --
 # stops it as PID 1 the way ECS does, and compares the container's own
 # /proc/meminfo with the host's. --image needs Docker and pulls that image.
@@ -21,7 +25,8 @@ set -euo pipefail
 
 readonly SCRIPT_DIRECTORY="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly PROBE="$SCRIPT_DIRECTORY/ecs-memory-probe.sh"
-readonly TASK_DEFINITION_FILE="$SCRIPT_DIRECTORY/../../terraform/demo/ecs_application.tf"
+# Read only for the pinned Valkey image digest (--image).
+readonly PINNED_IMAGE_FILE="$SCRIPT_DIRECTORY/../../terraform/demo/ecs_application.tf"
 readonly ACCOUNT="111122223333"
 readonly PLANTED="PLANTEDsecretVALUE0123456789"
 readonly METADATA_URI="http://169.254.170.2/v4/4f7c2f2c-probe-0001"
@@ -291,44 +296,15 @@ for shell in "${shells[@]}"; do
 done
 
 # ---------------------------------------------------------------------------
-# Static contract: the container definition
-# ---------------------------------------------------------------------------
-
-# Whitespace is squeezed so terraform fmt alignment does not matter.
-task_definition="$(tr -s ' ' <"$TASK_DEFINITION_FILE")"
-probe_block="$(awk '/^      name +=/ { inside = ($0 ~ /"memory-probe"/) } inside { print } inside && /^    },$/ { exit }' "$TASK_DEFINITION_FILE" | tr -s ' ')"
-[[ -n "$probe_block" ]] || fail "ecs_application.tf has no memory-probe container"
-for required in 'essential = false' 'user = local.ecs_memory_probe_user' 'privileged = false' \
-    'readonlyRootFilesystem = true' 'dockerSecurityOptions = ["no-new-privileges"]' 'memoryReservation = 16' 'memory = 32' \
-    'image = local.ecs_valkey_image' 'drop = ["ALL"]' 'entryPoint = ["/bin/sh", "-c"]' \
-    'command = [file("${local.spot_runtime_source_directory}/ecs-memory-probe.sh")]' \
-    'awslogs-group = aws_cloudwatch_log_group.ecs_api.name' 'awslogs-stream-prefix = "memory-probe"'; do
-    assert_contains "$probe_block" "$required" "memory-probe container definition"
-done
-for forbidden in "portMappings" "mountPoints" "volumesFrom" "secrets" "add =" "privileged = true" \
-    "pidMode" "ipcMode" "dependsOn" "healthCheck" "essential = true"; do
-    assert_absent "$probe_block" "$forbidden" "memory-probe container definition"
-done
-assert_contains "$task_definition" 'ecs_memory_probe_user = "65534:65534"' "the probe runs as a non-root numeric user"
-for forbidden in "pid_mode" "ipc_mode" "task_role_arn" "volume {"; do
-    assert_absent "$task_definition" "$forbidden" "the task definition must not gain host PID/IPC, a task role or a volume"
-done
-assert_contains "$task_definition" 'Resource = "${aws_cloudwatch_log_group.ecs_api.arn}:log-stream:*"' \
-    "the existing execution role log grant is what the probe's stream relies on"
-for setting in "MEMORY_PROBE_INTERVAL_SECONDS:30" "MEMORY_PROBE_FAST_INTERVAL_SECONDS:5" "MEMORY_PROBE_FAST_WINDOW_SECONDS:900"; do
-    assert_contains "$task_definition" "${setting%%:*} = \"${setting##*:}\"" "probe setting ${setting%%:*}"
-done
-
-# ---------------------------------------------------------------------------
 # Inside the pinned image (--image)
 # ---------------------------------------------------------------------------
 
 if [[ "$with_image" == "true" ]]; then
     command -v docker >/dev/null 2>&1 || fail "--image needs Docker"
-    image="$(sed -n 's/^  ecs_valkey_image *= *"\(valkey\/valkey@sha256:[0-9a-f]\{64\}\)"$/\1/p' "$TASK_DEFINITION_FILE")"
+    image="$(sed -n 's/^  ecs_valkey_image *= *"\(valkey\/valkey@sha256:[0-9a-f]\{64\}\)"$/\1/p' "$PINNED_IMAGE_FILE")"
     [[ -n "$image" ]] || fail "no pinned ecs_valkey_image in ecs_application.tf"
     docker pull --quiet "$image" >/dev/null
-    # The task's own constraints: non-root, read-only root, no capabilities, no new privileges.
+    # The measurement task's constraints: non-root, read-only root, no capabilities, no new privileges.
     in_image=(docker run --network none --read-only --user 65534:65534 --cap-drop ALL --security-opt no-new-privileges
         -v "$fixture:/fixture:ro" -v "$PROBE:/probe/ecs-memory-probe.sh:ro" --entrypoint /bin/sh)
     fixture_env=(-e PATH=/fixture/bin:/usr/bin:/bin:/usr/sbin:/sbin -e MEMORY_PROBE_PROC_ROOT=/fixture/proc

@@ -163,9 +163,10 @@ jobs:
           infra/runtime/demo/configure-origin.test.sh
           infra/runtime/demo/origin-token-rotation-check.test.sh
 
-      # --image also runs the probe inside the pinned Valkey image (BusyBox) with
-      # the task's own constraints, and stops it as PID 1.
-      - name: Test Spot task memory probe contract
+      # The probe for the separate measurement cluster (not the production task).
+      # --image also runs it inside the pinned Valkey image (BusyBox) with the
+      # measurement task's constraints, and stops it as PID 1.
+      - name: Test measurement memory probe contract
         run: infra/runtime/demo/ecs-memory-probe.test.sh --image
 
   deploy-frontends:

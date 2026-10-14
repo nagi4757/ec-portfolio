@@ -55,18 +55,6 @@ locals {
   ecs_api_user    = "10001:10001"
   ecs_valkey_user = "999:1000"
 
-  # Phase 6C-5c S0: the memory probe runs as nobody, numeric like the two
-  # above, and not 0, so the IMDS guard rejects it as well.
-  ecs_memory_probe_user = "65534:65534"
-
-  # 5-second samples for the first 15 minutes, which cover the host's cold
-  # start, then every 30 seconds. ecs-memory-probe.sh bounds each value.
-  ecs_memory_probe_environment = {
-    MEMORY_PROBE_FAST_INTERVAL_SECONDS = "5"
-    MEMORY_PROBE_FAST_WINDOW_SECONDS   = "900"
-    MEMORY_PROBE_INTERVAL_SECONDS      = "30"
-  }
-
   # The standalone host's runtime environment (deploy-api.sh), derived from the
   # same resources runtime_parameters.tf publishes it from, plus the settings
   # host networking needs: the API binds IPv4 loopback only, and reaches Valkey
@@ -218,9 +206,7 @@ resource "aws_iam_role_policy" "ecs_task_execution_logs" {
 #
 # Valkey starts first and the API only once Valkey answers PING, so the API's
 # readiness (which includes redis) is the one signal the bootstrap waits for.
-# Both are essential: a task missing either is not a serving task. The third
-# container, the Phase 6C-5c memory probe, is not essential and waits for
-# nothing, so it also records the first seconds of the task's start.
+# Both are essential: a task missing either is not a serving task.
 #
 # no-new-privileges matches the standalone host's --security-opt; no container
 # is privileged, and none runs as root.
@@ -325,59 +311,6 @@ resource "aws_ecs_task_definition" "api" {
           awslogs-group         = aws_cloudwatch_log_group.ecs_api.name
           awslogs-region        = local.aws_region
           awslogs-stream-prefix = "api"
-        }
-      }
-    },
-    # Phase 6C-5c S0: a read-only memory probe for sizing the Spot host;
-    # ecs-memory-probe.sh documents what it reads and prints.
-    #
-    # Not essential: if it stops, the task keeps serving. It reuses the Valkey
-    # image pinned above (BusyBox sh, awk and wget), so there is no new image
-    # source and no new pull. It runs as nobody with a read-only root
-    # filesystem, no capabilities and no new privileges, has no port, volume or
-    # host mount, and needs no task role: it only reads /proc, its own cgroup
-    # and the ECS agent's task metadata endpoint. Its stream goes to the same
-    # log group under its own prefix, which the execution role's existing
-    # log-stream grant already covers.
-    #
-    # 16 MiB is reserved -- the figure placement and the service's
-    # MemoryUtilization denominator count -- and 32 MiB is a hard limit, so a
-    # fault in the probe cannot take memory from the API. The script exits on
-    # SIGTERM; stopTimeout only bounds a stop that it does not answer.
-    {
-      name                   = "memory-probe"
-      image                  = local.ecs_valkey_image
-      essential              = false
-      user                   = local.ecs_memory_probe_user
-      privileged             = false
-      readonlyRootFilesystem = true
-      dockerSecurityOptions  = ["no-new-privileges"]
-      memoryReservation      = 16
-      memory                 = 32
-      stopTimeout            = 5
-
-      linuxParameters = {
-        capabilities = {
-          drop = ["ALL"]
-        }
-      }
-
-      entryPoint = ["/bin/sh", "-c"]
-      command    = [file("${local.spot_runtime_source_directory}/ecs-memory-probe.sh")]
-
-      environment = [
-        for name in sort(keys(local.ecs_memory_probe_environment)) : {
-          name  = name
-          value = local.ecs_memory_probe_environment[name]
-        }
-      ]
-
-      logConfiguration = {
-        logDriver = "awslogs"
-        options = {
-          awslogs-group         = aws_cloudwatch_log_group.ecs_api.name
-          awslogs-region        = local.aws_region
-          awslogs-stream-prefix = "memory-probe"
         }
       }
     },

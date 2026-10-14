@@ -39,7 +39,7 @@ CloudFrontからEC2 originへの通信はHTTPS `443`だけを使用します。N
 | `sync-origin-tls.sh` | Certbot durable state（package所有の`cli.ini`を除く`/etc/letsencrypt`）をS3へtar退避・復元するorigin TLS state永続化（Phase 6B） |
 | `ec-portfolio-certbot-renew.service` | bounded certificate renewalを実行するsystemd oneshot unit |
 | `ec-portfolio-certbot-renew.timer` | missed runを補完する永続systemd timer |
-| `ecs-memory-probe.sh` | Spot API task の非必須 sidecar。host / task のメモリ指標を読み取り専用で 1 行ずつ log へ出す（Phase 6C-5c S0） |
+| `ecs-memory-probe.sh` | 別の計測用 ECS cluster の計測 task で使う非必須 sidecar。host / task のメモリ指標を読み取り専用で 1 行ずつ log へ出す（Phase 6C-5c S0。本番 task definition には含めない） |
 
 bootstrapとdeployを分離することで、ホストの一度だけ必要な変更と、immutable image単位で繰り返すアプリケーションdeployを明確に分けます。Terraform `user_data`には接続せず、EC2 replacementを伴う構成変更も行いません。
 
@@ -697,27 +697,30 @@ host networking ではどちらも存在しないため、ECS host では `origi
 **任意の path は受け付けません**。root で実行される script に caller 由来の実行 path を渡す seam を作らないためです。
 未設定時は `standalone` で、既存の On-Demand 動作と完全に同一です。
 
-### Spot task のメモリ計測 sidecar（Phase 6C-5c S0）
+### 計測用メモリ probe（Phase 6C-5c S0）
 
-`ecs-memory-probe.sh` は Spot の API task に追加する非必須 container `memory-probe` の本体です（task definition は `infra/terraform/demo/ecs_application.tf`）。
-Spot host を `t3a.medium` と `t3a.small` のどちらにするかを、host 自身の `MemAvailable` で判断するための計測です。
-ECS の無料 metric は container 使用量と reservation の比で、host の `MemAvailable` は分からないためです。
-runtime bundle には含めません（bundle は 13 ファイルの明示リストのままで、launch template は変わりません）。
+`ecs-memory-probe.sh` は、Spot host を `t3a.medium` と `t3a.small` のどちらにするかを host 自身の `MemAvailable` で判断するための読み取り専用 probe です。
+ECS の無料 metric は container 使用量と reservation の比で、host の `MemAvailable`、PSI、OOM は分からないためです。
 
-- 1 行 1 sample の `key=value` を stdout に出し、awslogs が既存 log group の `memory-probe/...` stream に送ります。task 開始から 15 分は 5 秒間隔（cold start）、その後は 30 秒間隔です。
+- **本番には組み込みません。** 本番の task definition・ECS service・Spot ASG / launch template・IAM はこの変更で一切変わりません（Demo plan は `No changes`）。runtime bundle の 13 ファイルの明示リストにも含めません。
+- 使う場所は、本番と分離した計測用 ECS cluster の計測 task です。本番と同じ API・Valkey container に、非必須 container としてこの probe を加えます。
+  - 計測用 cluster、service、task definition、Spot ASG / launch template、instance role はこの変更に含まれません。別の変更で導入します。
+  - 計測用 launch template は `EIP_ALLOCATION_ID` を空にし、instance role は `ec2:AssociateAddress` を持ちません。そのため計測 host が origin Elastic IP を取ることはありません。
+- 出力: 1 行 1 sample の `key=value` を stdout に出し、awslogs が log group に送ります。既定では、task 開始から 15 分は 5 秒間隔（cold start）、その後は 30 秒間隔です。
 - 読むもの:
   - `/proc/meminfo`・`/proc/vmstat`・`/proc/pressure/memory`・`/proc/stat`・`/proc/uptime`（kernel 全体の値）
   - 自身の cgroup
   - task metadata endpoint v4（`/task`・`/task/stats`、`169.254.170.2`）。IMDS ではなく、IMDS guard は UID 65534 を `169.254.169.254` で拒否します。それ以外の metadata URI は無視します。
 - しないこと:
-  - privileged、host PID / IPC、host bind mount・volume、port、task role はいずれも使いません。
-  - disk への書き込み（root filesystem は read-only）や、環境変数・metadata 文書の出力もしません。
+  - privileged、host PID / IPC、host bind mount・volume、port、task role を前提にしません。
+  - disk への書き込みや、環境変数・metadata 文書の出力もしません。
   - 出力値はすべて `[0-9.]` または `[A-Za-z0-9_.-]` に制限するため、metadata 内の ARN（account ID）、credential、session ID は log に出ません。
-- PID 1 として SIGTERM を trap し、sleep は background で待つため、ECS の停止は即時です（`stopTimeout` まで待ちません）。
-- 前提: container 内の `/proc/meminfo` が host の値を示すかどうかは、ECS-optimized AMI（kernel 6.1）では Spot rehearsal まで **UNKNOWN** です。
+- PID 1 として SIGTERM を trap し、sleep は background で待つため、ECS の停止は即時です。
+- 前提: container 内の `/proc/meminfo` が host の値を示すかどうかは、ECS-optimized AMI（kernel 6.1）では計測 run まで **UNKNOWN** です。
   - start 行の `meminfo_mount=` を確認します。lxcfs なら `fuse.lxcfs` と出ます。
   - hard limit のない container の `c_<name>_limit_kB` は Docker から見た host 総量です。これを `MemTotal_kB` と照合します。
-- テスト: `ecs-memory-probe.test.sh` は fixture の `/proc`・cgroup・偽 `wget` で `/bin/sh` と dash の下で検証します。`--image` は固定 digest の Valkey image（BusyBox）内で task と同じ制約（UID 65534、read-only、capability なし、network なし）で実行し、PID 1 の停止と host `/proc/meminfo` との一致も確認します（CI で実行）。
+- テスト: `ecs-memory-probe.test.sh` は fixture の `/proc`・cgroup・偽 `wget` を使い、`/bin/sh` と dash の下で検証します。
+  - `--image` は、`ecs_application.tf` に固定された Valkey image（BusyBox）内で計測 task と同じ制約（UID 65534、read-only、capability なし、network なし）で実行します。PID 1 としての停止と、host `/proc/meminfo` との一致も確認します（CI で実行）。
 
 ## HTTPS origin configuration
 

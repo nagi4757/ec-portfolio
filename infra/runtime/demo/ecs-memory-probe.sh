@@ -1,8 +1,9 @@
 #!/bin/sh
-# Phase 6C-5c S0: a read-only memory probe that runs as the non-essential
-# "memory-probe" container of the Spot API task (ecs_application.tf). Every
-# interval it writes one line to stdout, which the awslogs driver ships to the
-# task's existing log group:
+# Phase 6C-5c S0: a read-only memory probe, meant to run as a non-essential
+# container of the measurement task in a separate measurement ECS cluster, next
+# to the same API and Valkey containers. It is not part of the production task
+# definition. Every interval it writes one line to stdout, which the awslogs
+# driver ships to the task's log group:
 #
 #   memprobe v=1 seq=<n> t=<UTC> elapsed_s=<since start> host_uptime_s=... MemTotal_kB=... ...
 #

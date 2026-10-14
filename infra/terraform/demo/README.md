@@ -822,42 +822,6 @@ Apply only while the group is at desired 0 and no cutover is running. From then 
 
 The promotion's own dry run is the live verification of the Spot path of the role ("Spot path pending live verification" in the access README): the address moving to the new host after `InService` means EC2 answered `DryRunOperation` and the association was verified. On the host the outcome is in `/run/ec-portfolio-demo/`: `spot-eip-promoted`, or `spot-eip-promotion-failed` holding one reason word (for example `dry-run-unauthorized`). If the address does not move, the operator associates it as in Phase 6C-5b and the cause is investigated before the next launch.
 
-## Phase 6C-5c S0 Spot task memory probe
-
-Code only; not applied. The Spot task gains a third container, `memory-probe`, that is not essential. It writes one line of host and task memory figures to the task's log group every 5 seconds for the first 15 minutes of the task, then every 30 seconds. Its purpose is sizing the Spot host (`t3a.medium` against `t3a.small`) from the host's own view: the free ECS metrics report container usage against reservations, never the host's `MemAvailable`. `infra/runtime/demo/ecs-memory-probe.sh` documents what it reads and prints.
-
-| Container | Image | User | Listens on | Notes |
-| --- | --- | --- | --- | --- |
-| `memory-probe` | the `valkey` digest above (BusyBox `sh`, `awk`, `wget`) | `65534:65534` | nothing | not essential; `readonlyRootFilesystem`, capabilities `drop ALL`, `no-new-privileges`; `memoryReservation` 16, `memory` 32; `stopTimeout` 5; stream prefix `memory-probe` |
-
-- Reads: `/proc/meminfo`, `/proc/vmstat`, `/proc/pressure/memory`, `/proc/stat` and `/proc/uptime` (kernel-wide values), its own cgroup, and task metadata endpoint v4 (`/task`, `/task/stats`) on `169.254.170.2`. That endpoint is not IMDS; the IMDS guard rejects UID 65534 at `169.254.169.254`.
-- Never: privileged mode, the host PID or IPC namespace, a host bind mount or volume, a port, a task role, a write to disk, or a printed environment variable or metadata document. Every printed value is reduced to `[0-9.]` or `[A-Za-z0-9_.-]`, so the ARNs in the metadata (with the account ID), credentials and session IDs cannot reach the log.
-- Permissions: none added. awslogs writes through the execution role (`ECS_ENABLE_AWSLOGS_EXECUTIONROLE_OVERRIDE=true`), whose `api-task-logs-write` grant is on `<log group>:log-stream:*`, which covers the new `memory-probe/...` streams. The image is the digest the `valkey` container already pulls. The Apply permission set already registers and deregisters task definitions in this family and updates the service.
-- Whether `/proc/meminfo` inside a container is the host's on the ECS-optimized AMI (kernel 6.1) is UNKNOWN until the first Spot rehearsal. On Docker on the On-Demand host (AL2023, kernel 6.18) a container's `/proc/meminfo` matched the host's exactly on 2026-10-14. The probe's start line reports `meminfo_mount=` (an lxcfs mount would show `fuse.lxcfs`), and the `limit` it prints for a container without a hard limit is Docker's own view of the host total, a second check of `MemTotal`.
-
-### Effect on the ECS memory metrics
-
-| | Before | After |
-| --- | --- | --- |
-| Task memory reservation (sum of `memoryReservation`) | 1,152 MiB (`api` 1,024 + `valkey` 128) | 1,168 MiB (+ `memory-probe` 16) |
-| Service `MemoryUtilization` denominator | 1,152 MiB | 1,168 MiB |
-| Cluster `MemoryReservation` with one `t3a.medium` (3,851 MiB registered) | 29.91 % | 30.33 % |
-
-- MiB from a service `MemoryUtilization` percentage `p`: `p × 1,152 / 100` before the change, `p × 1,168 / 100` after it. A series that spans the change is split at the new task definition revision. The numerator now includes the probe's own usage, a few MiB (`self_cg_current_kB`).
-- `memory` 32 is only a hard limit. Placement and the metric count `memoryReservation` when it is set.
-
-### Expected plan delta when this is applied
-
-```
-Plan: 1 to add, 1 to change, 1 to destroy.
-```
-
-- replace: `aws_ecs_task_definition.api` (`container_definitions`): a new revision is registered and the old one deregistered.
-- update in place: `aws_ecs_service.api` (`task_definition` only).
-- No change to the runtime bundle, the launch template, the Auto Scaling group, IAM, the log group or anything else. Any other address is a blocker.
-
-Apply only while the Spot group is at desired 0: a DAEMON service with no container instance places nothing, so the apply touches no running task, and the next Spot host runs the probe from its first task.
-
 ## Local validation
 
 Run static checks in the isolated code worktree without AWS credentials or runtime input files:
