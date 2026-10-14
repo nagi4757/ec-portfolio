@@ -115,7 +115,9 @@ locals {
   # read-only root, no capability, no new privileges, no port, volume, host
   # mount or task role. 16 MiB reserved and 32 MiB hard, so a fault cannot take
   # memory from the API. Each exits on SIGTERM; stopTimeout only bounds a stop
-  # it does not answer.
+  # it does not answer. The empty lists below are written out because ECS
+  # returns them for every container; without them the stored definition never
+  # matches this one and every plan replaces the task definition.
   measurement_helper_containers = [
     {
       name                   = "memory-probe"
@@ -128,9 +130,14 @@ locals {
       memoryReservation      = 16
       memory                 = 32
       stopTimeout            = 5
+      mountPoints            = []
+      portMappings           = []
+      systemControls         = []
+      volumesFrom            = []
 
       linuxParameters = {
         capabilities = {
+          add  = []
           drop = ["ALL"]
         }
       }
@@ -165,9 +172,14 @@ locals {
       memoryReservation      = 16
       memory                 = 32
       stopTimeout            = 5
+      mountPoints            = []
+      portMappings           = []
+      systemControls         = []
+      volumesFrom            = []
 
       linuxParameters = {
         capabilities = {
+          add  = []
           drop = ["ALL"]
         }
       }
