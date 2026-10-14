@@ -21,7 +21,7 @@ locals {
   # the instance type and turning it off are each a reviewed change, so main
   # always matches what exists and nobody's plan removes the stack by leaving a
   # -var out. Off on main.
-  measurement_stack_enabled = false
+  measurement_stack_enabled = true
 
   # t3a.medium for the baseline runs, then t3a.small. Same CPU, half the memory.
   measurement_instance_type = "t3a.medium"
