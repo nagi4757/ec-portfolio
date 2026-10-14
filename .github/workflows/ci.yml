@@ -169,6 +169,17 @@ jobs:
       - name: Test measurement memory probe contract
         run: infra/runtime/demo/ecs-memory-probe.test.sh --image
 
+      # The load driver of the same measurement task. --image also runs it inside
+      # the pinned Valkey image with real BusyBox wget against a local HTTP server
+      # on the host network, and stops it as PID 1.
+      - name: Test measurement load driver contract
+        run: infra/runtime/demo/ecs-measurement-load.test.sh --image
+
+      # The gate every saved plan of the measurement stack must pass before
+      # apply: exact change set per mode, production no-op, content checks.
+      - name: Test measurement stack plan gate
+        run: infra/terraform/demo/scripts/measurement-plan-gate.test.sh
+
   deploy-frontends:
     name: Deploy Store and Admin frontends
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'

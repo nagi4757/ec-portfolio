@@ -822,6 +822,144 @@ Apply only while the group is at desired 0 and no cutover is running. From then 
 
 The promotion's own dry run is the live verification of the Spot path of the role ("Spot path pending live verification" in the access README): the address moving to the new host after `InService` means EC2 answered `DryRunOperation` and the association was verified. On the host the outcome is in `/run/ec-portfolio-demo/`: `spot-eip-promoted`, or `spot-eip-promotion-failed` holding one reason word (for example `dry-run-unauthorized`). If the address does not move, the operator associates it as in Phase 6C-5b and the cause is investigated before the next launch.
 
+## Phase 6C-5c measurement stack
+
+Whether the Spot host can move from `t3a.medium` (4 GiB) to `t3a.small` (2 GiB) depends on host memory that no production metric reports, and measuring it on the production capacity would change the production task definition, which restarts the API on every host. `ecs_measurement.tf` and `iam_ecs_measurement.tf` add a separate stack that runs the same task beside production instead. No production file changes.
+
+The stack is off on `main`. The switch is code, not a variable, so turning it on, switching the instance type and turning it off are each a reviewed pull request, `main` always matches what exists, and nobody's plan removes the stack by leaving a `-var` out:
+
+```hcl
+measurement_stack_enabled = false        # ecs_measurement.tf, locals
+measurement_instance_type = "t3a.medium" # then "t3a.small"; anything else fails a precondition
+```
+
+The names are fixed by the Access IaC ("Phase 6C-5c measurement stack permissions" in the access README), which also holds the two role policies below as reviewed documents. The Apply and Plan customer managed policies of that change must be attached before the stack is enabled; otherwise the enable plan or apply stops with an AccessDenied.
+
+### Resources (13, each `count = local.measurement_count`)
+
+| Address | Name | Settings |
+| --- | --- | --- |
+| `aws_ecs_cluster.measurement[0]` | `ec-portfolio-demo-measure` | Container Insights disabled, no capacity provider |
+| `aws_cloudwatch_log_group.measurement[0]` | `/ec-portfolio/demo/ecs/measure` | 7 days |
+| `aws_iam_role.ecs_task_execution_measurement[0]` | `ec-portfolio-demo-ecs-task-execution-measure` | trusted by `ecs-tasks.amazonaws.com` only |
+| `aws_iam_role_policy.ecs_task_execution_measurement[0]` | `measurement-task-execution` | image pull, the two task secrets, logs to the measurement group only |
+| `aws_ecs_task_definition.measurement[0]` | family `ec-portfolio-demo-api-measure` | host network, EC2, no task role; containers below |
+| `aws_ecs_service.measurement[0]` | `ec-portfolio-demo-api-measure` | DAEMON on EC2 in the measurement cluster, no execute command, no load balancer |
+| `aws_iam_role.ecs_spot_measurement[0]` | `ec-portfolio-demo-ecs-spot-measure` | trusted by `ec2.amazonaws.com` only |
+| `aws_iam_role_policy.ecs_spot_measurement[0]` | `measurement-host` | the production Spot role's agent, pull, bundle, token and lifecycle statements on the measurement cluster and group; the TLS archive read only |
+| `aws_iam_instance_profile.ecs_spot_measurement[0]` | `ec-portfolio-demo-ecs-spot-measure` | the measurement host role only |
+| `aws_launch_template.ecs_spot_measurement[0]` | `ec-portfolio-demo-ecs-spot-measure` | the production template's AMI, bundle version, Spot, standard credits, IMDSv2 hop 1, encrypted 30 GiB gp3, public IPv4 and security group; the measured instance type, the measurement profile and loader |
+| `aws_autoscaling_group.ecs_spot_measurement[0]` | `ec-portfolio-demo-ecs-spot-measure` | `public_app`, min 0 / desired 0 / max 1 managed in code, capacity rebalance off, no `AmazonECSManaged` |
+| `aws_autoscaling_lifecycle_hook.ecs_spot_measurement_launching[0]` | `ec-portfolio-demo-ecs-spot-measure-launching` | LAUNCHING, ABANDON, 3600 s (the production contract) |
+| `aws_autoscaling_schedule.ecs_spot_measurement_backstop[0]` | `ec-portfolio-demo-ecs-spot-measure-backstop` | `30 0-11,16-23 * * *` Asia/Tokyo to 0/0/1 (see cost control) |
+
+The task definition is derived from `aws_ecs_task_definition.api.container_definitions`, so the measurement runs the production API and Valkey. Only two things change on them: every container logs to the measurement group under a `measure-` prefix, and the API's `JAVA_TOOL_OPTIONS` gains ` -Xlog:gc,gc+init:stdout:uptime,level,tags`. Two non-essential helpers join them, both on the pinned Valkey image as `65534:65534`, read-only, no capability, no new privileges, no port, 16 MiB reserved and 32 MiB hard:
+
+- `memory-probe`: `ecs-memory-probe.sh` (Phase 6C-5c S0);
+- `load-driver`: `ecs-measurement-load.sh`, started after the API container starts (runtime README).
+
+Preconditions stop the enable plan if the production task definition is no longer exactly `api` and `valkey`, if the measurement API image differs from production, if the API lacks exactly one GC option, or if any container logs elsewhere. The reservation is 1,184 MiB (production 1,152 plus 2 × 16); at evaluation the helpers' own usage is subtracted per container from the task metadata.
+
+### Isolation from production
+
+| Path | Separation |
+| --- | --- |
+| Measurement host → production cluster | `ECS_CLUSTER` is the measurement cluster (loader → bootstrap), and the bootstrap checks the cluster it registered with. The host role may register with the measurement cluster only |
+| Production host → measurement cluster | the production role registers with the production cluster only |
+| Production DAEMON ↔ measurement host | each service places only on its own cluster's instances |
+| Capacity provider | none on the measurement cluster; the production provider is bound to the production group ARN |
+| Task logs and execution role | the measurement task uses neither the production execution role nor `/ec-portfolio/demo/ecs/api`; observers and the cutover proof that read it never see a measurement event |
+| Shared, referenced only | VPC, subnet `public_app`, security group `ec2_origin`, RDS, three SSM parameters, the API image, the runtime bundle version, the origin TLS archive, the AMI. The measurement plan gate requires each of these to be a no-op |
+
+### No path to the origin Elastic IP
+
+| Layer | Control |
+| --- | --- |
+| Loader | the measurement launch template renders `EIP_ALLOCATION_ID_VALUE=""`; a precondition requires that and no `eipalloc-` anywhere in the loader |
+| Bootstrap | with an empty allocation it neither installs nor queues the promotion unit, and `promote-origin-eip.sh` refuses to run (runtime tests) |
+| Host role | no `ec2:AssociateAddress`, `ec2:DisassociateAddress` or `ec2:DescribeAddresses` |
+| Operator policy | the Spot statement of `ECPortfolioOriginEipAssociation` requires the production Spot instance profile, which a measurement host never carries |
+| Plan gate | PG5 decodes the loader; PG1/PG2 keep `aws_eip.ec2_origin` a no-op |
+| Run | the operator records the association before a run and stops the run (desired 0) if it changes |
+
+### Access from a measurement host
+
+The host uses the production Spot host's subnet, public IPv4 and security group, so every path below is one the production Spot hosts already use. No rule is added.
+
+| Target | Network | Identity | Proven at run time by |
+| --- | --- | --- | --- |
+| RDS (private) | egress 3306 to the RDS security group, whose ingress names `ec2_origin` | DB master user, `DB_PASSWORD` from SSM, `sslMode=verify-full` | readiness UP, which includes `db` |
+| SSM parameters | 443 | execution role `ssm:GetParameters` (2), host role `ssm:GetParameter` (verification token); `alias/aws/ssm`, no KMS grant needed | the task starts; the local origin smoke passes |
+| ECR | 443 | execution role pull (and the host role, as in production) | the API container runs |
+| S3 bundle and TLS archive | 443 | host role `s3:GetObjectVersion` / `s3:GetObject` | the bootstrap pre phase completes |
+| CloudWatch Logs | 443 | execution role, the measurement group only (`ECS_ENABLE_AWSLOGS_EXECUTIONROLE_OVERRIDE`) | streams appear in the measurement group |
+
+A host is `InService` only after the bootstrap's post phase proved registration with the measurement cluster, API readiness (`db` and `redis`), and the local HTTPS end-to-end check, and reported `CONTINUE`.
+
+### Load and database limits
+
+- The load driver sends GET requests only, to four public read-only paths, at most 2 per second (1,200 s, at most 2,400 requests per run), one at a time, and stops itself on 5 consecutive failures or more than 5 % 5xx and errors in a minute.
+- The measurement API adds one Hikari pool (default 10 connections) to the database; the driver opens none. Flyway runs at startup but has nothing to apply: the image is the production one.
+- The operator ends a run (desired 0) when RDS `CPUUtilization` (5-minute average) exceeds 50 % or `DatabaseConnections` exceeds 40.
+
+### Cost control
+
+The measurement budget is 0.30 USD including tax for the whole measurement. Hourly cost while a host runs: `t3a.medium` Spot 0.0211 + public IPv4 0.005 + gp3 30 GiB 0.00395 = 0.03005 USD (0.0331 with tax); `t3a.small` 0.01995 (0.0219). Logs are about 3 MB per run. With nothing running the stack costs nothing.
+
+| Control | Where |
+| --- | --- |
+| One host at most | `max_size = 1` |
+| Desired back to 0 in code | `desired_capacity = 0` without `ignore_changes`: a host left running shows up in the next plan |
+| Backstop | the scheduled action returns the group to 0/0/1 at minute 30 of every hour outside 12:00–16:00 JST, every day. A host raised inside the run window (weekdays 12:05–16:30) ends by 16:30; one raised outside it ends within the hour, weekends included. The worst case of a host left running is about 5 hours, 0.165 USD with tax |
+| Run window | weekdays 12:05–16:30 JST: after the certbot timer (02:00 and 14:00 UTC plus up to an hour) and inside the database's running hours |
+| Per run | at most 1.5 hours, at most 2 runs a day |
+| Whole measurement | stop and ask again at 9 instance-hours or 0.30 USD estimated, whichever comes first |
+
+Planned: two `t3a.medium` and two `t3a.small` runs of 1.25 hours, 0.134 USD before tax, 0.148 with tax. The monthly budget of 30.30 USD keeps room: the current forecast is 26.19 (28.39 with contingency), and the 0.30 cap brings it to 26.49 (28.69).
+
+### Plans and the gate
+
+Every saved plan of this stack goes through `scripts/measurement-plan-gate.sh` before apply. The enable mode also compares both role policies with the reviewed documents of the access README:
+
+```sh
+terraform show -json "$PRIVATE_DIR/measurement.tfplan" > "$PRIVATE_DIR/measurement.plan.json"
+scripts/measurement-plan-gate.sh enable "$PRIVATE_DIR/measurement.plan.json" \
+  --reviewed-host-policy "$PRIVATE_DIR/measurement-host.json" \
+  --reviewed-exec-policy "$PRIVATE_DIR/measurement-task-execution.json" \
+  --allow-drift <address expected to drift, if any>
+```
+
+| Change | Mode | Expected plan |
+| --- | --- | --- |
+| This change (switch off) | `merge` | `No changes.` |
+| `measurement_stack_enabled = true` | `enable` | `Plan: 13 to add, 0 to change, 0 to destroy.` |
+| `measurement_instance_type = "t3a.small"` | `switch` | `Plan: 0 to add, 2 to change, 0 to destroy.` (launch template version, group's template version) |
+| `measurement_stack_enabled = false` | `teardown` | `Plan: 0 to add, 0 to change, 13 to destroy.` |
+
+Any other change, any replace, any production change, output change or unlisted drift fails the gate; the plan is then kept as evidence and not applied. After each apply a convergence plan reports `No changes`.
+
+### Teardown
+
+1. Before: the evidence and checksums of every run are saved locally (the log group is deleted with the stack); the group is at desired 0 with no instance; the measurement cluster has no container instance and no running task; the Elastic IP association is unchanged.
+2. A pull request sets `measurement_stack_enabled = false`; its saved plan passes the gate in `teardown` mode (exactly the 13 deletes), is applied, and the convergence plan reports `No changes`. A `DeleteCluster` that fails on a remaining container instance is a STOP.
+3. After: the cluster is inactive or absent, the group, launch template, roles, profile and log group are gone, the task definition family is `INACTIVE` only, and `Name=ec-portfolio-demo-ecs-spot-measure` instances are terminated with no volume left.
+4. The Access IaC change that removes both customer managed policies, then a change that removes these files and the load driver.
+
+Emergency stop at any time: `aws autoscaling update-auto-scaling-group --auto-scaling-group-name ec-portfolio-demo-ecs-spot-measure --desired-capacity 0`.
+
+### Local validation without AWS credentials
+
+- `terraform fmt -check -recursive` and `terraform validate`.
+- `scripts/measurement-plan-gate.test.sh`: the gate on synthetic plans of every mode and on mutants that must each fail.
+- `../../runtime/demo/ecs-measurement-load.test.sh` (`--image` in CI) and `ecs-memory-probe.test.sh`.
+- Offline, outside the repository: `terraform test` with a mocked AWS provider plans this root from a synthetic state with the switch as a variable. Off, the plan is the same set of no-op resources as `main`; on, it adds exactly the 13 resources and leaves every production resource a no-op, the gate passes in `enable` mode and both rendered role policies match the reviewed documents canonically; off again, it deletes exactly the 13. This is a synthetic plan, not an AWS plan: it cannot show drift, replacements or provider-side diffs, and a mocked provider does not mark the launch template's `latest_version` unknown, so the `switch` delta is only checked by the real plan.
+
+### Open points
+
+- The new resources' provider calls were mapped from their production equivalents, not traced: a missing permission stops the first apply with an AccessDenied, which is a STOP. At desired 0 a partial apply launches nothing.
+- The measurement task definition is derived from the production one as Terraform last read it back. Whether its first convergence plan is clean is known only after the enable apply.
+- Whether `/proc/meminfo` in a container shows the host on this AMI, `t3a.small` Spot capacity, and the database's real `max_connections` are measured, not assumed.
+
 ## Local validation
 
 Run static checks in the isolated code worktree without AWS credentials or runtime input files:

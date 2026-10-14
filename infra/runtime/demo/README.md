@@ -40,6 +40,7 @@ CloudFrontからEC2 originへの通信はHTTPS `443`だけを使用します。N
 | `ec-portfolio-certbot-renew.service` | bounded certificate renewalを実行するsystemd oneshot unit |
 | `ec-portfolio-certbot-renew.timer` | missed runを補完する永続systemd timer |
 | `ecs-memory-probe.sh` | 別の計測用 ECS cluster の計測 task で使う非必須 sidecar。host / task のメモリ指標を読み取り専用で 1 行ずつ log へ出す（Phase 6C-5c S0。本番 task definition には含めない） |
+| `ecs-measurement-load.sh` | 同じ計測 task の非必須 sidecar。同一 host の API（`127.0.0.1:8080`）へ公開 read-only GET だけを毎秒上限付きで送り、件数だけを log へ出す（Phase 6C-5c。本番 task definition・runtime bundle には含めない） |
 
 bootstrapとdeployを分離することで、ホストの一度だけ必要な変更と、immutable image単位で繰り返すアプリケーションdeployを明確に分けます。Terraform `user_data`には接続せず、EC2 replacementを伴う構成変更も行いません。
 
@@ -704,7 +705,7 @@ ECS の無料 metric は container 使用量と reservation の比で、host の
 
 - **本番には組み込みません。** 本番の task definition・ECS service・Spot ASG / launch template・IAM はこの変更で一切変わりません（Demo plan は `No changes`）。runtime bundle の 13 ファイルの明示リストにも含めません。
 - 使う場所は、本番と分離した計測用 ECS cluster の計測 task です。本番と同じ API・Valkey container に、非必須 container としてこの probe を加えます。
-  - 計測用 cluster、service、task definition、Spot ASG / launch template、instance role はこの変更に含まれません。別の変更で導入します。
+  - 計測用 cluster、service、task definition、Spot ASG / launch template、instance role は Demo root の `ecs_measurement.tf`・`iam_ecs_measurement.tf` にあり、`main` では無効（`local.measurement_stack_enabled = false`）です（Demo README の「Phase 6C-5c measurement stack」）。
   - 計測用 launch template は `EIP_ALLOCATION_ID` を空にし、instance role は `ec2:AssociateAddress` を持ちません。そのため計測 host が origin Elastic IP を取ることはありません。
 - 出力: 1 行 1 sample の `key=value` を stdout に出し、awslogs が log group に送ります。既定では、task 開始から 15 分は 5 秒間隔（cold start）、その後は 30 秒間隔です。
 - 読むもの:
@@ -721,6 +722,30 @@ ECS の無料 metric は container 使用量と reservation の比で、host の
   - hard limit のない container の `c_<name>_limit_kB` は Docker から見た host 総量です。これを `MemTotal_kB` と照合します。
 - テスト: `ecs-memory-probe.test.sh` は fixture の `/proc`・cgroup・偽 `wget` を使い、`/bin/sh` と dash の下で検証します。
   - `--image` は、`ecs_application.tf` に固定された Valkey image（BusyBox）内で計測 task と同じ制約（UID 65534、read-only、capability なし、network なし）で実行します。PID 1 としての停止と、host `/proc/meminfo` との一致も確認します（CI で実行）。
+
+### 計測用 load driver（Phase 6C-5c）
+
+`ecs-measurement-load.sh` は、計測 task の中から API に一定の read 負荷をかけるための非必須 container です。計測 host には DNS 名も Elastic IP もなく、security group の HTTPS は CloudFront からだけなので、外から負荷をかける経路がありません。API は host network の `127.0.0.1:8080` に bind し、origin token は API ではなく Nginx が検査するため、driver は token を持たずに API を直接呼びます。
+
+- **対象は固定**: `http://127.0.0.1:8080` だけです。環境変数で変えることはできず、proxy 変数も起動時に unset します。
+- **GET だけ**: 公開 read-only の 4 path を順に使います。login・cart・admin・書き込みは呼びません。
+  - `/api/public/categories`
+  - `/api/public/products?page=1&size=12`
+  - `/api/public/products?sort=priceAsc&page=1&size=12`
+  - `/api/public/products?sort=nameAsc&page=1&size=12`
+- **量の上限**: 各 request はそれが始まった秒に数え、1 秒に `LOAD_RATE_PER_SECOND`（1–5、既定 2）件を超えて始めません。同時 1 件、timeout 5 秒、retry なしです。
+  - 計測 task の設定は 2 件/秒 × 1,200 秒 = 最大 2,400 件です。
+  - DB には API の Hikari pool（既定 10）が 1 つ増えるだけで、driver 自身は DB に接続しません。
+- **時間軸**（driver 起動から）:
+  1. API readiness（`/actuator/health/readiness`、db・redis を含む）を最大 `LOAD_READY_TIMEOUT_SECONDS`（既定 900 秒）待ちます。来なければ `event=never-ready` で終了します。
+  2. `LOAD_START_DELAY_SECONDS`（既定 1,800 秒）まで idle です。cold start と idle 安定期間を負荷なしで測るためです。
+  3. readiness をもう一度確認します（失敗なら `event=not-ready-at-start` で終了）。
+  4. `LOAD_DURATION_SECONDS`（既定 1,200 秒）負荷をかけて `event=done` で exit 0 します。非必須なので task は残ります。
+- **停止条件**: 連続 5 回の失敗（4xx・5xx・接続失敗）、または 1 報告区間で 5xx と接続失敗が 5 % を超えたら負荷を止めます（`event=aborted-...`）。
+- **出力**: 区間ごと（既定 60 秒）に 1 行、`loaddriver v=1 event=report ... req= s2xx= s4xx= s5xx= err=` を stdout に出します。値は数値と固定語だけで、response body・header・環境変数は出しません。disk にも書きません。
+- PID 1 として SIGTERM を trap し、待機中の停止は即時です。
+- テスト: `ecs-measurement-load.test.sh` は偽 `wget` で、`/bin/sh` と dash の下で対象・path・GET・毎秒上限・停止条件・readiness・SIGTERM・出力を検証します。
+  - `--image` は固定 Valkey image（BusyBox）内で計測 task と同じ制約（UID 65534、read-only、capability なし）のまま、host network 上のローカル HTTP server に実際の BusyBox `wget` で request します。200 と 503 の判定、PID 1 としての停止も確認します（CI で実行）。
 
 ## HTTPS origin configuration
 
