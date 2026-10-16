@@ -28,6 +28,14 @@ resource "aws_ssoadmin_permission_set_inline_policy" "plan" {
   # either, so a removal has to go through a removed block instead.
   lifecycle {
     prevent_destroy = true
+
+    # Fail-closed guardrail (policy_guardrails.tf): the runtime orchestration and
+    # the cold standby are read only through the customer managed policy
+    # ECPortfolioTerraformPlanRuntimeOrchestration.
+    precondition {
+      condition     = length(local.cold_standby_inline_grants.plan) == 0
+      error_message = "The Plan inline policy grants a Step Functions, DynamoDB or EventBridge action, an EventBridge Scheduler action outside its list, or an action owned by the cold standby customer managed policies (by name, through a wildcard or through Allow with NotAction) in statement(s) ${join(", ", local.cold_standby_inline_grants.plan)}."
+    }
   }
 }
 
@@ -49,6 +57,13 @@ resource "aws_ssoadmin_permission_set_inline_policy" "apply" {
     precondition {
       condition     = length(local.apply_inline_eip_association_grants) == 0
       error_message = "The Apply inline policy grants ec2:AssociateAddress or ec2:DisassociateAddress (by name, through a wildcard or through Allow with NotAction) in statement(s) ${join(", ", local.apply_inline_eip_association_grants)}. Origin EIP association belongs only to the customer managed policy ECPortfolioOriginEipAssociation."
+    }
+
+    # Fail-closed guardrail (policy_guardrails.tf): the runtime orchestration and
+    # the cold standby are granted only through their customer managed policies.
+    precondition {
+      condition     = length(local.cold_standby_inline_grants.apply) == 0
+      error_message = "The Apply inline policy grants a Step Functions, DynamoDB or EventBridge action, an EventBridge Scheduler action outside its list, or an action owned by the cold standby customer managed policies (by name, through a wildcard or through Allow with NotAction) in statement(s) ${join(", ", local.cold_standby_inline_grants.apply)}."
     }
   }
 }

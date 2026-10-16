@@ -227,7 +227,12 @@ step 2.
         "arn:aws:iam::<ACCOUNT_ID>:policy/ECPortfolioTerraformApplySpotFoundation",
         "arn:aws:iam::<ACCOUNT_ID>:policy/ECPortfolioTerraformApplyEcsApplication",
         "arn:aws:iam::<ACCOUNT_ID>:policy/ECPortfolioOriginEipAssociation",
-        "arn:aws:iam::<ACCOUNT_ID>:policy/ECPortfolioTerraformApplyMeasurementStack"
+        "arn:aws:iam::<ACCOUNT_ID>:policy/ECPortfolioTerraformApplyMeasurementStack",
+        "arn:aws:iam::<ACCOUNT_ID>:policy/ECPortfolioTerraformPlanRuntimeOrchestration",
+        "arn:aws:iam::<ACCOUNT_ID>:policy/ECPortfolioTerraformApplyRuntimeOrchestration",
+        "arn:aws:iam::<ACCOUNT_ID>:policy/ECPortfolioTerraformApplyColdStandby",
+        "arn:aws:iam::<ACCOUNT_ID>:policy/ECPortfolioColdStandbyOperator",
+        "arn:aws:iam::<ACCOUNT_ID>:policy/ECPortfolioColdStandbyRehearsal"
       ]
     },
     {
@@ -294,7 +299,10 @@ The thirteenth, `ECPortfolioOriginEipAssociation`, follows the same rule (see
 [Phase 6C-5 D3 origin EIP association](#phase-6c-5-d3-origin-eip-association)).
 So do the sixth Plan policy, `ECPortfolioTerraformPlanMeasurementStack`, and the
 fourteenth Apply policy, `ECPortfolioTerraformApplyMeasurementStack` (see
-[Phase 6C-5c measurement stack permissions](#phase-6c-5c-measurement-stack-permissions)).
+[Phase 6C-5c measurement stack permissions](#phase-6c-5c-measurement-stack-permissions)),
+and the five cold standby policies: the seventh Plan policy and the fifteenth to
+eighteenth Apply policies (see
+[Phase 6C-5c cold standby runtime permissions](#phase-6c-5c-cold-standby-runtime-permissions)).
 
 `OriginTlsPolicyVersionWrite`: rotating the `X-Origin-Verify` token ends with
 CloudFront sending the new token (step `OR4` in the runtime README). That needs
@@ -373,7 +381,7 @@ rendering of it from merged `main`.
 4. Verify read-only, as `ec-portfolio-access-admin`: the step 5 checks of the
    bootstrap, the reserved role reads (`iam:GetRole`, `iam:ListRolePolicies`,
    `iam:GetRolePolicy`, `iam:ListAttachedRolePolicies`), `iam:GetPolicy` and
-   `iam:ListPolicyVersions` on each of the 20 customer managed policies, and
+   `iam:ListPolicyVersions` on each of the 25 customer managed policies, and
    an AccessDenied from `iam:GetPolicy` on an AWS managed policy outside the
    list (for example `arn:aws:iam::aws:policy/ReadOnlyAccess`).
 5. Run the discovery again; its baseline must equal the previous one.
@@ -500,6 +508,18 @@ profile or retry:
   `ECPortfolioOriginEipAssociation` grants `ec2:AssociateAddress` by design and
   is outside this root (see
   [Phase 6C-5 D3 origin EIP association](#phase-6c-5-d3-origin-eip-association)).
+- **The Phase 6C-5c cold standby guardrails: fail-closed.** One more
+  `lifecycle.precondition` on each inline policy resource, with its condition in
+  `policy_guardrails.tf`. Neither inline policy may grant a Step Functions,
+  DynamoDB or EventBridge action, an EventBridge Scheduler action outside the
+  exact list it already has, or any of the actions the cold standby customer
+  managed policies own: starting or stopping an instance or a database,
+  changing a network interface attribute, managing a Systems Manager document,
+  or putting or deleting an Auto Scaling scheduled action. A `*`, a service
+  wildcard, a pattern that matches one of those actions, an action name with
+  characters outside an IAM action name and Allow with NotAction all count as a
+  grant. Those grants exist only in the reviewed customer managed policies (see
+  [Phase 6C-5c cold standby runtime permissions](#phase-6c-5c-cold-standby-runtime-permissions)).
 
 ## Changing a policy after adoption
 
@@ -2197,3 +2217,716 @@ Each step is approved separately; any AccessDenied or unexpected plan is a STOP.
 After the measurement, the Demo teardown converges first. Then the
 administrator detaches both policies, provisions, deletes them, and a change to
 this README removes them from `CustomerManagedPolicyRead` (20 → 18).
+
+## Phase 6C-5c cold standby runtime permissions
+
+Phase 6C-5c runs the Demo origin on one Spot host on weekdays from 08:00 to
+22:00 JST and keeps the existing On-Demand host (`aws_instance.demo`) stopped as
+a cold standby. Five Step Functions state machines, started by EventBridge
+Scheduler and by EventBridge events, open and close the day, watch the origin,
+bring the On-Demand host up when the Spot host cannot serve, and move the origin
+Elastic IP. They keep a DynamoDB control table for idempotency, the run lock and
+the operator switches, run fixed Systems Manager command documents on the hosts,
+and report failures through EventBridge rules to the existing SNS topic. A
+recurring scheduled action on the production Spot group and the existing
+`ec2-stop` and `rds-stop` schedules, retimed, stop whatever is still running
+after the close if the close itself fails.
+
+This change grants what the Demo root needs to create, read, change and remove
+those resources, what the operator needs to run the cold standby by hand when
+the automation cannot, and, for a limited time, what the pre-cutover rehearsal
+of the On-Demand public IPv4 needs. It creates none of these resources, changes
+no live resource and neither inline policy, and enables no schedule.
+
+The names below are fixed by this change. The Demo root must use exactly these,
+or its plan and apply fail with an AccessDenied.
+
+| Resource | Name |
+| --- | --- |
+| State machines | `ec-portfolio-demo-day-open`, `ec-portfolio-demo-ready-check`, `ec-portfolio-demo-day-close`, `ec-portfolio-demo-origin-guard`, `ec-portfolio-demo-od-standby` |
+| Roles | `ec-portfolio-demo-runtime-orchestrator` and `ec-portfolio-demo-runtime-eip-writer` (trusted by `states.amazonaws.com`), `ec-portfolio-demo-runtime-events` (trusted by `events.amazonaws.com`) |
+| Control table | `ec-portfolio-demo-runtime-control` |
+| Rules (default event bus) | `ec-portfolio-demo-origin-guard-signals`, `ec-portfolio-demo-spot-capacity-unavailable`, `ec-portfolio-demo-runtime-orchestration-failed` |
+| New schedules (group `ec-portfolio-demo-runtime`) | `ec-portfolio-demo-day-open`, `ec-portfolio-demo-ready-check`, `ec-portfolio-demo-day-close`, `ec-portfolio-demo-origin-guard-tick` |
+| Existing schedules (same group) | `ec-portfolio-demo-rds-start`, `ec-portfolio-demo-ec2-start`, `ec-portfolio-demo-ec2-stop`, `ec-portfolio-demo-rds-stop`: updated (disabled or retimed), never deleted by this change |
+| Command documents | `ec-portfolio-demo-od-readiness`, `ec-portfolio-demo-spot-smoke` |
+| Production group backstop | a scheduled action on `ec-portfolio-demo-ecs-spot` (minimum size 0, maximum size at most 2) |
+
+`ec-portfolio-demo-runtime-eip-writer` is the only runtime role the Demo root may
+grant `ec2:AssociateAddress`; it is the role of `origin-guard`, the single
+writer of the origin Elastic IP. That grant lives in the Demo root and is
+reviewed there; this change only lets the Apply permission set create the role.
+
+| Permission set | Change | Where |
+| --- | --- | --- |
+| `ECPortfolioTerraformPlan` | new customer managed policy `ECPortfolioTerraformPlanRuntimeOrchestration`, attached as its seventh | created and attached by an administrator from the document below; this root manages neither |
+| `ECPortfolioTerraformApply` | new customer managed policies `ECPortfolioTerraformApplyRuntimeOrchestration` (fifteenth), `ECPortfolioTerraformApplyColdStandby` (sixteenth), `ECPortfolioColdStandbyOperator` (seventeenth) and, until the rehearsal is over, `ECPortfolioColdStandbyRehearsal` (eighteenth) | the same |
+| `ECPortfolioTerraformPlan`, `ECPortfolioTerraformApply` | fail-closed guardrails on both inline policies (see [Guardrails](#guardrails)); neither inline document changes because of them | `policy_guardrails.tf`, `permission_sets.tf` |
+| `ECPortfolioAccessAdmin` | `CustomerManagedPolicyRead` lists the five new policies (20 → 25 ARNs) | the document above; no new write |
+
+Neither inline policy can take the new grants: on 2026-10-16 the discovery read
+10,180 (Apply) and 8,613 (Plan) of the 10,240 non-whitespace characters
+Identity Center allows. The permission sets reference 14 (Apply) and 6 (Plan)
+customer managed policies; with this change Apply carries 18, and 17 once the
+rehearsal policy is removed, of the 20 the applied IAM quota "Managed policies
+per role" allows (confirmed on 2026-09-29), and Plan carries 7.
+
+The documents were derived from the API calls AWS provider 6.62 makes on
+create, read, update and delete, mapped to IAM actions through the AWS service
+reference:
+
+- `aws_sfn_state_machine`, `aws_dynamodb_table`, `aws_iam_role`,
+  `aws_iam_role_policy`, `aws_cloudwatch_event_rule`,
+  `aws_cloudwatch_event_target` and `aws_scheduler_schedule`: as in the Phase
+  6C-5c-1 draft (PR #71), widened to five state machines and three roles.
+- `aws_ssm_document`: `CreateDocument`; `DescribeDocument`, `GetDocument` and
+  `DescribeDocumentPermission` on every read; `UpdateDocument` and
+  `UpdateDocumentDefaultVersion`; `DeleteDocument`; the tag calls. The provider
+  calls `ModifyDocumentPermission` only when the `permissions` argument is set,
+  which shares a document with other accounts. It is not granted, so the Demo
+  root must not set that argument.
+- `aws_autoscaling_schedule`: `PutScheduledUpdateGroupAction`,
+  `DescribeScheduledActions`, `DeleteScheduledAction`.
+
+A provider upgrade, or an argument these resources do not use yet (state machine
+logging, tracing, `publish`, encryption with a customer managed key, table
+streams, point-in-time recovery, replicas, a dead-letter queue or role on an
+event target, document sharing), needs the same check again; a missing
+permission then fails closed with an AccessDenied.
+
+Not granted anywhere in this change: `ec2:AssociateAddress` and
+`ec2:DisassociateAddress` (the operator keeps `ECPortfolioOriginEipAssociation`),
+`ec2:TerminateInstances`, `ec2:RunInstances`, `ec2:ModifyInstanceAttribute`,
+`autoscaling:SetDesiredCapacity`, `rds:ModifyDBInstance`, `rds:DeleteDBInstance`,
+`rds:RebootDBInstance`, `ssm:SendCommand`, `ssm:ModifyDocumentPermission`,
+`scheduler:DeleteSchedule` on the existing schedules (their removal is a later,
+separate change), and `states:RedriveExecution`. Redrive is denied explicitly on
+the five state machines' executions, in both the Apply and the Plan policy: a
+redrive resumes a failed execution at its failed state, which may be a write
+whose guard it then skips. A failed run is recovered by a new, approved manual
+execution instead.
+
+### `ECPortfolioTerraformApplyRuntimeOrchestration`
+
+Maintained by hand; this root does not manage it. The document below is the
+reviewed source; it is PR #71's policy widened to the five state machines and
+three roles, with the redrive denial.
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ManageExactRuntimeStateMachines",
+      "Effect": "Allow",
+      "Action": [
+        "states:CreateStateMachine",
+        "states:DescribeStateMachine",
+        "states:UpdateStateMachine",
+        "states:DeleteStateMachine",
+        "states:ListStateMachineVersions",
+        "states:TagResource",
+        "states:UntagResource",
+        "states:ListTagsForResource"
+      ],
+      "Resource": [
+        "arn:aws:states:ap-northeast-1:<ACCOUNT_ID>:stateMachine:ec-portfolio-demo-day-open",
+        "arn:aws:states:ap-northeast-1:<ACCOUNT_ID>:stateMachine:ec-portfolio-demo-ready-check",
+        "arn:aws:states:ap-northeast-1:<ACCOUNT_ID>:stateMachine:ec-portfolio-demo-day-close",
+        "arn:aws:states:ap-northeast-1:<ACCOUNT_ID>:stateMachine:ec-portfolio-demo-origin-guard",
+        "arn:aws:states:ap-northeast-1:<ACCOUNT_ID>:stateMachine:ec-portfolio-demo-od-standby"
+      ]
+    },
+    {
+      "Sid": "ValidateStateMachineDefinitions",
+      "Effect": "Allow",
+      "Action": "states:ValidateStateMachineDefinition",
+      "Resource": "*"
+    },
+    {
+      "Sid": "StartRuntimeStateMachineRehearsals",
+      "Effect": "Allow",
+      "Action": [
+        "states:StartExecution",
+        "states:ListExecutions"
+      ],
+      "Resource": [
+        "arn:aws:states:ap-northeast-1:<ACCOUNT_ID>:stateMachine:ec-portfolio-demo-day-open",
+        "arn:aws:states:ap-northeast-1:<ACCOUNT_ID>:stateMachine:ec-portfolio-demo-ready-check",
+        "arn:aws:states:ap-northeast-1:<ACCOUNT_ID>:stateMachine:ec-portfolio-demo-day-close",
+        "arn:aws:states:ap-northeast-1:<ACCOUNT_ID>:stateMachine:ec-portfolio-demo-origin-guard",
+        "arn:aws:states:ap-northeast-1:<ACCOUNT_ID>:stateMachine:ec-portfolio-demo-od-standby"
+      ]
+    },
+    {
+      "Sid": "ObserveRuntimeStateMachineExecutions",
+      "Effect": "Allow",
+      "Action": [
+        "states:DescribeExecution",
+        "states:GetExecutionHistory",
+        "states:StopExecution"
+      ],
+      "Resource": [
+        "arn:aws:states:ap-northeast-1:<ACCOUNT_ID>:execution:ec-portfolio-demo-day-open:*",
+        "arn:aws:states:ap-northeast-1:<ACCOUNT_ID>:execution:ec-portfolio-demo-ready-check:*",
+        "arn:aws:states:ap-northeast-1:<ACCOUNT_ID>:execution:ec-portfolio-demo-day-close:*",
+        "arn:aws:states:ap-northeast-1:<ACCOUNT_ID>:execution:ec-portfolio-demo-origin-guard:*",
+        "arn:aws:states:ap-northeast-1:<ACCOUNT_ID>:execution:ec-portfolio-demo-od-standby:*"
+      ]
+    },
+    {
+      "Sid": "ManageExactRuntimeRoles",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateRole",
+        "iam:GetRole",
+        "iam:UpdateRoleDescription",
+        "iam:UpdateAssumeRolePolicy",
+        "iam:DeleteRole",
+        "iam:TagRole",
+        "iam:UntagRole",
+        "iam:ListRolePolicies",
+        "iam:ListAttachedRolePolicies",
+        "iam:ListInstanceProfilesForRole",
+        "iam:PutRolePolicy",
+        "iam:GetRolePolicy",
+        "iam:DeleteRolePolicy"
+      ],
+      "Resource": [
+        "arn:aws:iam::<ACCOUNT_ID>:role/ec-portfolio-demo-runtime-orchestrator",
+        "arn:aws:iam::<ACCOUNT_ID>:role/ec-portfolio-demo-runtime-eip-writer",
+        "arn:aws:iam::<ACCOUNT_ID>:role/ec-portfolio-demo-runtime-events"
+      ]
+    },
+    {
+      "Sid": "PassRuntimeOrchestratorRoleToStepFunctions",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": "arn:aws:iam::<ACCOUNT_ID>:role/ec-portfolio-demo-runtime-orchestrator",
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": "states.amazonaws.com"
+        }
+      }
+    },
+    {
+      "Sid": "PassRuntimeEipWriterRoleToStepFunctions",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": "arn:aws:iam::<ACCOUNT_ID>:role/ec-portfolio-demo-runtime-eip-writer",
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": "states.amazonaws.com"
+        }
+      }
+    },
+    {
+      "Sid": "PassRuntimeEventsRoleToEventBridge",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": "arn:aws:iam::<ACCOUNT_ID>:role/ec-portfolio-demo-runtime-events",
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": "events.amazonaws.com"
+        }
+      }
+    },
+    {
+      "Sid": "ManageExactRuntimeControlTable",
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:CreateTable",
+        "dynamodb:DescribeTable",
+        "dynamodb:UpdateTable",
+        "dynamodb:DeleteTable",
+        "dynamodb:DescribeTimeToLive",
+        "dynamodb:UpdateTimeToLive",
+        "dynamodb:DescribeContinuousBackups",
+        "dynamodb:TagResource",
+        "dynamodb:UntagResource",
+        "dynamodb:ListTagsOfResource"
+      ],
+      "Resource": "arn:aws:dynamodb:ap-northeast-1:<ACCOUNT_ID>:table/ec-portfolio-demo-runtime-control"
+    },
+    {
+      "Sid": "ManageExactRuntimeRules",
+      "Effect": "Allow",
+      "Action": [
+        "events:PutRule",
+        "events:DescribeRule",
+        "events:DeleteRule",
+        "events:PutTargets",
+        "events:RemoveTargets",
+        "events:ListTargetsByRule",
+        "events:TagResource",
+        "events:UntagResource",
+        "events:ListTagsForResource"
+      ],
+      "Resource": [
+        "arn:aws:events:ap-northeast-1:<ACCOUNT_ID>:rule/ec-portfolio-demo-origin-guard-signals",
+        "arn:aws:events:ap-northeast-1:<ACCOUNT_ID>:rule/ec-portfolio-demo-spot-capacity-unavailable",
+        "arn:aws:events:ap-northeast-1:<ACCOUNT_ID>:rule/ec-portfolio-demo-runtime-orchestration-failed"
+      ]
+    },
+    {
+      "Sid": "ManageExactRuntimeSchedules",
+      "Effect": "Allow",
+      "Action": [
+        "scheduler:CreateSchedule",
+        "scheduler:GetSchedule",
+        "scheduler:UpdateSchedule",
+        "scheduler:DeleteSchedule"
+      ],
+      "Resource": [
+        "arn:aws:scheduler:ap-northeast-1:<ACCOUNT_ID>:schedule/ec-portfolio-demo-runtime/ec-portfolio-demo-day-open",
+        "arn:aws:scheduler:ap-northeast-1:<ACCOUNT_ID>:schedule/ec-portfolio-demo-runtime/ec-portfolio-demo-ready-check",
+        "arn:aws:scheduler:ap-northeast-1:<ACCOUNT_ID>:schedule/ec-portfolio-demo-runtime/ec-portfolio-demo-day-close",
+        "arn:aws:scheduler:ap-northeast-1:<ACCOUNT_ID>:schedule/ec-portfolio-demo-runtime/ec-portfolio-demo-origin-guard-tick"
+      ]
+    },
+    {
+      "Sid": "DenyRuntimeExecutionRedrive",
+      "Effect": "Deny",
+      "Action": "states:RedriveExecution",
+      "Resource": [
+        "arn:aws:states:ap-northeast-1:<ACCOUNT_ID>:execution:ec-portfolio-demo-day-open:*",
+        "arn:aws:states:ap-northeast-1:<ACCOUNT_ID>:execution:ec-portfolio-demo-ready-check:*",
+        "arn:aws:states:ap-northeast-1:<ACCOUNT_ID>:execution:ec-portfolio-demo-day-close:*",
+        "arn:aws:states:ap-northeast-1:<ACCOUNT_ID>:execution:ec-portfolio-demo-origin-guard:*",
+        "arn:aws:states:ap-northeast-1:<ACCOUNT_ID>:execution:ec-portfolio-demo-od-standby:*"
+      ]
+    }
+  ]
+}
+```
+
+Canonical SHA-256 (`scripts/policy-gate.sh canonical`): `326e60d18d480c759f259c330aed3ce83e76d09a57c7c10c9afaabbe17d632f7`.
+5,535 of the 6,144 non-whitespace characters an IAM managed policy
+may hold, counting `<ACCOUNT_ID>` as twelve.
+
+### `ECPortfolioTerraformApplyColdStandby`
+
+Maintained by hand; this root does not manage it. What the Demo root needs
+beyond the runtime orchestration: the two command documents, the update of the
+four existing schedules (to disable `rds-start` and `ec2-start`, which would
+start the cold standby every morning, and to retime `ec2-stop` and `rds-stop` as
+the close backstops), and the backstop scheduled action of the production group.
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ManageExactRuntimeCommandDocuments",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:CreateDocument",
+        "ssm:DescribeDocument",
+        "ssm:GetDocument",
+        "ssm:DescribeDocumentPermission",
+        "ssm:UpdateDocument",
+        "ssm:UpdateDocumentDefaultVersion",
+        "ssm:DeleteDocument",
+        "ssm:AddTagsToResource",
+        "ssm:RemoveTagsFromResource",
+        "ssm:ListTagsForResource"
+      ],
+      "Resource": [
+        "arn:aws:ssm:ap-northeast-1:<ACCOUNT_ID>:document/ec-portfolio-demo-od-readiness",
+        "arn:aws:ssm:ap-northeast-1:<ACCOUNT_ID>:document/ec-portfolio-demo-spot-smoke"
+      ]
+    },
+    {
+      "Sid": "ChangeExactLegacyRuntimeSchedules",
+      "Effect": "Allow",
+      "Action": [
+        "scheduler:GetSchedule",
+        "scheduler:UpdateSchedule"
+      ],
+      "Resource": [
+        "arn:aws:scheduler:ap-northeast-1:<ACCOUNT_ID>:schedule/ec-portfolio-demo-runtime/ec-portfolio-demo-rds-start",
+        "arn:aws:scheduler:ap-northeast-1:<ACCOUNT_ID>:schedule/ec-portfolio-demo-runtime/ec-portfolio-demo-ec2-start",
+        "arn:aws:scheduler:ap-northeast-1:<ACCOUNT_ID>:schedule/ec-portfolio-demo-runtime/ec-portfolio-demo-ec2-stop",
+        "arn:aws:scheduler:ap-northeast-1:<ACCOUNT_ID>:schedule/ec-portfolio-demo-runtime/ec-portfolio-demo-rds-stop"
+      ]
+    },
+    {
+      "Sid": "PutProductionGroupBackstop",
+      "Effect": "Allow",
+      "Action": "autoscaling:PutScheduledUpdateGroupAction",
+      "Resource": "arn:aws:autoscaling:ap-northeast-1:<ACCOUNT_ID>:autoScalingGroup:*:autoScalingGroupName/ec-portfolio-demo-ecs-spot",
+      "Condition": {
+        "NumericEquals": {
+          "autoscaling:MinSize": "0"
+        },
+        "NumericLessThanEquals": {
+          "autoscaling:MaxSize": "2"
+        }
+      }
+    },
+    {
+      "Sid": "DeleteProductionGroupScheduledAction",
+      "Effect": "Allow",
+      "Action": "autoscaling:DeleteScheduledAction",
+      "Resource": "arn:aws:autoscaling:ap-northeast-1:<ACCOUNT_ID>:autoScalingGroup:*:autoScalingGroupName/ec-portfolio-demo-ecs-spot"
+    },
+    {
+      "Sid": "ReadScheduledActions",
+      "Effect": "Allow",
+      "Action": "autoscaling:DescribeScheduledActions",
+      "Resource": "*"
+    }
+  ]
+}
+```
+
+Canonical SHA-256: `01f97613658bd6bfefd6ddf605c1dd1766f905f1eeb168ecfa20745c86ee569d`. 1,808 of 6,144 characters.
+
+- `PutProductionGroupBackstop`: IAM cannot limit a scheduled action's desired
+  capacity, only its minimum and maximum size, so those are pinned to 0 and at
+  most 2. The Apply permission set can already change the group's desired
+  capacity directly (`ECPortfolioTerraformApplySpotFoundation`), so this adds no
+  new way to start a Spot host.
+- The existing schedules get `scheduler:UpdateSchedule` only, by exact ARN.
+  The new schedules keep theirs in `ECPortfolioTerraformApplyRuntimeOrchestration`.
+
+### `ECPortfolioColdStandbyOperator`
+
+Maintained by hand; this root does not manage it. The operator's long-term
+break-glass for the cold standby, used when the state machines cannot act: start
+and stop the On-Demand host and the database, and set the control table's
+operator switches. It is for people, not for Terraform, like
+`ECPortfolioOriginEipAssociation`.
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "StartStopExactOnDemandStandby",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:StartInstances",
+        "ec2:StopInstances"
+      ],
+      "Resource": "arn:aws:ec2:ap-northeast-1:<ACCOUNT_ID>:instance/i-01aab176822e4e38c"
+    },
+    {
+      "Sid": "StartStopExactDemoDatabase",
+      "Effect": "Allow",
+      "Action": [
+        "rds:StartDBInstance",
+        "rds:StopDBInstance"
+      ],
+      "Resource": "arn:aws:rds:ap-northeast-1:<ACCOUNT_ID>:db:ec-portfolio-demo-mariadb"
+    },
+    {
+      "Sid": "OperateExactRuntimeControlItems",
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:GetItem",
+        "dynamodb:PutItem",
+        "dynamodb:DeleteItem"
+      ],
+      "Resource": "arn:aws:dynamodb:ap-northeast-1:<ACCOUNT_ID>:table/ec-portfolio-demo-runtime-control",
+      "Condition": {
+        "ForAllValues:StringEquals": {
+          "dynamodb:LeadingKeys": [
+            "maintenance",
+            "mode",
+            "lock#runtime",
+            "standby-hold"
+          ]
+        },
+        "Null": {
+          "dynamodb:LeadingKeys": "false"
+        }
+      }
+    }
+  ]
+}
+```
+
+Canonical SHA-256: `740d96e849a4708c68940e9255e7e53e609db3e120cf5d3c660676b4655938fe`. 807 of 6,144 characters.
+
+- `StartStopExactOnDemandStandby` and `StartStopExactDemoDatabase` name one
+  instance and one database. IAM cannot tell a graceful stop from
+  `--force`; the runbook uses the graceful stop only. `StopDBInstance` with a
+  snapshot also needs `rds:CreateDBSnapshot`, which is not granted.
+- `OperateExactRuntimeControlItems` writes only the items whose partition key is
+  `maintenance`, `mode`, `lock#runtime` or `standby-hold`. The `Null` condition
+  keeps a request without a partition key from passing the `ForAllValues` test
+  vacuously. Run records, instance records and promotion history stay the state
+  machines' alone.
+
+### `ECPortfolioColdStandbyRehearsal`
+
+Maintained by hand; this root does not manage it. Temporary: attached for the
+pre-cutover rehearsal of the On-Demand public IPv4 and the `TestState` checks of
+the state machine tasks, and removed afterwards (see
+[Removing the rehearsal policy](#removing-the-rehearsal-policy)). Nothing in the
+production runbook depends on it: a manual failover moves the Elastic IP first
+and needs no public IPv4 on the On-Demand host.
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ToggleOnDemandPublicIpv4Assignment",
+      "Effect": "Allow",
+      "Action": "ec2:ModifyNetworkInterfaceAttribute",
+      "Resource": [
+        "arn:aws:ec2:ap-northeast-1:<ACCOUNT_ID>:network-interface/eni-082890a259bcbe151",
+        "arn:aws:ec2:ap-northeast-1:<ACCOUNT_ID>:instance/i-01aab176822e4e38c"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "ec2:Attribute/AssociatePublicIpAddress": [
+            "true",
+            "false"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "TestRuntimeStates",
+      "Effect": "Allow",
+      "Action": "states:TestState",
+      "Resource": "*"
+    }
+  ]
+}
+```
+
+Canonical SHA-256: `022e7348539315e7f5f4a886815ac48beb198687712b2a16a5c50117810951ac`. 490 of 6,144 characters.
+
+#### Scope of `ec2:ModifyNetworkInterfaceAttribute`
+
+The action changes one attribute of a network interface per call: its security
+groups, source/destination check, description, delete-on-termination, ENA
+Express, connection tracking, associated subnets, primary IPv6 or public IPv4
+assignment. Granted bare on the On-Demand host's primary network interface, it
+would let the operator replace the host's security groups or turn off its
+source/destination check. The statement narrows it three ways:
+
+1. **Resource:** the On-Demand primary network interface and the On-Demand
+   instance, by ID. No other interface or instance.
+2. **Attribute:** `ec2:Attribute/AssociatePublicIpAddress` must be present with
+   the value `true` or `false`. A call that changes any other attribute does not
+   carry that key, so `StringEquals` fails and the request is denied. The API
+   takes one attribute per call, so a call cannot add a second attribute to an
+   allowed one.
+3. **Security groups:** `security-group` is not among the resources, so a call
+   that names security groups is not authorized for them even if the condition
+   were satisfied.
+
+The service reference lists `ec2:Attribute/${AttributeName}` for this action,
+but not the exact value it carries for `AssociatePublicIpAddress`. The
+condition therefore fails closed: if the value is spelled differently, the
+legitimate call is denied, never a different one allowed. The dry-run matrix in
+[Verification](#verification-of-the-cold-standby-policies) decides before the rehearsal: both values of
+the public IPv4 assignment must return `DryRunOperation`, and source/destination
+check, description, delete-on-termination and security groups must return
+`UnauthorizedOperation`. Any other outcome is a STOP and a change to this
+document, not a wider grant.
+
+`states:TestState` has no resource type; it runs one state of a definition with
+the role passed in the request, for which the caller also needs `iam:PassRole`
+(`ECPortfolioTerraformApplyRuntimeOrchestration`).
+
+### `ECPortfolioTerraformPlanRuntimeOrchestration`
+
+Maintained by hand; this root does not manage it. The Plan permission set's reads
+for the Demo root's plans and for the operator's observation of runs and of the
+control table. Read actions only, and the same redrive denial.
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadExactRuntimeStateMachines",
+      "Effect": "Allow",
+      "Action": [
+        "states:DescribeStateMachine",
+        "states:ListStateMachineVersions",
+        "states:ListTagsForResource",
+        "states:ListExecutions"
+      ],
+      "Resource": [
+        "arn:aws:states:ap-northeast-1:<ACCOUNT_ID>:stateMachine:ec-portfolio-demo-day-open",
+        "arn:aws:states:ap-northeast-1:<ACCOUNT_ID>:stateMachine:ec-portfolio-demo-ready-check",
+        "arn:aws:states:ap-northeast-1:<ACCOUNT_ID>:stateMachine:ec-portfolio-demo-day-close",
+        "arn:aws:states:ap-northeast-1:<ACCOUNT_ID>:stateMachine:ec-portfolio-demo-origin-guard",
+        "arn:aws:states:ap-northeast-1:<ACCOUNT_ID>:stateMachine:ec-portfolio-demo-od-standby"
+      ]
+    },
+    {
+      "Sid": "ReadExactRuntimeExecutions",
+      "Effect": "Allow",
+      "Action": [
+        "states:DescribeExecution",
+        "states:GetExecutionHistory"
+      ],
+      "Resource": [
+        "arn:aws:states:ap-northeast-1:<ACCOUNT_ID>:execution:ec-portfolio-demo-day-open:*",
+        "arn:aws:states:ap-northeast-1:<ACCOUNT_ID>:execution:ec-portfolio-demo-ready-check:*",
+        "arn:aws:states:ap-northeast-1:<ACCOUNT_ID>:execution:ec-portfolio-demo-day-close:*",
+        "arn:aws:states:ap-northeast-1:<ACCOUNT_ID>:execution:ec-portfolio-demo-origin-guard:*",
+        "arn:aws:states:ap-northeast-1:<ACCOUNT_ID>:execution:ec-portfolio-demo-od-standby:*"
+      ]
+    },
+    {
+      "Sid": "ReadExactRuntimeControlTable",
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:DescribeTable",
+        "dynamodb:DescribeContinuousBackups",
+        "dynamodb:DescribeTimeToLive",
+        "dynamodb:ListTagsOfResource",
+        "dynamodb:GetItem"
+      ],
+      "Resource": "arn:aws:dynamodb:ap-northeast-1:<ACCOUNT_ID>:table/ec-portfolio-demo-runtime-control"
+    },
+    {
+      "Sid": "ReadExactRuntimeRolePolicies",
+      "Effect": "Allow",
+      "Action": [
+        "iam:ListRolePolicies",
+        "iam:ListAttachedRolePolicies"
+      ],
+      "Resource": [
+        "arn:aws:iam::<ACCOUNT_ID>:role/ec-portfolio-demo-runtime-orchestrator",
+        "arn:aws:iam::<ACCOUNT_ID>:role/ec-portfolio-demo-runtime-eip-writer",
+        "arn:aws:iam::<ACCOUNT_ID>:role/ec-portfolio-demo-runtime-events"
+      ]
+    },
+    {
+      "Sid": "ReadExactRuntimeRules",
+      "Effect": "Allow",
+      "Action": [
+        "events:DescribeRule",
+        "events:ListTargetsByRule",
+        "events:ListTagsForResource"
+      ],
+      "Resource": [
+        "arn:aws:events:ap-northeast-1:<ACCOUNT_ID>:rule/ec-portfolio-demo-origin-guard-signals",
+        "arn:aws:events:ap-northeast-1:<ACCOUNT_ID>:rule/ec-portfolio-demo-spot-capacity-unavailable",
+        "arn:aws:events:ap-northeast-1:<ACCOUNT_ID>:rule/ec-portfolio-demo-runtime-orchestration-failed"
+      ]
+    },
+    {
+      "Sid": "ReadExactRuntimeCommandDocuments",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:DescribeDocument",
+        "ssm:GetDocument",
+        "ssm:DescribeDocumentPermission",
+        "ssm:ListTagsForResource"
+      ],
+      "Resource": [
+        "arn:aws:ssm:ap-northeast-1:<ACCOUNT_ID>:document/ec-portfolio-demo-od-readiness",
+        "arn:aws:ssm:ap-northeast-1:<ACCOUNT_ID>:document/ec-portfolio-demo-spot-smoke"
+      ]
+    },
+    {
+      "Sid": "ReadScheduledActions",
+      "Effect": "Allow",
+      "Action": "autoscaling:DescribeScheduledActions",
+      "Resource": "*"
+    },
+    {
+      "Sid": "DenyRuntimeExecutionRedrive",
+      "Effect": "Deny",
+      "Action": "states:RedriveExecution",
+      "Resource": [
+        "arn:aws:states:ap-northeast-1:<ACCOUNT_ID>:execution:ec-portfolio-demo-day-open:*",
+        "arn:aws:states:ap-northeast-1:<ACCOUNT_ID>:execution:ec-portfolio-demo-ready-check:*",
+        "arn:aws:states:ap-northeast-1:<ACCOUNT_ID>:execution:ec-portfolio-demo-day-close:*",
+        "arn:aws:states:ap-northeast-1:<ACCOUNT_ID>:execution:ec-portfolio-demo-origin-guard:*",
+        "arn:aws:states:ap-northeast-1:<ACCOUNT_ID>:execution:ec-portfolio-demo-od-standby:*"
+      ]
+    }
+  ]
+}
+```
+
+Canonical SHA-256: `f885a264c5798030da5c918b21b594579f5202417cf89a4be8d4134ba8afc84b`. 3,303 of 6,144 characters.
+
+### Verification of the cold standby policies
+
+Offline, on every pull request: `scripts/cold-standby-policy.test.sh` reads the
+five documents from this README, checks their recorded digests, runs a shape
+gate (exact resources, exact conditions, read-only Plan, no forbidden action, the
+exact redrive denial, sizes) and requires the gate to reject a set of mutants.
+It also checks that `CustomerManagedPolicyRead` lists the five policies.
+
+After the policies are attached, read-only, each separately approved:
+
+1. Discovery: Plan lists 7 references and Apply 18; nothing else changed.
+2. The five policies read back as AccessAdmin: one version, the default,
+   attached once, and documents whose canonical SHA-256 (account ID replaced by
+   `<ACCOUNT_ID>`) is the one recorded here.
+3. The dry-run matrix, as Apply, with `--dry-run` only (no attribute is changed):
+
+   | Call on the On-Demand primary network interface | Expected |
+   | --- | --- |
+   | `--associate-public-ip-address` | `DryRunOperation` |
+   | `--no-associate-public-ip-address` | `DryRunOperation` |
+   | `--source-dest-check` / `--no-source-dest-check` | `UnauthorizedOperation` |
+   | `--description Value=x` | `UnauthorizedOperation` |
+   | `--groups <the current security group>` | `UnauthorizedOperation` |
+   | `--attachment AttachmentId=<id>,DeleteOnTermination=true` | `UnauthorizedOperation` |
+   | `--associate-public-ip-address` on any other interface | `UnauthorizedOperation` |
+
+   `StartInstances`, `StopInstances`, `StartDBInstance` and `StopDBInstance`
+   with `--dry-run` where the API offers it (EC2), on the exact resources
+   (`DryRunOperation`) and on another instance (`UnauthorizedOperation`).
+
+A dry run proves the authorization and that EC2 accepts the request; it does not
+prove that a public IPv4 is assigned, that the host reaches ECR or Systems
+Manager, or that the address is released afterwards. That is the rehearsal's
+job, approved separately.
+
+### Order after merge
+
+Each step is approved separately; any AccessDenied or unexpected plan is a STOP.
+
+1. Discovery: Plan carries 6 and Apply 14 customer managed policy references,
+   no AWS managed policy and no boundary, and the baseline equals the previous
+   one.
+2. An administrator renders the five JSON documents above from merged `main`,
+   checks each canonical SHA-256 against the one recorded here, fills
+   `<ACCOUNT_ID>` and creates the five policies. AccessAdmin has no
+   `iam:CreatePolicy`.
+3. The administrator attaches `ECPortfolioTerraformPlanRuntimeOrchestration` to
+   `ECPortfolioTerraformPlan` and the four Apply policies to
+   `ECPortfolioTerraformApply` as customer managed policy references in the
+   Identity Center console, and provisions each permission set, one at a time.
+   `ECPortfolioColdStandbyRehearsal` is attached only when the rehearsal is
+   approved, and may be left for then.
+4. Discovery: Plan lists 7 references, Apply 18 (17 without the rehearsal
+   policy), and nothing else changed.
+5. `ECPortfolioAccessAdmin` update from merged `main`, as in
+   [Changing the `ECPortfolioAccessAdmin` policy](#changing-the-ecportfolioaccessadmin-policy),
+   now with 25 customer managed policies. Then the five policies are read back
+   as in [Verification](#verification-of-the-cold-standby-policies).
+6. This root: a convergence plan with `No changes`. The inline policies are
+   unchanged and the new guardrails pass on them.
+7. The Demo root: the cold standby changes, each separately approved.
+
+### Removing the rehearsal policy
+
+After the rehearsal and the `TestState` checks, the administrator detaches
+`ECPortfolioColdStandbyRehearsal` from `ECPortfolioTerraformApply`, provisions,
+and deletes it; a change to this README then removes it from
+`CustomerManagedPolicyRead` (25 → 24) and from the test. Discovery shows 17
+Apply references. Keeping it attached longer is a separate, recorded decision.
+
+### Rollback
+
+Every policy here is additive and outside this root. Detaching a policy and
+provisioning removes its grants; the Demo resources it manages then fail closed
+with an AccessDenied on the next plan. The inline policies are not touched, so
+this root needs no rollback; reverting the guardrails is an ordinary change.
