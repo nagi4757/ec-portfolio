@@ -141,6 +141,15 @@ jobs:
       - name: Test origin runtime install contract
         run: infra/runtime/demo/deploy-origin-runtime.test.sh
 
+      # The release scope decides what a main push publishes and installs, so
+      # its contract is checked on every pull request too, not only inside the
+      # main-push jobs that act on it. Both suites run against stubs.
+      - name: Test API release scope and runtime release contracts
+        run: |
+          set -euo pipefail
+          infra/runtime/demo/publish-api-image.test.sh
+          infra/runtime/demo/deploy-runtime.test.sh
+
       - name: Test origin TLS persistence contract
         run: |
           set -euo pipefail
@@ -192,6 +201,14 @@ jobs:
     # An offline EC2 is deliberately not covered by this. deploy-api records the
     # desired SHA and exits successfully so boot convergence applies it later, and
     # the frontend follows as before -- that desired-state model is unchanged here.
+    # The one exception: a release that changes the host runtime as well as the
+    # API image fails deploy-api while the host is offline, before its desired
+    # SHA is recorded (boot convergence cannot install runtime artifacts), and
+    # this job waits with it.
+    #
+    # deploy-api always runs once build-and-push-api succeeds, also for a push
+    # that releases nothing to the host, so this dependency never skips the
+    # frontend of a push that does not touch the API.
     needs:
       - backend
       - frontend
@@ -306,6 +323,12 @@ jobs:
       LAST_KNOWN_GOOD_IMAGE_SHA_PARAMETER: /ec-portfolio/demo/deploy/last-known-good-image-sha
       PENDING_MIGRATION_IMAGE_SHA_PARAMETER: /ec-portfolio/demo/deploy/pending-migration-image-sha
       IMAGE_TAG: ${{ github.sha }}
+    # The release scope decided below, for deploy-api, which refuses anything
+    # but an explicit true or false.
+    outputs:
+      api_changed: ${{ steps.scope.outputs.api_changed }}
+      api_converge: ${{ steps.scope.outputs.api_converge }}
+      runtime_pending: ${{ steps.scope.outputs.runtime_pending }}
     steps:
       - name: Checkout reviewed main commit with full history
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -343,17 +366,27 @@ jobs:
           allowed-account-ids: ${{ env.AWS_ACCOUNT_ID }}
           mask-aws-account-id: true
 
+      # Fail-closed: an unreadable or malformed desired or last known good SHA,
+      # a missing commit or a git failure stops the job here, before anything is
+      # published or recorded. A push that does not change the API build context
+      # (an access, infrastructure or documentation change) skips the three steps
+      # below: no image is published. This job never records the desired image
+      # SHA; deploy-api does, once the host can run the release.
+      - name: Decide what this push releases
+        id: scope
+        run: infra/runtime/demo/publish-api-image.sh release-scope
+
       - name: Publish the immutable API image
+        if: steps.scope.outputs.api_changed == 'true'
         run: infra/runtime/demo/publish-api-image.sh ensure-image
 
       - name: Block an automatic release that changes Flyway migrations
+        if: steps.scope.outputs.api_changed == 'true'
         run: infra/runtime/demo/publish-api-image.sh migration-guard
 
       - name: Require a recoverable rollback image
+        if: steps.scope.outputs.api_changed == 'true'
         run: infra/runtime/demo/publish-api-image.sh assert-rollback-image
-
-      - name: Record the desired API image
-        run: infra/runtime/demo/publish-api-image.sh record-desired
 
   deploy-api:
     name: Deploy Demo API
@@ -366,7 +399,9 @@ jobs:
     # deploy-runtime.sh, which gives up explicitly and fails the step. The 1200s
     # credential below is sized to outlast that polling window rather than to
     # terminate anything, so the deployment reaches a verdict while its
-    # credential is still valid.
+    # credential is still valid. A release that installs the host runtime before
+    # recording its desired image spends the much shorter runtime install budget
+    # first, inside the same credential.
     #
     # This timeout also has to cover the steps that run before a credential
     # exists at all: the checkout, both contract suites and the environment
@@ -389,6 +424,17 @@ jobs:
       AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
       AWS_BACKEND_DEPLOY_ROLE_ARN: ${{ vars.AWS_BACKEND_DEPLOY_ROLE_ARN }}
       EC2_INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID }}
+      ECR_REPOSITORY_NAME: ec-portfolio-demo-api
+      DESIRED_IMAGE_SHA_PARAMETER: /ec-portfolio/demo/deploy/desired-image-sha
+      PENDING_MIGRATION_IMAGE_SHA_PARAMETER: /ec-portfolio/demo/deploy/pending-migration-image-sha
+      IMAGE_TAG: ${{ github.sha }}
+      # The scope build-and-push-api decided. The job itself always runs once
+      # that job succeeds, so deploy-frontends keeps waiting on it exactly as
+      # before; a push with nothing to release ends in deploy-runtime.sh release
+      # without any AWS call.
+      RELEASE_API_CHANGED: ${{ needs.build-and-push-api.outputs.api_changed }}
+      RELEASE_API_CONVERGE: ${{ needs.build-and-push-api.outputs.api_converge }}
+      RELEASE_RUNTIME_PENDING: ${{ needs.build-and-push-api.outputs.runtime_pending }}
     steps:
       - name: Checkout reviewed main commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -410,7 +456,11 @@ jobs:
           infra/runtime/demo/deploy-api-from-ssm.test.sh
           infra/runtime/demo/install-api-convergence.test.sh
           infra/runtime/demo/deploy-runtime.test.sh
+          infra/runtime/demo/publish-api-image.test.sh
 
+      # The scope gates the steps below with plain string comparisons, so an
+      # undecided or malformed value must stop the job here rather than read as
+      # false and skip the runtime gate.
       - name: Validate deployment environment
         run: |
           set -euo pipefail
@@ -418,13 +468,19 @@ jobs:
           test "$AWS_BACKEND_DEPLOY_ROLE_ARN" = \
             "arn:aws:iam::$AWS_ACCOUNT_ID:role/ec-portfolio-demo-github-backend-deploy"
           [[ "$EC2_INSTANCE_ID" =~ ^i-[0-9a-f]{8,17}$ ]]
+          test "$ECR_REPOSITORY_NAME" = "ec-portfolio-demo-api"
+          [[ "$IMAGE_TAG" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$RELEASE_API_CHANGED" =~ ^(true|false)$ ]]
+          [[ "$RELEASE_API_CONVERGE" =~ ^(true|false)$ ]]
+          [[ "$RELEASE_RUNTIME_PENDING" =~ ^(true|false)$ ]]
 
       - name: Configure short-lived AWS credentials
         uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
         with:
           role-to-assume: ${{ env.AWS_BACKEND_DEPLOY_ROLE_ARN }}
           role-session-name: gha-deploy-${{ github.run_id }}
-          # Must exceed the 900s poll budget in deploy-runtime.sh with margin.
+          # Must exceed the runtime install budget plus the 900s poll budget in
+          # deploy-runtime.sh with margin.
           # Bounded above by the max_session_duration on the backend deploy role
           # in Terraform, which deploy-runtime.test.sh checks against.
           role-duration-seconds: 1200
@@ -432,8 +488,46 @@ jobs:
           allowed-account-ids: ${{ env.AWS_ACCOUNT_ID }}
           mask-aws-account-id: true
 
-      - name: Deploy to the EC2 host when online
-        run: infra/runtime/demo/deploy-runtime.sh deploy
+      # A release that changes the host runtime as well as the API image must
+      # not record its desired image before the host holds that runtime: boot
+      # convergence runs the installed wrapper and cannot install artifacts, so
+      # an offline host would start the new image on the old runtime at its next
+      # boot. The host has to be Online and take the install here; otherwise
+      # this step fails and the desired image SHA is never recorded.
+      - name: Install the host runtime this release needs
+        if: env.RELEASE_API_CHANGED == 'true' && env.RELEASE_RUNTIME_PENDING == 'true'
+        run: infra/runtime/demo/deploy-runtime.sh install-runtime
+
+      # Recorded here, under the same approval as the delivery below, rather than
+      # in build-and-push-api: a deploy-api that is rejected, or that fails before
+      # this step, leaves the desired image SHA as it was, so the host's next
+      # boot cannot switch to a release this job never took. What it replaces is
+      # read first, so the restore step at the end can put it back.
+      - name: Remember the desired API image this release replaces
+        id: previous
+        if: env.RELEASE_API_CHANGED == 'true'
+        run: infra/runtime/demo/publish-api-image.sh read-desired
+
+      - name: Record the desired API image
+        if: env.RELEASE_API_CHANGED == 'true'
+        run: infra/runtime/demo/publish-api-image.sh record-desired
+
+      - name: Release to the EC2 host when online
+        run: infra/runtime/demo/deploy-runtime.sh release
+
+      # A release that fails or is cancelled after its desired image SHA was
+      # recorded would otherwise be retried by boot convergence at the host's
+      # next boot, switching the API to a release this workflow did not
+      # complete. Put the previous values back instead. An offline host is not a
+      # failure: the release step defers to boot convergence and succeeds. If
+      # the host did finish the release after the poll gave up, its next boot
+      # returns it to the previous image, which is what this failed run reports.
+      - name: Restore the desired API image after a failed release
+        if: (failure() || cancelled()) && steps.previous.outcome == 'success'
+        env:
+          PREVIOUS_DESIRED_IMAGE_SHA: ${{ steps.previous.outputs.previous_desired }}
+          PREVIOUS_PENDING_MIGRATION_IMAGE_SHA: ${{ steps.previous.outputs.previous_pending }}
+        run: infra/runtime/demo/publish-api-image.sh restore-desired
 
   # The access root owns the Terraform permission set policies. Its policy gate
   # and discovery decide whether an import or a policy change may be applied, so

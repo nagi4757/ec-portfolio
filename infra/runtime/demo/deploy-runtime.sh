@@ -14,6 +14,37 @@
 # desired-image-sha holds at the moment the host-side wrapper reads it. If a
 # later main push has already advanced that parameter, this job converges the
 # host onto the newer release rather than onto its own commit.
+#
+# Commands:
+#   deploy           install the four artifacts and run the wrapper (converge
+#                    the API).
+#   install-runtime  the gate deploy-api runs before it records a desired image
+#                    whose host runtime differs from the one the host last
+#                    verified. Boot convergence runs whatever wrapper is
+#                    installed and cannot install artifacts, so recording first
+#                    would let the host start the new image on the old runtime
+#                    at its next boot. The host must be Online and take the
+#                    install now; otherwise this fails and the desired image SHA
+#                    is never recorded.
+#   release          what CI runs on a main push, after any recording.
+#                    build-and-push-api decides the scope (publish-api-image.sh
+#                    release-scope) and passes it in RELEASE_API_CONVERGE and
+#                    RELEASE_RUNTIME_PENDING (true or false):
+#                      API converge          -> deploy, as above. An offline
+#                                               host is left to boot
+#                                               convergence: a desired image
+#                                               that needs a newer runtime was
+#                                               only recorded after
+#                                               install-runtime gave it one.
+#                      runtime pending only  -> install the artifacts if the
+#                                               host's copies differ, and run
+#                                               nothing. An offline host keeps
+#                                               the install pending.
+#                      neither               -> nothing: no AWS call at all.
+#
+# A runtime install never runs late: its command carries an SSM delivery
+# timeout, so a host that drops offline right after the Online check cannot
+# pick it up unobserved at its next boot.
 
 set -euo pipefail
 
@@ -26,6 +57,7 @@ readonly WRAPPER_FILE="deploy-api-from-ssm.sh"
 readonly DEPLOY_FILE="deploy-api.sh"
 readonly INSTALLER_FILE="install-api-convergence.sh"
 readonly UNIT_FILE="ec-portfolio-api-converge.service"
+readonly REMOTE_SYSTEMD_DIR="/etc/systemd/system"
 
 readonly INSTANCE_ID_PATTERN='^i-[0-9a-f]{8,17}$'
 
@@ -59,6 +91,17 @@ readonly INSTANCE_ID_PATTERN='^i-[0-9a-f]{8,17}$'
 readonly DEFAULT_POLL_ATTEMPTS=90
 readonly DEFAULT_POLL_INTERVAL_SECONDS=10
 
+# A runtime install only decodes four files, copies them and reloads systemd
+# (whose calls the installer bounds at 30s each), so it gets a much shorter
+# budget than a deployment. SSM drops the command if the host has not started it
+# within the delivery timeout, which is the minimum SendCommand accepts; the
+# poll budget outlasts it, so a command that never starts is seen as TimedOut
+# rather than given up on while it could still run. In deploy-api the install
+# and a deployment share one credential, which deploy-runtime.test.sh checks.
+readonly RUNTIME_INSTALL_DELIVERY_TIMEOUT_SECONDS=30
+readonly RUNTIME_INSTALL_POLL_ATTEMPTS=12
+readonly RUNTIME_INSTALL_POLL_INTERVAL_SECONDS=10
+
 log() {
     printf '[deploy-runtime] %s\n' "$*"
 }
@@ -86,12 +129,20 @@ instance_ping_status() {
         fail "Unable to query DescribeInstanceInformation for $EC2_INSTANCE_ID."
 }
 
-# Builds the AWS-RunShellScript command list that verifies all four reviewed
-# artifacts before creating any host-side file, runs the idempotent installer,
-# and executes the installed wrapper only after installation succeeds. Artifact
-# content never contains a secret; deploy-api.sh resolves the database password
-# and JWT secret itself, on the host, with the EC2 instance role.
-build_install_and_run_commands() {
+# The host runtime artifacts this script installs, one file name per line.
+# publish-api-image.sh release-scope reads this list to decide whether a release
+# changes the host runtime.
+runtime_artifact_files() {
+    printf '%s\n' "$WRAPPER_FILE" "$DEPLOY_FILE" "$INSTALLER_FILE" "$UNIT_FILE"
+}
+
+# Prints, one per line, the commands both remote command lists start with. The
+# four reviewed artifacts travel inline and each is checked against its SHA256
+# before any host file is read or created; only then are they decoded into a
+# temporary directory that is removed on exit. Artifact content never contains a
+# secret; deploy-api.sh resolves the database password and JWT secret itself, on
+# the host, with the EC2 instance role.
+verified_artifact_commands() {
     local wrapper_b64 deploy_b64 installer_b64 unit_b64
     local wrapper_sha256 deploy_sha256 installer_sha256 unit_sha256
 
@@ -104,50 +155,101 @@ build_install_and_run_commands() {
     installer_sha256="$(sha256sum "$SCRIPT_DIRECTORY/$INSTALLER_FILE" | awk '{print $1}')"
     unit_sha256="$(sha256sum "$SCRIPT_DIRECTORY/$UNIT_FILE" | awk '{print $1}')"
 
-    local -a commands=(
-        "set -euo pipefail"
-        "wrapper_b64='$wrapper_b64'"
-        "deploy_b64='$deploy_b64'"
-        "installer_b64='$installer_b64'"
-        "unit_b64='$unit_b64'"
-        "[ \"\$(printf '%s' \"\$wrapper_b64\" | base64 -d | sha256sum | awk '{print \$1}')\" = \"$wrapper_sha256\" ] || { echo '$WRAPPER_FILE checksum mismatch' >&2; exit 1; }"
-        "[ \"\$(printf '%s' \"\$deploy_b64\" | base64 -d | sha256sum | awk '{print \$1}')\" = \"$deploy_sha256\" ] || { echo '$DEPLOY_FILE checksum mismatch' >&2; exit 1; }"
-        "[ \"\$(printf '%s' \"\$installer_b64\" | base64 -d | sha256sum | awk '{print \$1}')\" = \"$installer_sha256\" ] || { echo '$INSTALLER_FILE checksum mismatch' >&2; exit 1; }"
-        "[ \"\$(printf '%s' \"\$unit_b64\" | base64 -d | sha256sum | awk '{print \$1}')\" = \"$unit_sha256\" ] || { echo '$UNIT_FILE checksum mismatch' >&2; exit 1; }"
-        "tmp_dir=\"\$(mktemp -d /tmp/ec-portfolio-deploy.XXXXXX)\""
-        "trap 'rm -rf \"\$tmp_dir\"' EXIT"
-        "printf '%s' \"\$wrapper_b64\" | base64 -d > \"\$tmp_dir/$WRAPPER_FILE\""
-        "printf '%s' \"\$deploy_b64\" | base64 -d > \"\$tmp_dir/$DEPLOY_FILE\""
-        "printf '%s' \"\$installer_b64\" | base64 -d > \"\$tmp_dir/$INSTALLER_FILE\""
+    printf '%s\n' \
+        "set -euo pipefail" \
+        "wrapper_b64='$wrapper_b64'" \
+        "deploy_b64='$deploy_b64'" \
+        "installer_b64='$installer_b64'" \
+        "unit_b64='$unit_b64'" \
+        "[ \"\$(printf '%s' \"\$wrapper_b64\" | base64 -d | sha256sum | awk '{print \$1}')\" = \"$wrapper_sha256\" ] || { echo '$WRAPPER_FILE checksum mismatch' >&2; exit 1; }" \
+        "[ \"\$(printf '%s' \"\$deploy_b64\" | base64 -d | sha256sum | awk '{print \$1}')\" = \"$deploy_sha256\" ] || { echo '$DEPLOY_FILE checksum mismatch' >&2; exit 1; }" \
+        "[ \"\$(printf '%s' \"\$installer_b64\" | base64 -d | sha256sum | awk '{print \$1}')\" = \"$installer_sha256\" ] || { echo '$INSTALLER_FILE checksum mismatch' >&2; exit 1; }" \
+        "[ \"\$(printf '%s' \"\$unit_b64\" | base64 -d | sha256sum | awk '{print \$1}')\" = \"$unit_sha256\" ] || { echo '$UNIT_FILE checksum mismatch' >&2; exit 1; }" \
+        "tmp_dir=\"\$(mktemp -d /tmp/ec-portfolio-deploy.XXXXXX)\"" \
+        "trap 'rm -rf \"\$tmp_dir\"' EXIT" \
+        "printf '%s' \"\$wrapper_b64\" | base64 -d > \"\$tmp_dir/$WRAPPER_FILE\"" \
+        "printf '%s' \"\$deploy_b64\" | base64 -d > \"\$tmp_dir/$DEPLOY_FILE\"" \
+        "printf '%s' \"\$installer_b64\" | base64 -d > \"\$tmp_dir/$INSTALLER_FILE\"" \
         "printf '%s' \"\$unit_b64\" | base64 -d > \"\$tmp_dir/$UNIT_FILE\""
-        "bash \"\$tmp_dir/$INSTALLER_FILE\""
-        "$REMOTE_RUNTIME_DIR/$WRAPPER_FILE"
-    )
-
-    printf '%s\n' "${commands[@]}" | jq -R . | jq -s .
 }
 
-send_deploy_command() {
-    local commands_json parameters_json
+# Builds the AWS-RunShellScript command list that verifies all four reviewed
+# artifacts before creating any host-side file, runs the idempotent installer,
+# and executes the installed wrapper only after installation succeeds.
+build_install_and_run_commands() {
+    {
+        verified_artifact_commands
+        printf '%s\n' \
+            "bash \"\$tmp_dir/$INSTALLER_FILE\"" \
+            "$REMOTE_RUNTIME_DIR/$WRAPPER_FILE"
+    } | jq -R . | jq -s .
+}
 
-    commands_json="$(build_install_and_run_commands)"
+# Builds the command list that brings the host runtime to this release without
+# touching the API. After the same verification the installer runs only if an
+# installed copy differs from its verified artifact, and the installed copies are
+# compared again afterwards, so the command succeeds only once the host holds
+# exactly these four files. The wrapper never runs: no container is touched and
+# no image is pulled.
+build_install_runtime_commands() {
+    local same_file_function="same_file() { [ -f \"\$2\" ] && [ \"\$(sha256sum <\"\$1\" | awk '{print \$1}')\" = \"\$(sha256sum <\"\$2\" | awk '{print \$1}')\" ]; }"
+    local runtime_current_function="runtime_current() { same_file \"\$tmp_dir/$WRAPPER_FILE\" '$REMOTE_RUNTIME_DIR/$WRAPPER_FILE' && same_file \"\$tmp_dir/$DEPLOY_FILE\" '$REMOTE_RUNTIME_DIR/$DEPLOY_FILE' && same_file \"\$tmp_dir/$INSTALLER_FILE\" '$REMOTE_RUNTIME_DIR/$INSTALLER_FILE' && same_file \"\$tmp_dir/$UNIT_FILE\" '$REMOTE_SYSTEMD_DIR/$UNIT_FILE'; }"
+
+    {
+        verified_artifact_commands
+        printf '%s\n' \
+            "$same_file_function" \
+            "$runtime_current_function" \
+            "if runtime_current; then echo 'The host runtime already matches this release; nothing installed.'; exit 0; fi" \
+            "bash \"\$tmp_dir/$INSTALLER_FILE\"" \
+            "runtime_current || { echo 'The installed host runtime does not match this release after installation.' >&2; exit 1; }" \
+            "echo 'Host runtime installed and verified; the API was not redeployed.'"
+    } | jq -R . | jq -s .
+}
+
+# send_command <commands json> <comment> [delivery timeout seconds]: sends the
+# command list and prints the command ID. With a delivery timeout, SSM drops the
+# command unless the host has started it within that many seconds.
+send_command() {
+    local commands_json="$1"
+    local comment="$2"
+    local delivery_timeout_seconds="${3-}"
+    local parameters_json
+    local timeout_arguments=()
+
     parameters_json="$(jq -n --argjson commands "$commands_json" '{commands: $commands}')"
+    [[ -z "$delivery_timeout_seconds" ]] ||
+        timeout_arguments=(--timeout-seconds "$delivery_timeout_seconds")
 
     AWS_PAGER="" aws ssm send-command \
         --region "$EXPECTED_REGION" \
         --document-name "$SSM_DOCUMENT" \
         --instance-ids "$EC2_INSTANCE_ID" \
-        --comment "ec-portfolio demo API deploy ${GITHUB_SHA:-manual}" \
+        --comment "$comment" \
+        ${timeout_arguments[@]+"${timeout_arguments[@]}"} \
         --parameters "$parameters_json" \
         --query 'Command.CommandId' \
         --output text ||
         fail "Unable to send the deployment command."
 }
 
+send_deploy_command() {
+    send_command "$(build_install_and_run_commands)" "ec-portfolio demo API deploy ${GITHUB_SHA:-manual}"
+}
+
+send_runtime_install_command() {
+    send_command "$(build_install_runtime_commands)" "ec-portfolio demo runtime install ${GITHUB_SHA:-manual}" \
+        "$RUNTIME_INSTALL_DELIVERY_TIMEOUT_SECONDS"
+}
+
+# await_command <command id> [poll attempts] [poll interval seconds]: polls the
+# command to a terminal status within the given budget, the deployment budget by
+# default. DEPLOY_POLL_ATTEMPTS and DEPLOY_POLL_INTERVAL_SECONDS override every
+# budget, which is how the tests keep polling instant.
 await_command() {
     local command_id="$1"
-    local poll_attempts="${DEPLOY_POLL_ATTEMPTS:-$DEFAULT_POLL_ATTEMPTS}"
-    local poll_interval_seconds="${DEPLOY_POLL_INTERVAL_SECONDS:-$DEFAULT_POLL_INTERVAL_SECONDS}"
+    local poll_attempts="${DEPLOY_POLL_ATTEMPTS:-${2:-$DEFAULT_POLL_ATTEMPTS}}"
+    local poll_interval_seconds="${DEPLOY_POLL_INTERVAL_SECONDS:-${3:-$DEFAULT_POLL_INTERVAL_SECONDS}}"
     local attempt invocation status
 
     for ((attempt = 1; attempt <= poll_attempts; attempt++)); do
@@ -176,6 +278,10 @@ await_command() {
     fail "Timed out waiting for the deployment command to reach a terminal status."
 }
 
+await_runtime_install_command() {
+    await_command "$1" "$RUNTIME_INSTALL_POLL_ATTEMPTS" "$RUNTIME_INSTALL_POLL_INTERVAL_SECONDS"
+}
+
 deploy() {
     local ping_status command_id
 
@@ -193,10 +299,74 @@ deploy() {
     await_command "$command_id"
 }
 
+# install-runtime: see the command list at the top of this file. Anything but a
+# verified install fails, so the step that records the desired image SHA never
+# runs after it.
+install_runtime() {
+    local ping_status command_id
+
+    validate_instance_id
+    ping_status="$(instance_ping_status)"
+
+    [[ "$ping_status" == "Online" ]] ||
+        fail "EC2 instance $EC2_INSTANCE_ID is not Online (status: $ping_status). This release changes the host runtime, which boot convergence cannot install, so its desired image SHA must not be recorded yet. Nothing was sent; re-run this job once the host is Online."
+
+    command_id="$(send_runtime_install_command)"
+    log "Runtime installation command sent: $command_id"
+    await_runtime_install_command "$command_id"
+    log "The host runtime matches this release, so its desired image SHA may be recorded."
+}
+
+# release: the main push path. Reads the scope build-and-push-api decided and
+# does only what it requires; see the command list at the top of this file.
+release() {
+    local api_converge="${RELEASE_API_CONVERGE-}"
+    local runtime_pending="${RELEASE_RUNTIME_PENDING-}"
+    local ping_status command_id
+
+    # Anything but an explicit true or false is a scope this job cannot trust:
+    # an empty value means build-and-push-api produced no decision.
+    [[ "$api_converge" == "true" || "$api_converge" == "false" ]] ||
+        fail "RELEASE_API_CONVERGE must be true or false, not '$api_converge'."
+    [[ "$runtime_pending" == "true" || "$runtime_pending" == "false" ]] ||
+        fail "RELEASE_RUNTIME_PENDING must be true or false, not '$runtime_pending'."
+
+    if [[ "$api_converge" == "false" && "$runtime_pending" == "false" ]]; then
+        log "Nothing to release to the host: the API image and the host runtime are unchanged. No AWS call is made."
+        return 0
+    fi
+
+    validate_instance_id
+    ping_status="$(instance_ping_status)"
+
+    if [[ "$ping_status" != "Online" ]]; then
+        log "EC2 instance $EC2_INSTANCE_ID is not Online (status: $ping_status)."
+        if [[ "$api_converge" == "true" ]]; then
+            log "No install or SendCommand attempted; the desired image SHA is left for Phase 5F-3 boot convergence."
+            if [[ "$runtime_pending" == "true" ]]; then
+                log "Boot convergence starts that image on the installed runtime: a desired image that needed a newer runtime was recorded only after install-runtime installed it. Any later runtime change stays pending for the next release that finds the host Online."
+            fi
+        else
+            log "The host runtime install stays pending. It is measured from the last known good image, so the next release that runs while the host is Online installs it."
+        fi
+        return 0
+    fi
+
+    if [[ "$api_converge" == "true" ]]; then
+        command_id="$(send_deploy_command)"
+        log "Deployment command sent: $command_id"
+        await_command "$command_id"
+    else
+        command_id="$(send_runtime_install_command)"
+        log "Runtime installation command sent: $command_id"
+        await_runtime_install_command "$command_id"
+    fi
+}
+
 main() {
     local command_name="${1-}"
 
-    (($# == 1)) || fail "Usage: deploy-runtime.sh deploy"
+    (($# == 1)) || fail "Usage: deploy-runtime.sh deploy|install-runtime|release"
 
     for command_name_check in aws jq base64 sha256sum; do
         require_command "$command_name_check"
@@ -204,6 +374,8 @@ main() {
 
     case "$command_name" in
     deploy) deploy ;;
+    install-runtime) install_runtime ;;
+    release) release ;;
     *) fail "Unknown command: $command_name" ;;
     esac
 }

@@ -460,6 +460,10 @@ install_payload_mocks() {
 set -euo pipefail
 if [[ "${1-}" == */install-api-convergence.sh ]]; then
     [[ "${MOCK_INSTALLER_FAIL:-false}" != "true" ]] || exit 1
+    if [[ "${MOCK_INSTALLER_NOOP:-false}" == "true" ]]; then
+        printf '%s\n' installer >>"$PAYLOAD_EVENT_LOG"
+        exit 0
+    fi
     source_directory="$(dirname -- "$1")"
     mkdir -p "$PAYLOAD_RUNTIME_DIRECTORY" "$PAYLOAD_SYSTEMD_DIRECTORY"
     install -m 0755 "$source_directory/deploy-api-from-ssm.sh" "$PAYLOAD_RUNTIME_DIRECTORY/deploy-api-from-ssm.sh"
@@ -504,6 +508,7 @@ run_payload() {
         PAYLOAD_SYSTEMD_DIRECTORY="$sandbox/etc/systemd/system" \
         DEPLOY_LOCK_FILE="$sandbox/deploy.lock" \
         MOCK_INSTALLER_FAIL="${MOCK_INSTALLER_FAIL:-false}" \
+        MOCK_INSTALLER_NOOP="${MOCK_INSTALLER_NOOP:-false}" \
         /bin/bash -c "$payload"
 }
 
@@ -570,5 +575,381 @@ for tampered_file in "$WRAPPER_FILE" "$DEPLOY_FILE" "$INSTALLER_FILE" "$UNIT_FIL
     [[ ! -s "$sandbox/payload-events.log" ]] ||
         fail "A tampered $tampered_file must never reach the installer or wrapper."
 done
+
+# --- release: the main push path, scoped by build-and-push-api ---------------
+run_release() {
+    MOCK_CALL_LOG="$work_directory/calls.log"
+    MOCK_SEQUENCE_FILE="$work_directory/sequence.txt"
+    : >"$MOCK_CALL_LOG"
+    rm -f "$MOCK_SEQUENCE_FILE.idx"
+    export MOCK_CALL_LOG MOCK_SEQUENCE_FILE
+
+    env \
+        EC2_INSTANCE_ID="$VALID_INSTANCE_ID" \
+        DEPLOY_POLL_ATTEMPTS=3 \
+        DEPLOY_POLL_INTERVAL_SECONDS=0 \
+        "$@" \
+        bash "$DEPLOY_SCRIPT" release
+}
+
+printf '%s\n' "Success" >"$work_directory/sequence.txt"
+
+# Nothing to release: no AWS call at all, not even the instance lookup.
+output="$(run_release RELEASE_API_CONVERGE=false RELEASE_RUNTIME_PENDING=false 2>&1)" ||
+    fail "A release with nothing for the host must succeed."
+assert_contains "$output" "Nothing to release to the host" "An empty release must say so."
+[[ ! -s "$work_directory/calls.log" ]] || fail "An empty release must make no AWS call."
+
+# An undecided or malformed scope fails closed before any AWS call.
+for scope in "RELEASE_API_CONVERGE= RELEASE_RUNTIME_PENDING=false" "RELEASE_API_CONVERGE=false RELEASE_RUNTIME_PENDING=" \
+    "RELEASE_API_CONVERGE=TRUE RELEASE_RUNTIME_PENDING=false" "RELEASE_API_CONVERGE=false RELEASE_RUNTIME_PENDING=yes" \
+    "RELEASE_API_CONVERGE=1 RELEASE_RUNTIME_PENDING=0"; do
+    # shellcheck disable=SC2086
+    output="$(run_release $scope 2>&1)" && fail "The scope [$scope] must be refused."
+    assert_contains "$output" "must be true or false" "The scope [$scope] must be reported."
+    [[ ! -s "$work_directory/calls.log" ]] || fail "The scope [$scope] must be refused before any AWS call."
+done
+output="$(env -u RELEASE_API_CONVERGE -u RELEASE_RUNTIME_PENDING EC2_INSTANCE_ID="$VALID_INSTANCE_ID" \
+    MOCK_CALL_LOG="$work_directory/calls.log" bash "$DEPLOY_SCRIPT" release 2>&1)" &&
+    fail "A release without any scope must be refused."
+assert_contains "$output" "must be true or false" "A missing scope must be reported."
+
+# API converge, online: the existing install-and-deploy command, which keeps
+# SSM's default delivery window exactly as before.
+output="$(run_release RELEASE_API_CONVERGE=true RELEASE_RUNTIME_PENDING=false MOCK_PING_STATUS=Online 2>&1)" ||
+    fail "An API release to an online host must succeed."
+calls="$(cat "$work_directory/calls.log")"
+assert_count "$calls" "ssm send-command" 1 "An API release must send exactly one command."
+assert_contains "$calls" "--comment ec-portfolio demo API deploy" "An API release must send the deploy command."
+assert_absent "$calls" "--timeout-seconds" "The deploy command must keep its existing delivery behaviour."
+run_deploy MOCK_PING_STATUS=Online >/dev/null 2>&1 || fail "The deploy command must still succeed."
+assert_absent "$(cat "$work_directory/calls.log")" "--timeout-seconds" "deploy must keep its existing delivery behaviour."
+[[ "$(printf '%s\n' "$calls" | grep -F "ssm send-command")" == \
+    "$(grep -F "ssm send-command" "$work_directory/calls.log")" ]] ||
+    fail "release must send exactly the command deploy sends for an API release."
+
+# API and runtime, online: the deploy command installs the runtime too.
+output="$(run_release RELEASE_API_CONVERGE=true RELEASE_RUNTIME_PENDING=true MOCK_PING_STATUS=Online 2>&1)" ||
+    fail "An API and runtime release to an online host must succeed."
+calls="$(cat "$work_directory/calls.log")"
+assert_count "$calls" "ssm send-command" 1 "An API and runtime release must send exactly one command."
+assert_contains "$calls" "--comment ec-portfolio demo API deploy" "An API and runtime release must send the deploy command."
+
+# API only, offline: deferred to boot convergence, as before.
+output="$(run_release RELEASE_API_CONVERGE=true RELEASE_RUNTIME_PENDING=false MOCK_PING_STATUS=Stopped 2>&1)" ||
+    fail "An API release to an offline host must be deferred, not fail."
+assert_contains "$output" "Phase 5F-3" "An offline API release must defer to boot convergence."
+assert_count "$(cat "$work_directory/calls.log")" "ssm send-command" 0 "An offline host must never receive SendCommand."
+
+# API converge with a runtime change, offline: deferred too. By the time release
+# runs, a desired image that needed the newer runtime was recorded only after
+# install-runtime installed it, so boot convergence starts it on that runtime.
+output="$(run_release RELEASE_API_CONVERGE=true RELEASE_RUNTIME_PENDING=true MOCK_PING_STATUS=Stopped 2>&1)" ||
+    fail "An API release with a runtime change to an offline host must be deferred, not fail."
+assert_contains "$output" "Phase 5F-3" "The offline release must defer to boot convergence."
+assert_contains "$output" "recorded only after install-runtime installed it" "The offline release must say why deferring is safe."
+assert_count "$(cat "$work_directory/calls.log")" "ssm send-command" 0 "An offline host must never receive SendCommand."
+
+# Runtime only, online: the runtime command, never the deploy command, with a
+# delivery timeout so it cannot run late.
+output="$(run_release RELEASE_API_CONVERGE=false RELEASE_RUNTIME_PENDING=true MOCK_PING_STATUS=Online 2>&1)" ||
+    fail "A runtime-only release to an online host must succeed."
+calls="$(cat "$work_directory/calls.log")"
+assert_count "$calls" "ssm send-command" 1 "A runtime-only release must send exactly one command."
+assert_contains "$calls" "--comment ec-portfolio demo runtime install" "A runtime-only release must send the runtime command."
+assert_contains "$calls" "--timeout-seconds 30 --parameters" "A runtime command must carry the SSM delivery timeout."
+assert_absent "$calls" "--comment ec-portfolio demo API deploy" "A runtime-only release must never send the deploy command."
+assert_contains "$output" "Runtime installation command sent" "The runtime command must be reported."
+
+# Runtime only, offline: stays pending, the job succeeds.
+output="$(run_release RELEASE_API_CONVERGE=false RELEASE_RUNTIME_PENDING=true MOCK_PING_STATUS=ConnectionLost 2>&1)" ||
+    fail "A runtime-only release to an offline host must stay pending, not fail."
+assert_contains "$output" "stays pending" "An offline runtime-only release must say it stays pending."
+assert_count "$(cat "$work_directory/calls.log")" "ssm send-command" 0 "An offline host must never receive SendCommand."
+
+# Runtime only, a failed remote command fails the job.
+printf '%s\n' "Failed" >"$work_directory/sequence.txt"
+output="$(run_release RELEASE_API_CONVERGE=false RELEASE_RUNTIME_PENDING=true MOCK_PING_STATUS=Online 2>&1)" &&
+    fail "A failed runtime command must fail the job."
+assert_contains "$output" "finished with status Failed" "The runtime command failure must be reported."
+printf '%s\n' "Success" >"$work_directory/sequence.txt"
+
+output="$(run_release RELEASE_API_CONVERGE=false RELEASE_RUNTIME_PENDING=true EC2_INSTANCE_ID=not-an-instance 2>&1)" &&
+    fail "A malformed EC2_INSTANCE_ID must be rejected in a release."
+assert_contains "$output" "does not match the expected instance id format" "The malformed instance id must be reported."
+
+# --- install-runtime: the gate before a desired image that needs the runtime --
+run_install_runtime() {
+    MOCK_CALL_LOG="$work_directory/calls.log"
+    MOCK_SEQUENCE_FILE="$work_directory/sequence.txt"
+    : >"$MOCK_CALL_LOG"
+    rm -f "$MOCK_SEQUENCE_FILE.idx"
+    export MOCK_CALL_LOG MOCK_SEQUENCE_FILE
+
+    env \
+        EC2_INSTANCE_ID="$VALID_INSTANCE_ID" \
+        DEPLOY_POLL_ATTEMPTS=3 \
+        DEPLOY_POLL_INTERVAL_SECONDS=0 \
+        "$@" \
+        bash "$DEPLOY_SCRIPT" install-runtime
+}
+
+# An Online host takes the runtime command, never the deploy command.
+printf '%s\n' "Success" >"$work_directory/sequence.txt"
+output="$(run_install_runtime MOCK_PING_STATUS=Online 2>&1)" ||
+    fail "install-runtime on an online host must succeed."
+calls="$(cat "$work_directory/calls.log")"
+assert_count "$calls" "ssm describe-instance-information" 1 "install-runtime must check the host once."
+assert_count "$calls" "ssm send-command" 1 "install-runtime must send exactly one command."
+assert_contains "$calls" "--comment ec-portfolio demo runtime install" "install-runtime must send the runtime command."
+assert_contains "$calls" "--timeout-seconds 30 --parameters" "install-runtime must carry the SSM delivery timeout."
+assert_contains "$calls" "--instance-ids $VALID_INSTANCE_ID" "install-runtime must target exactly the configured instance."
+assert_absent "$calls" "--comment ec-portfolio demo API deploy" "install-runtime must never send the deploy command."
+assert_absent "$calls" "put-parameter" "install-runtime must never record deployment state itself."
+assert_contains "$output" "its desired image SHA may be recorded" "A verified install must be reported."
+
+# Any host that is not Online fails before anything is sent, so the record step
+# after it never runs.
+for ping_status in Stopped ConnectionLost Inactive None; do
+    output="$(run_install_runtime MOCK_PING_STATUS="$ping_status" 2>&1)" &&
+        fail "install-runtime on a host that is $ping_status must fail."
+    assert_contains "$output" "must not be recorded yet" "A host that is $ping_status must be refused with its reason."
+    assert_contains "$output" "re-run this job once the host is Online" "A host that is $ping_status must be told how to recover."
+    assert_count "$(cat "$work_directory/calls.log")" "ssm send-command" 0 "A host that is $ping_status must never receive SendCommand."
+done
+
+# The host dropping offline after the check: SSM gives up on delivery and the
+# command ends TimedOut, which fails like any other unverified install.
+for terminal_status in TimedOut Failed Cancelled; do
+    printf '%s\n' "$terminal_status" >"$work_directory/sequence.txt"
+    output="$(run_install_runtime MOCK_PING_STATUS=Online 2>&1)" &&
+        fail "An install that ends $terminal_status must fail install-runtime."
+    assert_contains "$output" "finished with status $terminal_status" "An install that ends $terminal_status must be reported."
+done
+printf '%s\n' "InProgress" >"$work_directory/sequence.txt"
+output="$(run_install_runtime MOCK_PING_STATUS=Online 2>&1)" &&
+    fail "An install that never finishes must fail install-runtime."
+assert_contains "$output" "Timed out waiting" "An unfinished install must be reported."
+printf '%s\n' "Success" >"$work_directory/sequence.txt"
+output="$(run_install_runtime MOCK_PING_STATUS=Online MOCK_SEND_COMMAND_FAIL=true 2>&1)" &&
+    fail "A SendCommand failure must fail install-runtime."
+assert_contains "$output" "Unable to send" "The SendCommand failure must be reported."
+output="$(run_install_runtime EC2_INSTANCE_ID=not-an-instance 2>&1)" &&
+    fail "A malformed EC2_INSTANCE_ID must be rejected by install-runtime."
+assert_contains "$output" "does not match the expected instance id format" "The malformed instance id must be reported."
+assert_absent "$(cat "$work_directory/calls.log")" "ssm" "A malformed instance id must be refused before any AWS call."
+
+# An unreadable ping status is not "not Online": it fails closed as well.
+failing_aws_directory="$work_directory/failing-aws"
+mkdir -p "$failing_aws_directory"
+printf '#!/usr/bin/env bash\nprintf "aws %%s\\n" "$*" >>"$MOCK_CALL_LOG"\necho "AccessDenied" >&2\nexit 254\n' >"$failing_aws_directory/aws"
+chmod 755 "$failing_aws_directory/aws"
+output="$(run_install_runtime PATH="$failing_aws_directory:$PATH" 2>&1)" &&
+    fail "A failed DescribeInstanceInformation must fail install-runtime."
+assert_contains "$output" "Unable to query DescribeInstanceInformation" "The lookup failure must be reported."
+assert_absent "$(cat "$work_directory/calls.log")" "send-command" "A failed lookup must never send a command."
+
+output="$(bash "$DEPLOY_SCRIPT" install 2>&1)" && fail "An unknown command must be rejected."
+assert_contains "$output" "Unknown command" "An unknown command must be reported."
+
+# --- the runtime-only payload, executed against a sandbox --------------------
+assert_count "$(bash -c 'source "$1"; runtime_artifact_files' _ "$DEPLOY_SCRIPT")" ".sh" 3 \
+    "runtime_artifact_files must list the three scripts."
+[[ "$(bash -c 'source "$1"; runtime_artifact_files' _ "$DEPLOY_SCRIPT" | tr '\n' ' ')" == \
+    "$WRAPPER_FILE $DEPLOY_FILE $INSTALLER_FILE $UNIT_FILE " ]] ||
+    fail "runtime_artifact_files must list exactly the four artifacts the payload installs."
+
+runtime_commands_json="$(bash -c 'source "$1"; build_install_runtime_commands' _ "$DEPLOY_SCRIPT")" ||
+    fail "The orchestrator must render its runtime command list."
+runtime_index() {
+    printf '%s' "$runtime_commands_json" | jq -r --arg needle "$1" 'to_entries[] | select(.value | contains($needle)) | .key' | head -n 1
+}
+runtime_mktemp_index="$(runtime_index "mktemp -d")"
+first_host_read_index="$(runtime_index "if runtime_current; then")"
+installer_index="$(runtime_index "bash \"\$tmp_dir/$INSTALLER_FILE\"")"
+post_install_check_index="$(runtime_index "runtime_current || {")"
+[[ "$runtime_mktemp_index" =~ ^[0-9]+$ && "$first_host_read_index" =~ ^[0-9]+$ ]] ||
+    fail "The runtime payload must compare the host copies and create one temporary directory."
+[[ "$installer_index" =~ ^[0-9]+$ && "$post_install_check_index" =~ ^[0-9]+$ ]] ||
+    fail "The runtime payload must run the installer and compare the host copies again afterwards."
+((first_host_read_index < installer_index && installer_index < post_install_check_index)) ||
+    fail "The runtime payload must compare, install only then, and verify the installed copies last."
+for artifact_path in "/opt/ec-portfolio/runtime/demo/$WRAPPER_FILE" "/opt/ec-portfolio/runtime/demo/$DEPLOY_FILE" \
+    "/opt/ec-portfolio/runtime/demo/$INSTALLER_FILE" "/etc/systemd/system/$UNIT_FILE"; do
+    assert_contains "$(printf '%s' "$runtime_commands_json" | jq -r '.[]' | grep '^runtime_current()')" "'$artifact_path'" \
+        "The runtime payload must compare the installed $artifact_path."
+done
+verified_commands="$(bash -c 'source "$1"; verified_artifact_commands' _ "$DEPLOY_SCRIPT")"
+verified_line_count="$(printf '%s\n' "$verified_commands" | wc -l | tr -d ' ')"
+((verified_line_count > 0 && verified_line_count <= first_host_read_index)) ||
+    fail "The verified artifacts must come before the host copies are compared."
+for payload_json in "$runtime_commands_json" "$commands_json"; do
+    [[ "$(printf '%s' "$payload_json" | jq -r '.[]' | head -n "$verified_line_count")" == "$verified_commands" ]] ||
+        fail "Both payloads must start with exactly the same verified artifacts."
+done
+for artifact in "$WRAPPER_FILE" "$DEPLOY_FILE" "$INSTALLER_FILE" "$UNIT_FILE"; do
+    checksum_index="$(runtime_index "$artifact checksum mismatch")"
+    [[ "$checksum_index" =~ ^[0-9]+$ ]] || fail "The runtime payload must verify $artifact."
+    ((checksum_index < first_host_read_index && checksum_index < runtime_mktemp_index)) ||
+        fail "$artifact must be verified before any host file is read or created."
+done
+[[ -z "$(printf '%s' "$runtime_commands_json" | jq -r '.[] | select(. == "/opt/ec-portfolio/runtime/demo/deploy-api-from-ssm.sh")')" ]] ||
+    fail "The runtime payload must never run the wrapper."
+
+render_runtime_payload() {
+    printf '%s' "$runtime_commands_json" | jq -r '.[]' |
+        sed -e "s|/opt/ec-portfolio/runtime/demo|$1/opt/ec-portfolio/runtime/demo|g" \
+            -e "s|/etc/systemd/system|$1/etc/systemd/system|g"
+}
+
+# A host without the artifacts: the installer runs, the wrapper never does.
+sandbox="$(payload_sandbox)"
+output="$(run_payload "$sandbox" "$(render_runtime_payload "$sandbox")" 2>&1)" ||
+    fail "A runtime payload on a host without the artifacts must install them: $output"
+assert_contains "$output" "Host runtime installed and verified; the API was not redeployed." "The runtime install must be reported."
+[[ "$(cat "$sandbox/payload-events.log")" == "installer" ]] || fail "Only the installer may run in a runtime release."
+[[ ! -s "$sandbox/wrapper-ran.log" ]] || fail "A runtime release must never reach the wrapper."
+for installed_file in "$WRAPPER_FILE" "$DEPLOY_FILE" "$INSTALLER_FILE"; do
+    cmp -s "$(installed_directory "$sandbox")/$installed_file" "$SCRIPT_DIRECTORY/$installed_file" ||
+        fail "A runtime release must install $installed_file byte for byte."
+done
+cmp -s "$sandbox/etc/systemd/system/$UNIT_FILE" "$SCRIPT_DIRECTORY/$UNIT_FILE" ||
+    fail "A runtime release must install the unit byte for byte."
+
+# The same host again: everything matches, nothing is installed.
+: >"$sandbox/payload-events.log"
+output="$(run_payload "$sandbox" "$(render_runtime_payload "$sandbox")" 2>&1)" ||
+    fail "A runtime payload on an up-to-date host must succeed."
+assert_contains "$output" "already matches this release; nothing installed." "An up-to-date host must be reported."
+[[ ! -s "$sandbox/payload-events.log" ]] || fail "An up-to-date host must not run the installer."
+
+# One stale artifact on the host is enough to install.
+for stale_file in "$(installed_directory "$sandbox")/$DEPLOY_FILE" "$sandbox/etc/systemd/system/$UNIT_FILE"; do
+    printf 'older release\n' >"$stale_file"
+    : >"$sandbox/payload-events.log"
+    run_payload "$sandbox" "$(render_runtime_payload "$sandbox")" >/dev/null 2>&1 ||
+        fail "A host with a stale $(basename -- "$stale_file") must be updated."
+    [[ "$(cat "$sandbox/payload-events.log")" == "installer" ]] ||
+        fail "A stale $(basename -- "$stale_file") must run the installer."
+    [[ ! -s "$sandbox/wrapper-ran.log" ]] || fail "Updating a stale artifact must never reach the wrapper."
+done
+
+# An installer that exits 0 without leaving these exact files on the host is
+# not a verified install: the command fails, so nothing is recorded after it.
+printf 'older release\n' >"$(installed_directory "$sandbox")/$WRAPPER_FILE"
+: >"$sandbox/payload-events.log"
+output="$(MOCK_INSTALLER_NOOP=true run_payload "$sandbox" "$(render_runtime_payload "$sandbox")" 2>&1)" &&
+    fail "An install that leaves a stale artifact on the host must fail."
+assert_contains "$output" "does not match this release after installation" "An unverified install must be reported."
+[[ "$(cat "$sandbox/payload-events.log")" == "installer" ]] || fail "The installer must have run before the check."
+[[ ! -s "$sandbox/wrapper-ran.log" ]] || fail "An unverified install must never reach the wrapper."
+
+# A tampered artifact fails before the host is read or written.
+for tampered_file in "$WRAPPER_FILE" "$DEPLOY_FILE" "$INSTALLER_FILE" "$UNIT_FILE"; do
+    sandbox="$(payload_sandbox)"
+    output="$(run_payload "$sandbox" "$(render_runtime_payload "$sandbox" | tamper_payload "$tampered_file")" 2>&1)" &&
+        fail "A tampered $tampered_file must fail the runtime command."
+    assert_contains "$output" "$tampered_file checksum mismatch" "A tampered $tampered_file must be reported."
+    [[ ! -e "$(installed_directory "$sandbox")" && ! -s "$sandbox/payload-events.log" ]] ||
+        fail "A tampered $tampered_file must not install anything."
+done
+
+# --- the workflow wires the scope through without skipping deploy-api --------
+job_block() {
+    awk -v job="  ${1}:" '
+        $0 == job { inside = 1; print; next }
+        inside && /^  [a-z]/ { exit }
+        inside { print }
+    ' "$WORKFLOW_FILE"
+}
+publish_job="$(job_block build-and-push-api)"
+deploy_job="$(job_block deploy-api)"
+frontend_job="$(job_block deploy-frontends)"
+[[ -n "$publish_job" && -n "$deploy_job" && -n "$frontend_job" ]] || fail "Could not read the deployment jobs from $WORKFLOW_FILE"
+
+assert_contains "$publish_job" "run: infra/runtime/demo/publish-api-image.sh release-scope" \
+    "build-and-push-api must decide the release scope."
+assert_contains "$publish_job" "api_changed: \${{ steps.scope.outputs.api_changed }}" "build-and-push-api must export api_changed."
+assert_contains "$publish_job" "api_converge: \${{ steps.scope.outputs.api_converge }}" "build-and-push-api must export api_converge."
+assert_contains "$publish_job" "runtime_pending: \${{ steps.scope.outputs.runtime_pending }}" "build-and-push-api must export runtime_pending."
+scope_line="$(printf '%s\n' "$publish_job" | grep -n "publish-api-image.sh release-scope" | cut -d: -f1)"
+for gated_mode in ensure-image migration-guard assert-rollback-image; do
+    mode_line="$(printf '%s\n' "$publish_job" | grep -n "run: infra/runtime/demo/publish-api-image.sh $gated_mode\$" | cut -d: -f1)"
+    [[ "$mode_line" =~ ^[0-9]+$ ]] || fail "build-and-push-api must still run $gated_mode."
+    ((scope_line < mode_line)) || fail "The scope must be decided before $gated_mode."
+    [[ "$(printf '%s\n' "$publish_job" | sed -n "$((mode_line - 1))p")" == "        if: steps.scope.outputs.api_changed == 'true'" ]] ||
+        fail "$gated_mode must run only when the API build context changed."
+done
+# The desired image SHA is recorded by deploy-api alone, after the runtime gate
+# and under the same approval as the delivery.
+assert_absent "$publish_job" "record-desired" "build-and-push-api must never record the desired image SHA."
+assert_absent "$publish_job" "deploy-runtime.sh" "build-and-push-api must never reach the host."
+
+for scope_name in api_changed api_converge runtime_pending; do
+    scope_variable="RELEASE_$(printf '%s' "$scope_name" | tr '[:lower:]' '[:upper:]')"
+    assert_contains "$deploy_job" "$scope_variable: \${{ needs.build-and-push-api.outputs.$scope_name }}" \
+        "deploy-api must receive $scope_name."
+    assert_contains "$deploy_job" "[[ \"\$$scope_variable\" =~ ^(true|false)\$ ]]" \
+        "deploy-api must refuse an undecided $scope_name before any step it gates."
+done
+assert_contains "$deploy_job" "run: infra/runtime/demo/deploy-runtime.sh release" "deploy-api must run the scoped release."
+assert_absent "$deploy_job" "run: infra/runtime/demo/deploy-runtime.sh deploy" "deploy-api must not bypass the scope."
+assert_contains "$deploy_job" "infra/runtime/demo/publish-api-image.test.sh" \
+    "deploy-api must test the publication contract it records the desired image with."
+
+deploy_step_line() {
+    local line
+    line="$(printf '%s\n' "$deploy_job" | grep -nxF -- "$1" | cut -d: -f1)"
+    [[ "$line" =~ ^[0-9]+$ ]] || fail "deploy-api must contain exactly: $1"
+    printf '%s' "$line"
+}
+validate_line="$(deploy_step_line "      - name: Validate deployment environment")"
+credential_line="$(deploy_step_line "      - name: Configure short-lived AWS credentials")"
+install_line="$(deploy_step_line "        run: infra/runtime/demo/deploy-runtime.sh install-runtime")"
+previous_line="$(deploy_step_line "        run: infra/runtime/demo/publish-api-image.sh read-desired")"
+record_line="$(deploy_step_line "        run: infra/runtime/demo/publish-api-image.sh record-desired")"
+release_line="$(deploy_step_line "        run: infra/runtime/demo/deploy-runtime.sh release")"
+restore_line="$(deploy_step_line "        run: infra/runtime/demo/publish-api-image.sh restore-desired")"
+((validate_line < credential_line && credential_line < install_line && install_line < previous_line &&
+    previous_line < record_line && record_line < release_line && release_line < restore_line)) ||
+    fail "deploy-api must validate the scope, install the runtime, remember and record the desired image, release, and restore last, in that order."
+[[ "$(printf '%s\n' "$deploy_job" | sed -n "$((previous_line - 2)),$((previous_line - 1))p")" == \
+    "        id: previous"$'\n'"        if: env.RELEASE_API_CHANGED == 'true'" ]] ||
+    fail "The previous desired image must be read, as step previous, exactly when a new API image is recorded."
+restore_step="$(printf '%s\n' "$deploy_job" | sed -n "$((restore_line - 5)),${restore_line}p")"
+assert_contains "$restore_step" "      - name: Restore the desired API image after a failed release" "The restore step must directly follow its name."
+assert_contains "$restore_step" "        if: (failure() || cancelled()) && steps.previous.outcome == 'success'" \
+    "The restore must run on failure or cancellation, and only once the previous values were read."
+assert_contains "$restore_step" "PREVIOUS_DESIRED_IMAGE_SHA: \${{ steps.previous.outputs.previous_desired }}" \
+    "The restore must put back the desired image SHA read before recording."
+assert_contains "$restore_step" "PREVIOUS_PENDING_MIGRATION_IMAGE_SHA: \${{ steps.previous.outputs.previous_pending }}" \
+    "The restore must put back the pending migration image SHA read before recording."
+[[ "$(printf '%s\n' "$deploy_job" | sed -n "$((install_line - 1))p")" == \
+    "        if: env.RELEASE_API_CHANGED == 'true' && env.RELEASE_RUNTIME_PENDING == 'true'" ]] ||
+    fail "The runtime gate must run exactly for a new API image whose runtime changed."
+[[ "$(printf '%s\n' "$deploy_job" | sed -n "$((record_line - 1))p")" == "        if: env.RELEASE_API_CHANGED == 'true'" ]] ||
+    fail "The desired image must be recorded exactly for a new API image."
+[[ "$(printf '%s\n' "$deploy_job" | sed -n "$((release_line - 1))p")" == "      - name: Release to the EC2 host when online" ]] ||
+    fail "The release step must run unconditionally."
+assert_count "$deploy_job" "continue-on-error" 0 "No deploy-api step may let a failed gate fall through to the record step."
+
+# A release that installs the runtime and then deploys spends both budgets
+# inside one credential.
+runtime_install_delivery_timeout="$(read_constant "$DEPLOY_SCRIPT" "RUNTIME_INSTALL_DELIVERY_TIMEOUT_SECONDS")"
+runtime_install_budget=$(($(read_constant "$DEPLOY_SCRIPT" "RUNTIME_INSTALL_POLL_ATTEMPTS") *
+    $(read_constant "$DEPLOY_SCRIPT" "RUNTIME_INSTALL_POLL_INTERVAL_SECONDS")))
+((runtime_install_delivery_timeout >= 30)) ||
+    fail "SendCommand rejects a delivery timeout below 30s."
+(((runtime_install_budget - runtime_install_delivery_timeout) >= 60)) ||
+    fail "The runtime install budget (${runtime_install_budget}s) must outlast its delivery timeout (${runtime_install_delivery_timeout}s) by the installer's own systemctl bounds."
+(((oidc_credential_seconds - runtime_install_budget - poll_budget) >= MIN_OPERATIONAL_HEADROOM_SECONDS)) ||
+    fail "The OIDC credential (${oidc_credential_seconds}s) must leave ${MIN_OPERATIONAL_HEADROOM_SECONDS}s above the runtime install (${runtime_install_budget}s) and deployment (${poll_budget}s) budgets."
+# The job itself must never be skipped by the scope, or deploy-frontends, which
+# needs it, would be skipped too for every push that does not touch the API.
+[[ "$(printf '%s\n' "$deploy_job" | grep -c '^    if:')" == 1 ]] || fail "deploy-api must keep exactly one job-level if."
+assert_contains "$deploy_job" "    if: github.event_name == 'push' && github.ref == 'refs/heads/main'" \
+    "deploy-api's job-level if must stay the push condition alone."
+assert_absent "$(printf '%s\n' "$deploy_job" | grep '^    if:')" "outputs" "deploy-api's job-level if must not read the scope."
+assert_absent "$(printf '%s\n' "$frontend_job" | grep '^    if:')" "outputs" "deploy-frontends must not read the scope."
 
 printf '[deploy-runtime-test] PASS\n'

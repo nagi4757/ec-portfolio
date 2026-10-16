@@ -2,6 +2,8 @@
 
 set -euo pipefail
 
+readonly SCRIPT_DIRECTORY="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
 readonly EXPECTED_REGION="ap-northeast-1"
 readonly EXPECTED_REPOSITORY="ec-portfolio-demo-api"
 readonly DIGEST_PATTERN='^sha256:[0-9a-f]{64}$'
@@ -16,6 +18,11 @@ readonly FLYWAY_BUILD_FILE="apps/api/build.gradle.kts"
 readonly FLYWAY_ENABLED_LINE="spring.flyway.enabled=true"
 readonly FLYWAY_LOCATIONS_LINE="spring.flyway.locations=classpath:db/migration"
 readonly FLYWAY_CONFIGURATION_PATTERN='spring[.]flyway[.]|org[.]flywaydb|flyway-core|flyway-mysql'
+
+# Where the host runtime artifacts live in the repository. deploy-runtime.sh
+# owns their names; release-scope reads them from it instead of restating them.
+readonly RUNTIME_SOURCE_PATH="infra/runtime/demo"
+readonly DEPLOY_RUNTIME_SCRIPT="$SCRIPT_DIRECTORY/deploy-runtime.sh"
 
 runtime_directory=""
 ecr_registry=""
@@ -360,16 +367,210 @@ record_desired() {
     write_state_parameter "$PENDING_MIGRATION_IMAGE_SHA_PARAMETER" "none"
 }
 
+# Writes the desired image SHA and the pending migration image SHA that
+# record-desired is about to replace to GITHUB_OUTPUT, as previous_desired and
+# previous_pending, so a release that then fails can put them back with
+# restore-desired. A value that cannot be read could not be restored, so the
+# release stops here, before anything is recorded.
+read_desired() {
+    local previous_desired previous_pending
+
+    require_environment DESIRED_IMAGE_SHA_PARAMETER
+    require_environment PENDING_MIGRATION_IMAGE_SHA_PARAMETER
+    require_environment GITHUB_OUTPUT
+    validate_parameter_name DESIRED_IMAGE_SHA_PARAMETER
+    validate_parameter_name PENDING_MIGRATION_IMAGE_SHA_PARAMETER
+    [[ -f "$GITHUB_OUTPUT" && -w "$GITHUB_OUTPUT" ]] || fail "GITHUB_OUTPUT is not a writable file."
+
+    previous_desired="$(read_state_parameter "$DESIRED_IMAGE_SHA_PARAMETER")" ||
+        fail "Unable to read the desired image SHA this release would replace."
+    [[ "$previous_desired" =~ ^[0-9a-f]{40}$ ]] ||
+        fail "The desired image SHA this release would replace is not a full lowercase Git SHA."
+    previous_pending="$(read_state_parameter "$PENDING_MIGRATION_IMAGE_SHA_PARAMETER")" ||
+        fail "Unable to read the pending migration image SHA this release would replace."
+    [[ "$previous_pending" =~ ^([0-9a-f]{40}|none)$ ]] ||
+        fail "The pending migration image SHA this release would replace is neither a full lowercase Git SHA nor none."
+
+    log "This release replaces the desired image $previous_desired (pending migration image: $previous_pending)."
+    printf 'previous_desired=%s\nprevious_pending=%s\n' "$previous_desired" "$previous_pending" >>"$GITHUB_OUTPUT"
+}
+
+# Puts back what record-desired replaced once the release has failed or been
+# cancelled, so the host's next boot converges to the image it had before, not to
+# a release its workflow did not complete. Only a desired image SHA that still
+# names this release is restored: any other value was never recorded by this run
+# or has been changed since, and is left alone.
+restore_desired() {
+    local current_desired
+
+    require_environment DESIRED_IMAGE_SHA_PARAMETER
+    require_environment PENDING_MIGRATION_IMAGE_SHA_PARAMETER
+    validate_parameter_name DESIRED_IMAGE_SHA_PARAMETER
+    validate_parameter_name PENDING_MIGRATION_IMAGE_SHA_PARAMETER
+    [[ "${PREVIOUS_DESIRED_IMAGE_SHA-}" =~ ^[0-9a-f]{40}$ ]] ||
+        fail "PREVIOUS_DESIRED_IMAGE_SHA must be a full lowercase Git SHA."
+    [[ "${PREVIOUS_PENDING_MIGRATION_IMAGE_SHA-}" =~ ^([0-9a-f]{40}|none)$ ]] ||
+        fail "PREVIOUS_PENDING_MIGRATION_IMAGE_SHA must be a full lowercase Git SHA or none."
+
+    current_desired="$(read_state_parameter "$DESIRED_IMAGE_SHA_PARAMETER")" ||
+        fail "Unable to read the desired image SHA. If it is still $IMAGE_TAG, set it back to $PREVIOUS_DESIRED_IMAGE_SHA before the host boots again."
+    if [[ "$current_desired" != "$IMAGE_TAG" ]]; then
+        log "The desired image SHA is $current_desired, not this release's $IMAGE_TAG: nothing to restore."
+        return 0
+    fi
+
+    write_state_parameter "$DESIRED_IMAGE_SHA_PARAMETER" "$PREVIOUS_DESIRED_IMAGE_SHA"
+    write_state_parameter "$PENDING_MIGRATION_IMAGE_SHA_PARAMETER" "$PREVIOUS_PENDING_MIGRATION_IMAGE_SHA"
+    log "Restored the desired image SHA to $PREVIOUS_DESIRED_IMAGE_SHA: the host's next boot converges to it, not to the failed release $IMAGE_TAG."
+}
+
+# read_deployment_sha <parameter variable> <description>: a deployment-state SHA
+# that is a full lowercase Git SHA of a commit present in this checkout. Anything
+# else stops the script, so the caller never decides on a value it cannot trust.
+read_deployment_sha() {
+    local variable_name="$1"
+    local description="$2"
+    local value
+
+    validate_parameter_name "$variable_name"
+    value="$(read_state_parameter "${!variable_name}")" ||
+        fail "Unable to read the $description."
+    [[ "$value" =~ ^[0-9a-f]{40}$ ]] ||
+        fail "The $description is not a full lowercase Git SHA."
+    git rev-parse --verify --quiet "${value}^{commit}" >/dev/null ||
+        fail "The $description $value is not present. Fetch the full history."
+    printf '%s' "$value"
+}
+
+# changed_between <from> <to> <path>...: prints true when the paths differ
+# between the two commits and false when they do not. A git failure is neither
+# and stops the script.
+changed_between() {
+    local from="$1"
+    local to="$2"
+    local status=0
+    shift 2
+
+    git diff --quiet "$from" "$to" -- "$@" || status=$?
+    case "$status" in
+        0) printf 'false' ;;
+        1) printf 'true' ;;
+        *) fail "Unable to compare $* between $from and $to." ;;
+    esac
+}
+
+# touched_since <from> <to> <path>...: prints true when the paths differ between
+# the two commits or any commit after <from> up to <to> changed them, false
+# otherwise. A change that was later reverted still counts: the host may have
+# installed it in between. A git failure stops the script.
+touched_since() {
+    local from="$1"
+    local to="$2"
+    local net_change touching_commit
+    shift 2
+
+    net_change="$(changed_between "$from" "$to" "$@")" || exit 1
+    touching_commit="$(git rev-list -n 1 "$from..$to" -- "$@")" ||
+        fail "Unable to list the commits that changed $* between $from and $to."
+    if [[ "$net_change" == "true" || -n "$touching_commit" ]]; then
+        printf 'true'
+    else
+        printf 'false'
+    fi
+}
+
+# The host runtime artifacts deploy-runtime.sh installs, one file name per line.
+# Sourcing runs in its own process so that script's readonly globals and helpers
+# cannot collide with the ones defined here.
+runtime_artifact_files_of_deploy_script() {
+    [[ -f "$DEPLOY_RUNTIME_SCRIPT" ]] || fail "The runtime deployment script is missing: $DEPLOY_RUNTIME_SCRIPT"
+    bash -c 'source "$1"; runtime_artifact_files' _ "$DEPLOY_RUNTIME_SCRIPT"
+}
+
+# Decides, before anything is published or recorded, what this main push has to
+# release. Three outputs go to GITHUB_OUTPUT:
+#
+#   api_changed      the API build context differs between the desired image
+#                    and this commit: publish and guard a new image, which
+#                    deploy-api then records. false for a push that does not
+#                    touch the API (an access, infrastructure or documentation
+#                    change), which therefore publishes nothing and leaves the
+#                    desired image SHA alone.
+#   api_converge     api_changed, or the host has not yet verified the desired
+#                    image (the last known good differs): converge the host.
+#   runtime_pending  a host runtime artifact was changed after the last known
+#                    good image: the host may run other artifacts than this
+#                    commit's and needs an install, which compares the host's
+#                    copies first. The baseline is what the host last verified,
+#                    not this push, so a change whose installation was skipped,
+#                    rejected or deferred stays pending until it lands.
+#
+# The last known good image is a sound runtime baseline because the host never
+# starts an image on an older runtime than that image's own: deploy-api records a
+# desired image whose runtime changed only after install-runtime has installed
+# that runtime, and the host advances the last known good only to the desired
+# image. A release made outside this workflow, such as the manual migration
+# release, has to keep that rule itself. The host can run a newer runtime,
+# though: a runtime-only release
+# installs one without publishing an image, so the last known good stays behind
+# it. That is why any commit that touched the artifacts counts, not only a net
+# difference, or reverting such a change would leave the reverted copy on the
+# host unnoticed.
+#
+# Every read is fail-closed: an unreadable or malformed state parameter, a
+# commit missing from the checkout or a git failure stops the job before any
+# step that could publish or record anything.
+release_scope() {
+    local desired last_known_good api_changed api_converge runtime_pending
+    local variable_name listing name
+    local runtime_paths=()
+
+    require_command git
+    for variable_name in BUILD_CONTEXT DESIRED_IMAGE_SHA_PARAMETER LAST_KNOWN_GOOD_IMAGE_SHA_PARAMETER GITHUB_OUTPUT; do
+        require_environment "$variable_name"
+    done
+    [[ -d "$BUILD_CONTEXT" ]] || fail "BUILD_CONTEXT is not a directory: $BUILD_CONTEXT"
+    [[ -f "$GITHUB_OUTPUT" && -w "$GITHUB_OUTPUT" ]] || fail "GITHUB_OUTPUT is not a writable file."
+    git rev-parse --verify --quiet "${IMAGE_TAG}^{commit}" >/dev/null ||
+        fail "The release commit $IMAGE_TAG is not present."
+
+    listing="$(runtime_artifact_files_of_deploy_script)" ||
+        fail "Unable to read the host runtime artifacts from $DEPLOY_RUNTIME_SCRIPT."
+    while IFS= read -r name; do
+        [[ "$name" =~ ^[A-Za-z0-9._-]+$ ]] || fail "Unexpected host runtime artifact name: $name"
+        runtime_paths+=("$RUNTIME_SOURCE_PATH/$name")
+    done <<<"$listing"
+    ((${#runtime_paths[@]} > 0)) || fail "No host runtime artifact could be resolved."
+
+    desired="$(read_deployment_sha DESIRED_IMAGE_SHA_PARAMETER "desired image SHA")"
+    last_known_good="$(read_deployment_sha LAST_KNOWN_GOOD_IMAGE_SHA_PARAMETER "last known good image SHA")"
+
+    api_changed="$(changed_between "$desired" "$IMAGE_TAG" "$BUILD_CONTEXT")"
+    runtime_pending="$(touched_since "$last_known_good" "$IMAGE_TAG" "${runtime_paths[@]}")"
+    api_converge="$api_changed"
+    [[ "$desired" == "$last_known_good" ]] || api_converge="true"
+
+    log "Desired image $desired, last known good $last_known_good, release commit $IMAGE_TAG."
+    log "api_changed=$api_changed api_converge=$api_converge runtime_pending=$runtime_pending"
+    [[ "$api_changed" == "true" ]] ||
+        log "The API build context is unchanged since the desired image: nothing is published and the desired image SHA is left as it is."
+    {
+        printf 'api_changed=%s\n' "$api_changed"
+        printf 'api_converge=%s\n' "$api_converge"
+        printf 'runtime_pending=%s\n' "$runtime_pending"
+    } >>"$GITHUB_OUTPUT"
+}
+
 main() {
     local mode="${1-}"
     local command_name
 
     (( $# == 1 )) ||
-        fail "Usage: publish-api-image.sh ensure-image|migration-guard|assert-rollback-image|record-desired"
+        fail "Usage: publish-api-image.sh release-scope|ensure-image|migration-guard|assert-rollback-image|read-desired|record-desired|restore-desired"
     case "$mode" in
-        ensure-image | migration-guard | assert-rollback-image | record-desired) ;;
+        release-scope | ensure-image | migration-guard | assert-rollback-image | read-desired | record-desired | restore-desired) ;;
         *)
-            fail "Usage: publish-api-image.sh ensure-image|migration-guard|assert-rollback-image|record-desired"
+            fail "Usage: publish-api-image.sh release-scope|ensure-image|migration-guard|assert-rollback-image|read-desired|record-desired|restore-desired"
             ;;
     esac
 
@@ -385,10 +586,13 @@ main() {
     runtime_directory="$(mktemp -d /tmp/ec-portfolio-api-publish.XXXXXX)"
 
     case "$mode" in
+        release-scope) release_scope ;;
         ensure-image) ensure_image ;;
         migration-guard) migration_guard ;;
         assert-rollback-image) assert_rollback_image ;;
+        read-desired) read_desired ;;
         record-desired) record_desired ;;
+        restore-desired) restore_desired ;;
     esac
 
     log "Completed $mode for $IMAGE_TAG."
