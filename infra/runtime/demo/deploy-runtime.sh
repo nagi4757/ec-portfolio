@@ -45,6 +45,12 @@
 # A runtime install never runs late: its command carries an SSM delivery
 # timeout, so a host that drops offline right after the Online check cannot
 # pick it up unobserved at its next boot.
+#
+# Every install, the deploy command's included, holds the wrapper's deployment
+# lock and refuses a release older than the one that last installed the host
+# runtime. Anything that still reaches the host late, such as a deploy command
+# the SSM agent picks up after a newer release, can therefore never put back an
+# older runtime. GITHUB_RUN_ID and GITHUB_SHA identify that release.
 
 set -euo pipefail
 
@@ -58,6 +64,17 @@ readonly DEPLOY_FILE="deploy-api.sh"
 readonly INSTALLER_FILE="install-api-convergence.sh"
 readonly UNIT_FILE="ec-portfolio-api-converge.service"
 readonly REMOTE_SYSTEMD_DIR="/etc/systemd/system"
+# The lock the installed wrapper (deploy-api-from-ssm.sh) takes for a deployment.
+# Every install holds it too, so no install runs beside a deployment or another
+# install, and nothing can change the host copies between an install and its
+# check of them.
+readonly REMOTE_DEPLOY_LOCK_FILE="/var/lock/ec-portfolio-demo-deploy.lock"
+# Which release last installed the host runtime, "<run id> <commit>", written
+# under the lock once the installed copies are verified. The workflow run id
+# orders releases: it only grows, and a re-run keeps it.
+readonly REMOTE_RELEASE_RECORD="$REMOTE_RUNTIME_DIR/.runtime-release"
+readonly RELEASE_ORDER_PATTERN='^[1-9][0-9]{0,17}$'
+readonly RELEASE_SHA_PATTERN='^[0-9a-f]{40}$'
 
 readonly INSTANCE_ID_PATTERN='^i-[0-9a-f]{8,17}$'
 
@@ -120,6 +137,15 @@ validate_instance_id() {
         fail "EC2_INSTANCE_ID does not match the expected instance id format."
 }
 
+# Checked before any AWS call: a payload is never built without the release order
+# the host compares against.
+validate_release_identity() {
+    [[ "${GITHUB_RUN_ID-}" =~ $RELEASE_ORDER_PATTERN ]] ||
+        fail "GITHUB_RUN_ID must be the id of this workflow run: it orders runtime installs on the host."
+    [[ "${GITHUB_SHA-}" =~ $RELEASE_SHA_PATTERN ]] ||
+        fail "GITHUB_SHA must be the full lowercase commit SHA of this release."
+}
+
 instance_ping_status() {
     AWS_PAGER="" aws ssm describe-instance-information \
         --region "$EXPECTED_REGION" \
@@ -173,36 +199,68 @@ verified_artifact_commands() {
         "printf '%s' \"\$unit_b64\" | base64 -d > \"\$tmp_dir/$UNIT_FILE\""
 }
 
+# Prints the commands both remote command lists run once the artifacts are
+# verified and before any host copy is read. They take the deployment lock
+# without waiting, so an install or deployment still running on the host makes
+# this command fail instead of interleaving with it. They then refuse a release
+# older than the one that last installed the host runtime, which covers what the
+# lock cannot: a command that reaches the host only after a newer release. Last,
+# they define how the installed copies are compared with the verified artifacts
+# and how this release is recorded once they match.
+locked_install_commands() {
+    printf '%s\n' \
+        "exec 9>'$REMOTE_DEPLOY_LOCK_FILE'" \
+        "flock --nonblock 9 || { echo 'Another deployment or runtime install is running on this host; nothing was installed.' >&2; exit 1; }" \
+        "release_record='$REMOTE_RELEASE_RECORD'" \
+        "release_order='$GITHUB_RUN_ID'" \
+        "release_sha='$GITHUB_SHA'" \
+        "if [ -e \"\$release_record\" ]; then read -r installed_order installed_sha <\"\$release_record\" || true; case \"\$installed_order\" in '' | *[!0-9]*) echo \"The host runtime install record \$release_record is unreadable; nothing was installed.\" >&2; exit 1 ;; esac; [ \"\${#installed_order}\" -le 18 ] || { echo \"The host runtime install record \$release_record is unreadable; nothing was installed.\" >&2; exit 1; }; if [ \"\$installed_order\" -gt \"\$release_order\" ]; then echo \"The host runtime was installed by a newer release (run \$installed_order, \${installed_sha:-unknown}); this older release (run \$release_order) installs nothing.\" >&2; exit 1; fi; fi" \
+        "same_file() { [ -f \"\$2\" ] && [ \"\$(sha256sum <\"\$1\" | awk '{print \$1}')\" = \"\$(sha256sum <\"\$2\" | awk '{print \$1}')\" ]; }" \
+        "runtime_current() { same_file \"\$tmp_dir/$WRAPPER_FILE\" '$REMOTE_RUNTIME_DIR/$WRAPPER_FILE' && same_file \"\$tmp_dir/$DEPLOY_FILE\" '$REMOTE_RUNTIME_DIR/$DEPLOY_FILE' && same_file \"\$tmp_dir/$INSTALLER_FILE\" '$REMOTE_RUNTIME_DIR/$INSTALLER_FILE' && same_file \"\$tmp_dir/$UNIT_FILE\" '$REMOTE_SYSTEMD_DIR/$UNIT_FILE'; }" \
+        "record_release() { printf '%s %s\\n' \"\$release_order\" \"\$release_sha\" >\"\$release_record.tmp\" && mv -f \"\$release_record.tmp\" \"\$release_record\"; }"
+}
+
+# The command that fails the install unless the host now holds exactly the
+# verified artifacts, whatever the installer reported.
+installed_copies_check_command() {
+    printf '%s\n' "runtime_current || { echo 'The installed host runtime does not match this release after installation.' >&2; exit 1; }"
+}
+
 # Builds the AWS-RunShellScript command list that verifies all four reviewed
-# artifacts before creating any host-side file, runs the idempotent installer,
-# and executes the installed wrapper only after installation succeeds.
+# artifacts before creating any host-side file, installs them under the
+# deployment lock and checks the installed copies, and executes the installed
+# wrapper only after that. The lock is released just before the wrapper runs,
+# because the wrapper takes the same lock itself and would otherwise refuse to
+# run beside this command.
 build_install_and_run_commands() {
     {
         verified_artifact_commands
+        locked_install_commands
+        printf '%s\n' "bash \"\$tmp_dir/$INSTALLER_FILE\""
+        installed_copies_check_command
         printf '%s\n' \
-            "bash \"\$tmp_dir/$INSTALLER_FILE\"" \
+            "record_release" \
+            "exec 9>&-" \
             "$REMOTE_RUNTIME_DIR/$WRAPPER_FILE"
     } | jq -R . | jq -s .
 }
 
 # Builds the command list that brings the host runtime to this release without
-# touching the API. After the same verification the installer runs only if an
-# installed copy differs from its verified artifact, and the installed copies are
-# compared again afterwards, so the command succeeds only once the host holds
-# exactly these four files. The wrapper never runs: no container is touched and
-# no image is pulled.
+# touching the API. Under the same lock and release check, the installer runs
+# only if an installed copy differs from its verified artifact, and the installed
+# copies are compared again afterwards, so the command succeeds only once the
+# host holds exactly these four files. The release is recorded either way. The
+# wrapper never runs: no container is touched and no image is pulled.
 build_install_runtime_commands() {
-    local same_file_function="same_file() { [ -f \"\$2\" ] && [ \"\$(sha256sum <\"\$1\" | awk '{print \$1}')\" = \"\$(sha256sum <\"\$2\" | awk '{print \$1}')\" ]; }"
-    local runtime_current_function="runtime_current() { same_file \"\$tmp_dir/$WRAPPER_FILE\" '$REMOTE_RUNTIME_DIR/$WRAPPER_FILE' && same_file \"\$tmp_dir/$DEPLOY_FILE\" '$REMOTE_RUNTIME_DIR/$DEPLOY_FILE' && same_file \"\$tmp_dir/$INSTALLER_FILE\" '$REMOTE_RUNTIME_DIR/$INSTALLER_FILE' && same_file \"\$tmp_dir/$UNIT_FILE\" '$REMOTE_SYSTEMD_DIR/$UNIT_FILE'; }"
-
     {
         verified_artifact_commands
+        locked_install_commands
         printf '%s\n' \
-            "$same_file_function" \
-            "$runtime_current_function" \
-            "if runtime_current; then echo 'The host runtime already matches this release; nothing installed.'; exit 0; fi" \
-            "bash \"\$tmp_dir/$INSTALLER_FILE\"" \
-            "runtime_current || { echo 'The installed host runtime does not match this release after installation.' >&2; exit 1; }" \
+            "if runtime_current; then record_release; echo 'The host runtime already matches this release; nothing installed.'; exit 0; fi" \
+            "bash \"\$tmp_dir/$INSTALLER_FILE\""
+        installed_copies_check_command
+        printf '%s\n' \
+            "record_release" \
             "echo 'Host runtime installed and verified; the API was not redeployed.'"
     } | jq -R . | jq -s .
 }
@@ -286,6 +344,7 @@ deploy() {
     local ping_status command_id
 
     validate_instance_id
+    validate_release_identity
     ping_status="$(instance_ping_status)"
 
     if [[ "$ping_status" != "Online" ]]; then
@@ -306,6 +365,7 @@ install_runtime() {
     local ping_status command_id
 
     validate_instance_id
+    validate_release_identity
     ping_status="$(instance_ping_status)"
 
     [[ "$ping_status" == "Online" ]] ||
@@ -337,6 +397,7 @@ release() {
     fi
 
     validate_instance_id
+    validate_release_identity
     ping_status="$(instance_ping_status)"
 
     if [[ "$ping_status" != "Online" ]]; then

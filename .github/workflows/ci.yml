@@ -522,6 +522,10 @@ jobs:
       # failure: the release step defers to boot convergence and succeeds. If
       # the host did finish the release after the poll gave up, its next boot
       # returns it to the previous image, which is what this failed run reports.
+      # This is best-effort. A normal cancel still runs this step, but a forced
+      # cancel or a lost runner never reaches it, and restore-desired reports
+      # RESTORE NOT CONFIRMED for any restore it cannot read back, so that an
+      # operator can finish it by hand.
       - name: Restore the desired API image after a failed release
         if: (failure() || cancelled()) && steps.previous.outcome == 'success'
         env:

@@ -9,9 +9,12 @@ readonly VALID_INSTANCE_ID="i-0123456789abcdef0"
 
 work_directory=""
 
+lock_holder_pid=""
+
 cleanup() {
     local exit_code=$?
     trap - EXIT
+    [[ -z "$lock_holder_pid" ]] || kill "$lock_holder_pid" 2>/dev/null || true
     if [[ -n "$work_directory" && "$work_directory" == /tmp/ec-portfolio-deploy-runtime-test.* ]]; then
         rm -rf -- "$work_directory"
     fi
@@ -25,12 +28,15 @@ fail() {
     exit 1
 }
 
+# The haystack is handed to grep as a here-string, not through a pipe: once grep
+# -q has its match it stops reading, and under pipefail a writer still feeding a
+# haystack larger than the pipe buffer would die of SIGPIPE and flip the result.
 assert_contains() {
-    printf '%s' "$1" | grep -Fq -- "$2" || fail "$3 (expected to find: $2)"
+    grep -Fq -- "$2" <<<"$1" || fail "$3 (expected to find: $2)"
 }
 
 assert_absent() {
-    printf '%s' "$1" | grep -Fq -- "$2" && fail "$3 (unexpectedly found: $2)"
+    grep -Fq -- "$2" <<<"$1" && fail "$3 (unexpectedly found: $2)"
     return 0
 }
 
@@ -106,6 +112,11 @@ run_deploy() {
 
 work_directory="$(mktemp -d /tmp/ec-portfolio-deploy-runtime-test.XXXXXX)"
 install_mocks
+
+# Every payload carries the release that installs it; the workflow sets both.
+readonly TEST_RUN_ID="4200000002"
+readonly TEST_SHA="0123456789abcdef0123456789abcdef01234567"
+export GITHUB_RUN_ID="$TEST_RUN_ID" GITHUB_SHA="$TEST_SHA"
 
 # --- an offline host is a soft no-op, never installs or sends a command -----
 printf '%s\n' "Success" >"$work_directory/sequence.txt"
@@ -198,7 +209,7 @@ assert_contains "$output" "does not match the expected instance id format" \
 script_contents="$(cat "$DEPLOY_SCRIPT")"
 for forbidden in "raw.githubusercontent" "curl " "start-instances" "run-instances" \
     "start-db-instance" ":latest" "GetDocument" "DescribeDocument"; do
-    printf '%s' "$script_contents" | grep -Fq -- "$forbidden" &&
+    grep -Fq -- "$forbidden" <<<"$script_contents" &&
         fail "deploy-runtime.sh must not reference: $forbidden"
 done
 for artifact_variable in WRAPPER_FILE DEPLOY_FILE INSTALLER_FILE UNIT_FILE; do
@@ -331,10 +342,9 @@ deploy_api_timing_constants="$(
 [[ -n "$deploy_api_timing_constants" ]] ||
     fail "Could not enumerate the timing constants in $DEPLOY_API_SCRIPT_FILE"
 
-test_source="$(cat "${BASH_SOURCE[0]}")"
 while read -r timing_constant; do
     [[ -n "$timing_constant" ]] || continue
-    printf '%s' "$test_source" | grep -Fq -- "\"$timing_constant\"" ||
+    grep -Fq -- "\"$timing_constant\"" "${BASH_SOURCE[0]}" ||
         fail "The configured wait budget must account for $timing_constant, which deploy-api.sh defines."
 done <<<"$deploy_api_timing_constants"
 
@@ -417,7 +427,9 @@ render_payload() {
     local sandbox="$1"
 
     printf '%s' "$commands_json" | jq -r '.[]' |
-        sed -e "s|/opt/ec-portfolio/runtime/demo|$sandbox/opt/ec-portfolio/runtime/demo|g"
+        sed -e "s|/opt/ec-portfolio/runtime/demo|$sandbox/opt/ec-portfolio/runtime/demo|g" \
+            -e "s|/etc/systemd/system|$sandbox/etc/systemd/system|g" \
+            -e "s|/var/lock/|$sandbox/var/lock/|g"
 }
 
 # Replaces the single in-memory base64 value for one artifact while leaving its
@@ -448,7 +460,7 @@ tamper_payload() {
 
 install_payload_mocks() {
     local sandbox="$1"
-    local mock
+    local mock real_flock
 
     mkdir -p "$sandbox/bin"
 
@@ -489,11 +501,62 @@ MOCK
         chmod 755 "$sandbox/bin/$mock"
     done
 
-    cat >"$sandbox/bin/flock" <<'MOCK'
-#!/bin/bash
-exit 0
+    # The lock is real: the payload and the installed wrapper contend for the
+    # same file as they do on the host. util-linux flock is used where it exists
+    # (CI); elsewhere a stand-in calls flock(2) on the inherited descriptor, which
+    # locks the open file description it shares with the payload, so the lock
+    # outlives the stand-in exactly as with the real tool.
+    if real_flock="$(command -v flock)"; then
+        ln -s "$real_flock" "$sandbox/bin/flock"
+    else
+        cat >"$sandbox/bin/flock" <<'MOCK'
+#!/usr/bin/env python3
+import fcntl
+import sys
+
+if len(sys.argv) != 3 or sys.argv[1] != "--nonblock" or not sys.argv[2].isdigit():
+    sys.exit(64)
+try:
+    fcntl.flock(int(sys.argv[2]), fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    sys.exit(1)
 MOCK
-    chmod 755 "$sandbox/bin/flock"
+        chmod 755 "$sandbox/bin/flock"
+    fi
+    mkdir -p "$sandbox/var/lock"
+}
+
+sandbox_lock_file() {
+    printf '%s' "$1/var/lock/ec-portfolio-demo-deploy.lock"
+}
+
+# hold_lock <sandbox>: holds the host deployment lock from another process, as a
+# running deployment or install does, until release_lock.
+hold_lock() {
+    local ready="$work_directory/lock-ready"
+
+    rm -f "$ready"
+    python3 -c 'import fcntl, sys, time
+lock = open(sys.argv[1], "w")
+fcntl.flock(lock, fcntl.LOCK_EX)
+open(sys.argv[2], "w").close()
+time.sleep(300)' "$(sandbox_lock_file "$1")" "$ready" &
+    lock_holder_pid=$!
+    for _ in $(seq 1 200); do
+        [[ -e "$ready" ]] && return 0
+        sleep 0.05
+    done
+    fail "The test could not take the deployment lock."
+}
+
+release_lock() {
+    kill "$lock_holder_pid" 2>/dev/null || true
+    wait "$lock_holder_pid" 2>/dev/null || true
+    lock_holder_pid=""
+}
+
+release_record() {
+    printf '%s' "$1/opt/ec-portfolio/runtime/demo/.runtime-release"
 }
 
 run_payload() {
@@ -506,7 +569,7 @@ run_payload() {
         PAYLOAD_EVENT_LOG="$sandbox/payload-events.log" \
         PAYLOAD_RUNTIME_DIRECTORY="$sandbox/opt/ec-portfolio/runtime/demo" \
         PAYLOAD_SYSTEMD_DIRECTORY="$sandbox/etc/systemd/system" \
-        DEPLOY_LOCK_FILE="$sandbox/deploy.lock" \
+        DEPLOY_LOCK_FILE="$(sandbox_lock_file "$sandbox")" \
         MOCK_INSTALLER_FAIL="${MOCK_INSTALLER_FAIL:-false}" \
         MOCK_INSTALLER_NOOP="${MOCK_INSTALLER_NOOP:-false}" \
         /bin/bash -c "$payload"
@@ -678,6 +741,26 @@ output="$(run_release RELEASE_API_CONVERGE=false RELEASE_RUNTIME_PENDING=true EC
     fail "A malformed EC2_INSTANCE_ID must be rejected in a release."
 assert_contains "$output" "does not match the expected instance id format" "The malformed instance id must be reported."
 
+# --- every command that sends a payload names its release first ---------------
+# The release order the host checks comes from the workflow run, so a command
+# without one, or with a malformed one, is refused before any AWS call.
+for command_case in "deploy" "install-runtime" "release RELEASE_API_CONVERGE=true RELEASE_RUNTIME_PENDING=false" \
+    "release RELEASE_API_CONVERGE=false RELEASE_RUNTIME_PENDING=true"; do
+    command_name="${command_case%% *}"
+    command_scope=""
+    [[ "$command_case" == "$command_name" ]] || command_scope="${command_case#* }"
+    for identity in "GITHUB_RUN_ID=" "GITHUB_RUN_ID=0" "GITHUB_RUN_ID=12a" "GITHUB_RUN_ID=1234567890123456789" \
+        "GITHUB_SHA=" "GITHUB_SHA=HEAD" "GITHUB_SHA=$(printf '%s' "$TEST_SHA" | tr 'a-f' 'A-F')"; do
+        : >"$work_directory/calls.log"
+        # shellcheck disable=SC2086
+        output="$(env MOCK_CALL_LOG="$work_directory/calls.log" EC2_INSTANCE_ID="$VALID_INSTANCE_ID" MOCK_PING_STATUS=Online \
+            $command_scope "$identity" bash "$DEPLOY_SCRIPT" "$command_name" 2>&1)" &&
+            fail "$command_case must refuse [$identity]."
+        assert_contains "$output" "${identity%%=*} must be" "$command_case must say why [$identity] is refused."
+        [[ ! -s "$work_directory/calls.log" ]] || fail "$command_case must refuse [$identity] before any AWS call."
+    done
+done
+
 # --- install-runtime: the gate before a desired image that needs the runtime --
 run_install_runtime() {
     MOCK_CALL_LOG="$work_directory/calls.log"
@@ -779,13 +862,55 @@ for artifact_path in "/opt/ec-portfolio/runtime/demo/$WRAPPER_FILE" "/opt/ec-por
     assert_contains "$(printf '%s' "$runtime_commands_json" | jq -r '.[]' | grep '^runtime_current()')" "'$artifact_path'" \
         "The runtime payload must compare the installed $artifact_path."
 done
+# Both payloads hold the wrapper's deployment lock and check the release order
+# before they read any host copy, and record this release only once the copies
+# are verified. The runtime install keeps the lock until it exits; the deploy
+# payload releases it just before the wrapper, which takes it itself.
+payload_index() {
+    printf '%s' "$1" | jq -r --arg needle "$2" 'to_entries[] | select(.value | contains($needle)) | .key' | head -n 1
+}
+for payload_name in runtime deploy; do
+    if [[ "$payload_name" == runtime ]]; then payload_json="$runtime_commands_json"; else payload_json="$commands_json"; fi
+    lock_open_index="$(payload_index "$payload_json" "exec 9>'/var/lock/ec-portfolio-demo-deploy.lock'")"
+    lock_index="$(payload_index "$payload_json" "flock --nonblock 9 || {")"
+    order_index="$(payload_index "$payload_json" "if [ \"\$installed_order\" -gt \"\$release_order\" ]")"
+    order_value_index="$(payload_index "$payload_json" "release_order='$TEST_RUN_ID'")"
+    host_read_index="$(payload_index "$payload_json" "bash \"\$tmp_dir/$INSTALLER_FILE\"")"
+    [[ "$payload_name" == deploy ]] || host_read_index="$(payload_index "$payload_json" "if runtime_current; then")"
+    check_index="$(payload_index "$payload_json" "runtime_current || {")"
+    record_index="$(printf '%s' "$payload_json" | jq -r 'to_entries[] | select(.value == "record_release") | .key' | head -n 1)"
+    for index_name in lock_open_index lock_index order_index order_value_index host_read_index check_index record_index; do
+        [[ "${!index_name}" =~ ^[0-9]+$ ]] || fail "The $payload_name payload is missing its $index_name step."
+    done
+    ((lock_open_index < lock_index && lock_index < order_value_index && order_value_index < order_index &&
+        order_index < host_read_index && host_read_index < check_index && check_index < record_index)) ||
+        fail "The $payload_name payload must lock, check the release order, install, verify and only then record the release."
+done
+assert_contains "$(printf '%s' "$runtime_commands_json" | jq -r '.[]' | grep '^if runtime_current; then')" "record_release;" \
+    "A host that already matches must still record the newer release, so an older one cannot follow it."
+[[ -z "$(printf '%s' "$runtime_commands_json" | jq -r '.[]' | grep -E '^exec 9>&-|flock --unlock|flock -u')" ]] ||
+    fail "The runtime payload must hold the deployment lock until it exits."
+unlock_index="$(printf '%s' "$commands_json" | jq -r 'to_entries[] | select(.value == "exec 9>&-") | .key')"
+deploy_record_index="$(printf '%s' "$commands_json" | jq -r 'to_entries[] | select(.value == "record_release") | .key')"
+wrapper_index="$(printf '%s' "$commands_json" | jq -r 'to_entries[] | select(.value == "/opt/ec-portfolio/runtime/demo/deploy-api-from-ssm.sh") | .key')"
+[[ "$unlock_index" =~ ^[0-9]+$ && "$wrapper_index" =~ ^[0-9]+$ ]] &&
+    ((deploy_record_index < unlock_index && unlock_index + 1 == wrapper_index)) ||
+    fail "The deploy payload must release the lock right before the wrapper, after recording the release."
+wrapper_lock_file="$(sed -n 's/^readonly DEFAULT_DEPLOY_LOCK_FILE="\(.*\)"$/\1/p' "$SCRIPT_DIRECTORY/$WRAPPER_FILE")"
+[[ -n "$wrapper_lock_file" && "$(bash -c 'source "$1"; printf "%s" "$REMOTE_DEPLOY_LOCK_FILE"' _ "$DEPLOY_SCRIPT")" == "$wrapper_lock_file" ]] ||
+    fail "Every install must take the same lock file as the installed wrapper ($wrapper_lock_file)."
+
 verified_commands="$(bash -c 'source "$1"; verified_artifact_commands' _ "$DEPLOY_SCRIPT")"
 verified_line_count="$(printf '%s\n' "$verified_commands" | wc -l | tr -d ' ')"
 ((verified_line_count > 0 && verified_line_count <= first_host_read_index)) ||
     fail "The verified artifacts must come before the host copies are compared."
+locked_commands="$(bash -c 'source "$1"; locked_install_commands' _ "$DEPLOY_SCRIPT")"
+locked_line_count="$(printf '%s\n' "$locked_commands" | wc -l | tr -d ' ')"
 for payload_json in "$runtime_commands_json" "$commands_json"; do
     [[ "$(printf '%s' "$payload_json" | jq -r '.[]' | head -n "$verified_line_count")" == "$verified_commands" ]] ||
         fail "Both payloads must start with exactly the same verified artifacts."
+    [[ "$(printf '%s' "$payload_json" | jq -r '.[]' | sed -n "$((verified_line_count + 1)),$((verified_line_count + locked_line_count))p")" == "$locked_commands" ]] ||
+        fail "Both payloads must continue with exactly the same locked install commands."
 done
 for artifact in "$WRAPPER_FILE" "$DEPLOY_FILE" "$INSTALLER_FILE" "$UNIT_FILE"; do
     checksum_index="$(runtime_index "$artifact checksum mismatch")"
@@ -799,7 +924,8 @@ done
 render_runtime_payload() {
     printf '%s' "$runtime_commands_json" | jq -r '.[]' |
         sed -e "s|/opt/ec-portfolio/runtime/demo|$1/opt/ec-portfolio/runtime/demo|g" \
-            -e "s|/etc/systemd/system|$1/etc/systemd/system|g"
+            -e "s|/etc/systemd/system|$1/etc/systemd/system|g" \
+            -e "s|/var/lock/|$1/var/lock/|g"
 }
 
 # A host without the artifacts: the installer runs, the wrapper never does.
@@ -834,6 +960,22 @@ for stale_file in "$(installed_directory "$sandbox")/$DEPLOY_FILE" "$sandbox/etc
     [[ ! -s "$sandbox/wrapper-ran.log" ]] || fail "Updating a stale artifact must never reach the wrapper."
 done
 
+# While another install or a deployment holds the lock, nothing is read,
+# installed or reported as installed: the command fails, so nothing is recorded.
+printf 'older release\n' >"$(installed_directory "$sandbox")/$DEPLOY_FILE"
+: >"$sandbox/payload-events.log"
+hold_lock "$sandbox"
+output="$(run_payload "$sandbox" "$(render_runtime_payload "$sandbox")" 2>&1)" &&
+    fail "A runtime install must fail while the deployment lock is held."
+release_lock
+assert_contains "$output" "Another deployment or runtime install is running on this host; nothing was installed." \
+    "A held lock must be reported."
+[[ ! -s "$sandbox/payload-events.log" ]] || fail "A held lock must stop the installer from running."
+[[ "$(cat "$(installed_directory "$sandbox")/$DEPLOY_FILE")" == "older release" ]] ||
+    fail "A held lock must leave the host copies untouched."
+run_payload "$sandbox" "$(render_runtime_payload "$sandbox")" >/dev/null 2>&1 ||
+    fail "Once the lock is free, the same install must succeed."
+
 # An installer that exits 0 without leaving these exact files on the host is
 # not a verified install: the command fails, so nothing is recorded after it.
 printf 'older release\n' >"$(installed_directory "$sandbox")/$WRAPPER_FILE"
@@ -843,6 +985,8 @@ output="$(MOCK_INSTALLER_NOOP=true run_payload "$sandbox" "$(render_runtime_payl
 assert_contains "$output" "does not match this release after installation" "An unverified install must be reported."
 [[ "$(cat "$sandbox/payload-events.log")" == "installer" ]] || fail "The installer must have run before the check."
 [[ ! -s "$sandbox/wrapper-ran.log" ]] || fail "An unverified install must never reach the wrapper."
+[[ "$(cat "$(release_record "$sandbox")")" == "$TEST_RUN_ID $TEST_SHA" ]] ||
+    fail "An unverified install must not record anything new."
 
 # A tampered artifact fails before the host is read or written.
 for tampered_file in "$WRAPPER_FILE" "$DEPLOY_FILE" "$INSTALLER_FILE" "$UNIT_FILE"; do
@@ -853,6 +997,107 @@ for tampered_file in "$WRAPPER_FILE" "$DEPLOY_FILE" "$INSTALLER_FILE" "$UNIT_FIL
     [[ ! -e "$(installed_directory "$sandbox")" && ! -s "$sandbox/payload-events.log" ]] ||
         fail "A tampered $tampered_file must not install anything."
 done
+
+# --- installs are ordered on the host: an older release never follows a newer --
+# render_commands <commands json> <sandbox>
+render_commands() {
+    printf '%s' "$1" | jq -r '.[]' |
+        sed -e "s|/opt/ec-portfolio/runtime/demo|$2/opt/ec-portfolio/runtime/demo|g" \
+            -e "s|/etc/systemd/system|$2/etc/systemd/system|g" \
+            -e "s|/var/lock/|$2/var/lock/|g"
+}
+# release_payload <runtime|deploy> <run id> [artifact directory]: the command list
+# a given run sends, from the reviewed artifacts or from an altered copy of them.
+release_payload() {
+    local builder="build_install_runtime_commands"
+    [[ "$1" == runtime ]] || builder="build_install_and_run_commands"
+    GITHUB_RUN_ID="$2" bash -c 'source "$1"; "$2"' _ "${3:-$SCRIPT_DIRECTORY}/deploy-runtime.sh" "$builder"
+}
+older_artifacts="$work_directory/older-artifacts"
+mkdir -p "$older_artifacts"
+cp "$DEPLOY_SCRIPT" "$SCRIPT_DIRECTORY/$WRAPPER_FILE" "$SCRIPT_DIRECTORY/$DEPLOY_FILE" \
+    "$SCRIPT_DIRECTORY/$INSTALLER_FILE" "$SCRIPT_DIRECTORY/$UNIT_FILE" "$older_artifacts/"
+printf '\n# runtime of an older release\n' >>"$older_artifacts/$DEPLOY_FILE"
+readonly OLDER_RUN_ID="4200000001"
+readonly NEWER_RUN_ID="4200000003"
+host_holds_reviewed_runtime() {
+    cmp -s "$(installed_directory "$1")/$DEPLOY_FILE" "$SCRIPT_DIRECTORY/$DEPLOY_FILE"
+}
+
+# L2-B: the newer release installs first, then an older command reaches the host
+# (one the SSM agent delivers late, or one that stalled before the lock). The
+# lock is free by then, so only the release order stops it, for both payloads.
+sandbox="$(payload_sandbox)"
+run_payload "$sandbox" "$(render_commands "$(release_payload runtime "$TEST_RUN_ID")" "$sandbox")" >/dev/null 2>&1 ||
+    fail "The newer release must install."
+[[ "$(cat "$(release_record "$sandbox")")" == "$TEST_RUN_ID $TEST_SHA" ]] ||
+    fail "A verified install must record its run id and commit."
+for older_payload in runtime deploy; do
+    : >"$sandbox/payload-events.log"
+    : >"$sandbox/wrapper-ran.log"
+    output="$(run_payload "$sandbox" "$(render_commands "$(release_payload "$older_payload" "$OLDER_RUN_ID" "$older_artifacts")" "$sandbox")" 2>&1)" &&
+        fail "An older release's $older_payload command must be refused after a newer install."
+    assert_contains "$output" "installed by a newer release (run $TEST_RUN_ID, $TEST_SHA); this older release (run $OLDER_RUN_ID) installs nothing." \
+        "The refused older $older_payload command must say why."
+    [[ ! -s "$sandbox/payload-events.log" && ! -s "$sandbox/wrapper-ran.log" ]] ||
+        fail "A refused older $older_payload command must neither install nor reach the wrapper."
+    host_holds_reviewed_runtime "$sandbox" || fail "A refused older $older_payload command must leave the newer runtime in place."
+    [[ "$(cat "$(release_record "$sandbox")")" == "$TEST_RUN_ID $TEST_SHA" ]] ||
+        fail "A refused older $older_payload command must leave the record alone."
+done
+
+# The same run again (a re-run keeps its id) and a newer run are both accepted;
+# a newer run that finds the runtime current still records itself.
+run_payload "$sandbox" "$(render_commands "$(release_payload runtime "$TEST_RUN_ID")" "$sandbox")" >/dev/null 2>&1 ||
+    fail "A re-run of the release that installed the runtime must be accepted."
+run_payload "$sandbox" "$(render_commands "$(release_payload runtime "$NEWER_RUN_ID")" "$sandbox")" >/dev/null 2>&1 ||
+    fail "A newer release must be accepted."
+[[ "$(cat "$(release_record "$sandbox")")" == "$NEWER_RUN_ID $TEST_SHA" ]] ||
+    fail "A newer release that finds the runtime current must still record itself."
+output="$(run_payload "$sandbox" "$(render_commands "$(release_payload runtime "$TEST_RUN_ID")" "$sandbox")" 2>&1)" &&
+    fail "Once a newer release recorded itself, an older one must be refused even with identical artifacts."
+
+# An install record that cannot be read refuses every install; it is never
+# taken for a missing one.
+for record_content in "garbage" "" "1234567890123456789 $TEST_SHA" "-5 $TEST_SHA"; do
+    printf '%s\n' "$record_content" >"$(release_record "$sandbox")"
+    : >"$sandbox/payload-events.log"
+    output="$(run_payload "$sandbox" "$(render_commands "$(release_payload runtime "$NEWER_RUN_ID")" "$sandbox")" 2>&1)" &&
+        fail "An install record [$record_content] must refuse the install."
+    assert_contains "$output" "is unreadable; nothing was installed." "An install record [$record_content] must be reported."
+    [[ ! -s "$sandbox/payload-events.log" ]] || fail "An install record [$record_content] must stop the installer."
+done
+
+# L2-A: an older install still holds the lock when the newer one arrives. The
+# newer one fails, so nothing is recorded after it, and succeeds once re-run.
+sandbox="$(payload_sandbox)"
+hold_lock "$sandbox"
+output="$(run_payload "$sandbox" "$(render_commands "$(release_payload runtime "$TEST_RUN_ID")" "$sandbox")" 2>&1)" &&
+    fail "An install must fail while an older one holds the lock."
+release_lock
+assert_contains "$output" "Another deployment or runtime install is running on this host" "The held lock must be reported."
+[[ ! -e "$(release_record "$sandbox")" ]] || fail "An install refused by the lock must record nothing."
+
+# The deploy payload under a held lock fails before it installs anything, and
+# never reaches the wrapper.
+: >"$sandbox/payload-events.log"
+hold_lock "$sandbox"
+output="$(run_payload "$sandbox" "$(render_payload "$sandbox")" 2>&1)" &&
+    fail "The deploy payload must fail while the deployment lock is held."
+release_lock
+assert_contains "$output" "Another deployment or runtime install is running on this host; nothing was installed." \
+    "The deploy payload must report the held lock."
+[[ ! -s "$sandbox/payload-events.log" && ! -s "$sandbox/wrapper-ran.log" ]] ||
+    fail "The deploy payload must neither install nor reach the wrapper under a held lock."
+
+# With the lock free, the deploy payload installs, records itself and releases the
+# lock so that the wrapper can take it: the wrapper is reached and does not
+# report a concurrent deployment.
+output="$(run_payload "$sandbox" "$(render_payload "$sandbox")" 2>&1)" || true
+assert_absent "$output" "Another deployment is already running" "The deploy payload must not hold the lock the wrapper takes."
+[[ -s "$sandbox/wrapper-ran.log" ]] || fail "The deploy payload must reach the wrapper once it releases the lock."
+[[ "$(cat "$(release_record "$sandbox")")" == "$TEST_RUN_ID $TEST_SHA" ]] ||
+    fail "The deploy payload must record its release once the installed copies are verified."
 
 # --- the workflow wires the scope through without skipping deploy-api --------
 job_block() {

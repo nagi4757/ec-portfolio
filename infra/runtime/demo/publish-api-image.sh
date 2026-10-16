@@ -227,9 +227,11 @@ read_state_parameter() {
         --output text
 }
 
+# write_state_parameter <name> <value> [failure message]
 write_state_parameter() {
     local parameter_name="$1"
     local parameter_value="$2"
+    local failure_message="${3:-Unable to record deployment state in $parameter_name.}"
 
     AWS_PAGER="" aws ssm put-parameter \
         --region "$AWS_REGION" \
@@ -237,7 +239,7 @@ write_state_parameter() {
         --value "$parameter_value" \
         --type String \
         --overwrite >/dev/null ||
-        fail "Unable to record deployment state in $parameter_name."
+        fail "$failure_message"
 }
 
 migration_guard() {
@@ -395,13 +397,21 @@ read_desired() {
     printf 'previous_desired=%s\nprevious_pending=%s\n' "$previous_desired" "$previous_pending" >>"$GITHUB_OUTPUT"
 }
 
+# restore_failure_message <reason>: what an operator needs when a restore cannot
+# be confirmed. It never says the value was restored.
+restore_failure_message() {
+    printf '%s' "RESTORE NOT CONFIRMED ($1). $DESIRED_IMAGE_SHA_PARAMETER may still be $IMAGE_TAG, a release this workflow did not complete; before it, it was $PREVIOUS_DESIRED_IMAGE_SHA. Operator: read $DESIRED_IMAGE_SHA_PARAMETER now and, if it is not $PREVIOUS_DESIRED_IMAGE_SHA, set it back to $PREVIOUS_DESIRED_IMAGE_SHA before the host boots again or the next main push runs."
+}
+
 # Puts back what record-desired replaced once the release has failed or been
 # cancelled, so the host's next boot converges to the image it had before, not to
 # a release its workflow did not complete. Only a desired image SHA that still
 # names this release is restored: any other value was never recorded by this run
-# or has been changed since, and is left alone.
+# or has been changed since, and is left alone. A value counts as restored only
+# once it is read back: this is best-effort, and a run that never reaches this
+# step (a force-cancelled run, a lost runner) restores nothing at all.
 restore_desired() {
-    local current_desired
+    local current_desired current_pending
 
     require_environment DESIRED_IMAGE_SHA_PARAMETER
     require_environment PENDING_MIGRATION_IMAGE_SHA_PARAMETER
@@ -413,15 +423,27 @@ restore_desired() {
         fail "PREVIOUS_PENDING_MIGRATION_IMAGE_SHA must be a full lowercase Git SHA or none."
 
     current_desired="$(read_state_parameter "$DESIRED_IMAGE_SHA_PARAMETER")" ||
-        fail "Unable to read the desired image SHA. If it is still $IMAGE_TAG, set it back to $PREVIOUS_DESIRED_IMAGE_SHA before the host boots again."
+        fail "$(restore_failure_message "$DESIRED_IMAGE_SHA_PARAMETER could not be read")"
     if [[ "$current_desired" != "$IMAGE_TAG" ]]; then
-        log "The desired image SHA is $current_desired, not this release's $IMAGE_TAG: nothing to restore."
+        log "The desired image SHA reads $current_desired, not this release's $IMAGE_TAG: nothing to restore."
         return 0
     fi
 
-    write_state_parameter "$DESIRED_IMAGE_SHA_PARAMETER" "$PREVIOUS_DESIRED_IMAGE_SHA"
-    write_state_parameter "$PENDING_MIGRATION_IMAGE_SHA_PARAMETER" "$PREVIOUS_PENDING_MIGRATION_IMAGE_SHA"
-    log "Restored the desired image SHA to $PREVIOUS_DESIRED_IMAGE_SHA: the host's next boot converges to it, not to the failed release $IMAGE_TAG."
+    write_state_parameter "$DESIRED_IMAGE_SHA_PARAMETER" "$PREVIOUS_DESIRED_IMAGE_SHA" \
+        "$(restore_failure_message "the write to $DESIRED_IMAGE_SHA_PARAMETER failed")"
+    current_desired="$(read_state_parameter "$DESIRED_IMAGE_SHA_PARAMETER")" ||
+        fail "$(restore_failure_message "$DESIRED_IMAGE_SHA_PARAMETER could not be read back after the write")"
+    [[ "$current_desired" == "$PREVIOUS_DESIRED_IMAGE_SHA" ]] ||
+        fail "$(restore_failure_message "$DESIRED_IMAGE_SHA_PARAMETER reads $current_desired after the write")"
+    log "Restored and read back: the desired image SHA is $PREVIOUS_DESIRED_IMAGE_SHA again, not the failed release $IMAGE_TAG."
+
+    write_state_parameter "$PENDING_MIGRATION_IMAGE_SHA_PARAMETER" "$PREVIOUS_PENDING_MIGRATION_IMAGE_SHA" \
+        "The desired image SHA is restored and read back, but $PENDING_MIGRATION_IMAGE_SHA_PARAMETER could not be set back to $PREVIOUS_PENDING_MIGRATION_IMAGE_SHA."
+    current_pending="$(read_state_parameter "$PENDING_MIGRATION_IMAGE_SHA_PARAMETER")" ||
+        fail "The desired image SHA is restored and read back, but $PENDING_MIGRATION_IMAGE_SHA_PARAMETER could not be read back."
+    [[ "$current_pending" == "$PREVIOUS_PENDING_MIGRATION_IMAGE_SHA" ]] ||
+        fail "The desired image SHA is restored and read back, but $PENDING_MIGRATION_IMAGE_SHA_PARAMETER reads $current_pending, not $PREVIOUS_PENDING_MIGRATION_IMAGE_SHA."
+    log "Restored and read back: the pending migration image SHA is $PREVIOUS_PENDING_MIGRATION_IMAGE_SHA again."
 }
 
 # read_deployment_sha <parameter variable> <description>: a deployment-state SHA

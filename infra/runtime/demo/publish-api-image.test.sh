@@ -122,6 +122,12 @@ case "$service $operation" in
         previous=""
         for arg in "$@"; do
             if [[ "$previous" == "--name" ]]; then
+                state_file="$MOCK_CALL_LOG.state.$(basename "$arg")"
+                if [[ -f "$state_file" ]]; then
+                    [[ "${MOCK_READBACK_FAIL-false}" != "true" ]] || { printf 'An error occurred (ThrottlingException)\n' >&2; exit 254; }
+                    cat "$state_file"
+                    exit 0
+                fi
                 case "$arg" in
                     */desired-image-sha) parameter_value="${MOCK_DESIRED_VALUE-$parameter_value}" ;;
                     */last-known-good-image-sha) parameter_value="${MOCK_LAST_KNOWN_GOOD_VALUE-$parameter_value}" ;;
@@ -137,6 +143,21 @@ case "$service $operation" in
         printf '%s\n' "$parameter_value"
         ;;
     "ssm put-parameter")
+        put_name=""
+        put_value=""
+        previous=""
+        for arg in "$@"; do
+            [[ "$previous" != "--name" ]] || put_name="$arg"
+            [[ "$previous" != "--value" ]] || put_value="$arg"
+            previous="$arg"
+        done
+        if [[ "${MOCK_PUT_FAIL-false}" == "true" || "${MOCK_PUT_FAIL_FOR-}" == "$(basename "$put_name")" ]]; then
+            printf 'An error occurred (InternalServerError)\n' >&2
+            exit 254
+        fi
+        # Accepted but not visible to a later read, as a lost or overtaken write.
+        [[ "${MOCK_PUT_NOT_PERSISTED-false}" == "true" ]] ||
+            printf '%s\n' "$put_value" >"$MOCK_CALL_LOG.state.$(basename "$put_name")"
         ;;
     *)
         printf 'unexpected aws invocation: %s\n' "$*" >&2
@@ -262,6 +283,7 @@ run_publish() {
 
     MOCK_CALL_LOG="$work_directory/calls.log"
     : >"$MOCK_CALL_LOG"
+    rm -f "$MOCK_CALL_LOG".state.*
     export MOCK_CALL_LOG
 
     env -C "$repository" \
@@ -458,17 +480,45 @@ assert_contains "$calls" "put-parameter --region ap-northeast-1 --name $PENDING_
 assert_count_puts() { [[ "$(grep -c "put-parameter" "$work_directory/calls.log" || true)" == "$1" ]] || fail "$2"; }
 assert_count_puts 2 "restore-desired must write exactly the two values it restores."
 assert_absent "$calls" "$LAST_KNOWN_GOOD_PARAMETER --value" "restore-desired must never write the last known good image SHA."
-assert_contains "$output" "Restored the desired image SHA to $base_sha" "The restore must be reported."
+assert_contains "$output" "Restored and read back: the desired image SHA is $base_sha again" "The restore must be reported once read back."
+assert_contains "$output" "Restored and read back: the pending migration image SHA is $migration_sha again" \
+    "The pending marker must be reported once read back."
+[[ "$(grep -c "get-parameter --region ap-northeast-1 --name $DESIRED_PARAMETER" "$work_directory/calls.log")" == 2 ]] ||
+    fail "The restored desired image SHA must be read back, not assumed."
 
 output="$(run_restore PREVIOUS_DESIRED_IMAGE_SHA="$base_sha" PREVIOUS_PENDING_MIGRATION_IMAGE_SHA=none \
     MOCK_DESIRED_VALUE="$migration_sha" 2>&1)" || fail "restore-desired must succeed when there is nothing to restore."
 assert_count_puts 0 "A desired image SHA that is not this release's must be left alone."
 assert_contains "$output" "nothing to restore" "Leaving another value alone must be reported."
 
-output="$(run_restore PREVIOUS_DESIRED_IMAGE_SHA="$base_sha" PREVIOUS_PENDING_MIGRATION_IMAGE_SHA=none \
-    MOCK_DESIRED_VALUE=__missing__ 2>&1)" && fail "An unreadable desired image SHA must fail the restore."
-assert_contains "$output" "set it back to $base_sha before the host boots again" "An unreadable value must say how to restore by hand."
+# Nothing that is not read back is ever reported as restored, and every failure
+# names the failed release, the value to put back and what the operator does.
+restore_not_confirmed() {
+    local description="$1"
+    local reason="$2"
+    shift 2
+    output="$(run_restore PREVIOUS_DESIRED_IMAGE_SHA="$base_sha" PREVIOUS_PENDING_MIGRATION_IMAGE_SHA=none "$@" 2>&1)" &&
+        fail "$description must fail the restore."
+    assert_contains "$output" "RESTORE NOT CONFIRMED ($reason)" "$description must say why the restore is not confirmed."
+    assert_contains "$output" "may still be $code_sha" "$description must name the failed release still recorded."
+    assert_contains "$output" "before it, it was $base_sha" "$description must name the value to put back."
+    assert_contains "$output" "Operator: read $DESIRED_PARAMETER now and, if it is not $base_sha, set it back to $base_sha before the host boots again" \
+        "$description must say what the operator does."
+    assert_absent "$output" "Restored and read back" "$description must never be reported as restored."
+}
+restore_not_confirmed "An unreadable desired image SHA" "$DESIRED_PARAMETER could not be read" MOCK_DESIRED_VALUE=__missing__
 assert_count_puts 0 "An unreadable desired image SHA must not be overwritten blindly."
+restore_not_confirmed "A failed write" "the write to $DESIRED_PARAMETER failed" MOCK_DESIRED_VALUE="$code_sha" MOCK_PUT_FAIL=true
+restore_not_confirmed "A write that does not show on read-back" "$DESIRED_PARAMETER reads $code_sha after the write" \
+    MOCK_DESIRED_VALUE="$code_sha" MOCK_PUT_NOT_PERSISTED=true
+restore_not_confirmed "A read-back that fails" "$DESIRED_PARAMETER could not be read back after the write" \
+    MOCK_DESIRED_VALUE="$code_sha" MOCK_READBACK_FAIL=true
+output="$(run_restore PREVIOUS_DESIRED_IMAGE_SHA="$base_sha" PREVIOUS_PENDING_MIGRATION_IMAGE_SHA=none \
+    MOCK_DESIRED_VALUE="$code_sha" MOCK_PUT_FAIL_FOR=pending-migration-image-sha 2>&1)" &&
+    fail "A pending marker that cannot be restored must fail the restore."
+assert_contains "$output" "Restored and read back: the desired image SHA is $base_sha again" \
+    "A restored desired image SHA must still be reported as restored."
+assert_contains "$output" "could not be set back to none" "The pending marker failure must be reported."
 for malformed in "PREVIOUS_DESIRED_IMAGE_SHA= PREVIOUS_PENDING_MIGRATION_IMAGE_SHA=none" \
     "PREVIOUS_DESIRED_IMAGE_SHA=$base_sha PREVIOUS_PENDING_MIGRATION_IMAGE_SHA=" \
     "PREVIOUS_DESIRED_IMAGE_SHA=HEAD PREVIOUS_PENDING_MIGRATION_IMAGE_SHA=none" \
