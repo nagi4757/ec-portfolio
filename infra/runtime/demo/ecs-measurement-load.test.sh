@@ -178,8 +178,11 @@ api_requests() {
 # The driver starts at most <rate> requests in each second of its own clock. The
 # fake wget stamps a request a few milliseconds later, on its own clock, so a
 # request started at the very end of a second can land in the next one: one
-# more than <rate> is tolerated there, never two, and the total over the whole
-# load stays within <rate> per second.
+# more than <rate> is tolerated there, never two. The same applies to the total:
+# when the load starts at the very end of a second, the only request of that
+# second is stamped in the next one, so the stamps span a second less than the
+# load did. The total therefore stays within <rate> per stamped second plus that
+# one request, which still fails a driver that exceeds the rate in every second.
 assert_rate_bound() {
     local output="$1" rate="$2" label="$3" busiest first final total
     busiest="$(awk -F '\t' '$2 !~ /readiness$/ { n[$1]++ } END { m = 0; for (s in n) if (n[s] > m) m = n[s]; print m }' "$output.wget")"
@@ -187,8 +190,37 @@ assert_rate_bound() {
     first="$(awk -F '\t' '$2 !~ /readiness$/ { print $1; exit }' "$output.wget")"
     final="$(awk -F '\t' '$2 !~ /readiness$/ { t = $1 } END { print t }' "$output.wget")"
     total="$(api_requests "$output")"
-    ((total <= rate * (final - first + 1))) || fail "$label: $total requests over $((final - first + 1)) s at $rate/s"
+    ((total <= rate * (final - first + 1) + 1)) || fail "$label: $total requests over $((final - first + 1)) s at $rate/s"
 }
+
+# assert_rate_bound itself, on recorded stamps rather than a live run, so the
+# second-boundary cases a live run only hits by chance are always checked.
+# rate_case <pass|fail> <description> <stamp second>:<requests>...
+rate_case() {
+    local expected="$1" description="$2" record="$work_directory/rate-case" spec stamp count index
+    shift 2
+    printf '%s\t%s\t\t\n' 100 "http://127.0.0.1:8080/actuator/health/readiness" >"$record.wget"
+    for spec in "$@"; do
+        stamp="${spec%%:*}"
+        count="${spec#*:}"
+        for ((index = 0; index < count; index++)); do
+            printf '%s\t%s\t\t\n' "$stamp" "http://127.0.0.1:8080/api/public/categories" >>"$record.wget"
+        done
+    done
+    if (assert_rate_bound "$record" 5 "$description") 2>/dev/null; then
+        [[ "$expected" == pass ]] || fail "assert_rate_bound must reject $description"
+    else
+        [[ "$expected" == fail ]] || fail "assert_rate_bound must accept $description"
+    fi
+}
+rate_case pass "a steady load at the rate" 100:5 101:5
+rate_case pass "a load that starts at the very end of a second" 101:6
+rate_case pass "a load whose last request is stamped in the next second" 100:5 101:5 102:1
+rate_case pass "a load stamped one request late at the start and in the middle" 100:5 101:6
+rate_case fail "one request over the rate in every second" 100:6 101:6
+rate_case fail "one request over the rate in every second of a longer load" 100:6 101:6 102:6
+rate_case fail "two requests over the rate in one second" 100:7
+rate_case fail "a burst after a slow start" 100:1 101:7
 
 shells=(/bin/sh)
 [[ -x /bin/dash ]] && shells+=(/bin/dash)
