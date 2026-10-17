@@ -557,3 +557,9 @@ jobs:
       # and mutants the gate must reject.
       - name: Test Phase 6C-5c measurement stack policies
         run: infra/terraform/access/scripts/measurement-stack-policy.test.sh
+
+      # The cold standby runtime policies are pasted into the console from the
+      # README too: pinned digests, a shape gate, the AccessAdmin read list and
+      # mutants the gate must reject.
+      - name: Test Phase 6C-5c cold standby runtime policies
+        run: infra/terraform/access/scripts/cold-standby-policy.test.sh

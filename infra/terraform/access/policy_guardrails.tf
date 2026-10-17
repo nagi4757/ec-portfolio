@@ -100,3 +100,74 @@ locals {
     ]))
   ]
 }
+
+# Phase 6C-5c cold standby: the runtime orchestration and the cold standby are
+# granted only through reviewed customer managed policies (README, "Phase 6C-5c
+# cold standby runtime permissions"). Neither inline policy may grant a Step
+# Functions, DynamoDB or EventBridge action, an EventBridge Scheduler action
+# outside the exact list it already has, or one of the actions those customer
+# managed policies own. A `*`, a service wildcard, a pattern that matches one of
+# them, an action name with characters outside an IAM action name and Allow with
+# NotAction all count as a grant.
+#
+# Fail-closed: lifecycle preconditions on both inline policy resources
+# (permission_sets.tf). The conditions read local.rendered_inline_policies, the
+# same documents the resources write.
+locals {
+  cold_standby_inline_owned_services = ["states", "dynamodb", "events", "scheduler"]
+
+  # The Scheduler actions each inline policy already names; nothing else from
+  # the owned services.
+  cold_standby_inline_allowed_actions = {
+    plan = [
+      "scheduler:GetSchedule",
+      "scheduler:GetScheduleGroup",
+      "scheduler:ListTagsForResource",
+    ]
+    apply = [
+      "scheduler:ListSchedules",
+      "scheduler:ListScheduleGroups",
+      "scheduler:CreateScheduleGroup",
+      "scheduler:GetScheduleGroup",
+      "scheduler:ListTagsForResource",
+      "scheduler:TagResource",
+      "scheduler:GetSchedule",
+      "scheduler:CreateSchedule",
+    ]
+  }
+
+  cold_standby_inline_forbidden_actions = [
+    "ec2:StartInstances",
+    "ec2:StopInstances",
+    "ec2:ModifyNetworkInterfaceAttribute",
+    "rds:StartDBInstance",
+    "rds:StopDBInstance",
+    "ssm:CreateDocument",
+    "ssm:UpdateDocument",
+    "ssm:UpdateDocumentDefaultVersion",
+    "ssm:DeleteDocument",
+    "ssm:ModifyDocumentPermission",
+    "autoscaling:PutScheduledUpdateGroupAction",
+    "autoscaling:DeleteScheduledAction",
+  ]
+
+  # name => Sids of the Allow statements that grant an owned or forbidden action.
+  cold_standby_inline_grants = {
+    for name, policy in local.rendered_inline_policies : name => [
+      for statement in jsondecode(policy).Statement :
+      try(statement.Sid, "(statement without Sid)")
+      if statement.Effect == "Allow" && (can(statement.NotAction) || anytrue([
+        for action in try(tolist(statement.Action), [try(statement.Action, "")]) :
+        !contains(local.cold_standby_inline_allowed_actions[name], action) && (
+          !can(regex("^[A-Za-z0-9:*?_-]+$", action)) || !strcontains(action, ":") || anytrue([
+            for service in local.cold_standby_inline_owned_services :
+            can(regex(format("(?i)^%s$", replace(replace(split(":", action)[0], "*", ".*"), "?", ".")), service))
+            ]) || anytrue([
+            for forbidden in local.cold_standby_inline_forbidden_actions :
+            can(regex(format("(?i)^%s$", replace(replace(action, "*", ".*"), "?", ".")), forbidden))
+          ])
+        )
+      ]))
+    ]
+  }
+}
