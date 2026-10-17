@@ -50,7 +50,8 @@
 # lock and refuses a release older than the one that last installed the host
 # runtime. Anything that still reaches the host late, such as a deploy command
 # the SSM agent picks up after a newer release, can therefore never put back an
-# older runtime. GITHUB_RUN_ID and GITHUB_SHA identify that release.
+# older runtime. GITHUB_RUN_NUMBER and GITHUB_SHA identify that release, and only
+# the CI workflow on main may send one (GITHUB_WORKFLOW_REF).
 
 set -euo pipefail
 
@@ -69,12 +70,19 @@ readonly REMOTE_SYSTEMD_DIR="/etc/systemd/system"
 # install, and nothing can change the host copies between an install and its
 # check of them.
 readonly REMOTE_DEPLOY_LOCK_FILE="/var/lock/ec-portfolio-demo-deploy.lock"
-# Which release last installed the host runtime, "<run id> <commit>", written
-# under the lock once the installed copies are verified. The workflow run id
-# orders releases: it only grows, and a re-run keeps it.
+# The newest release that has taken the host runtime, "<run number> <commit>".
+# It is written under the lock, after the release order check and before
+# anything is installed, so an install that is interrupted or fails afterwards
+# still leaves no room for an older release to follow it.
 readonly REMOTE_RELEASE_RECORD="$REMOTE_RUNTIME_DIR/.runtime-release"
+# Releases are ordered by GITHUB_RUN_NUMBER, which GitHub documents as starting at
+# 1 and growing with each new run of one workflow, unchanged by a re-run, which
+# also keeps GITHUB_SHA. GITHUB_RUN_ID is only documented as unique, and numbers
+# of two workflows are not comparable, so only the CI workflow on main, the one
+# workflow that sends installs, may build a payload.
 readonly RELEASE_ORDER_PATTERN='^[1-9][0-9]{0,17}$'
 readonly RELEASE_SHA_PATTERN='^[0-9a-f]{40}$'
+readonly RELEASE_WORKFLOW_REF_PATTERN='^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/\.github/workflows/ci\.yml@refs/heads/main$'
 
 readonly INSTANCE_ID_PATTERN='^i-[0-9a-f]{8,17}$'
 
@@ -140,8 +148,10 @@ validate_instance_id() {
 # Checked before any AWS call: a payload is never built without the release order
 # the host compares against.
 validate_release_identity() {
-    [[ "${GITHUB_RUN_ID-}" =~ $RELEASE_ORDER_PATTERN ]] ||
-        fail "GITHUB_RUN_ID must be the id of this workflow run: it orders runtime installs on the host."
+    [[ "${GITHUB_WORKFLOW_REF-}" =~ $RELEASE_WORKFLOW_REF_PATTERN ]] ||
+        fail "GITHUB_WORKFLOW_REF must be the CI workflow on main (.github/workflows/ci.yml@refs/heads/main): only its run numbers order runtime installs on the host."
+    [[ "${GITHUB_RUN_NUMBER-}" =~ $RELEASE_ORDER_PATTERN ]] ||
+        fail "GITHUB_RUN_NUMBER must be the run number of this workflow run: it orders runtime installs on the host."
     [[ "${GITHUB_SHA-}" =~ $RELEASE_SHA_PATTERN ]] ||
         fail "GITHUB_SHA must be the full lowercase commit SHA of this release."
 }
@@ -203,21 +213,24 @@ verified_artifact_commands() {
 # verified and before any host copy is read. They take the deployment lock
 # without waiting, so an install or deployment still running on the host makes
 # this command fail instead of interleaving with it. They then refuse a release
-# older than the one that last installed the host runtime, which covers what the
-# lock cannot: a command that reaches the host only after a newer release. Last,
-# they define how the installed copies are compared with the verified artifacts
-# and how this release is recorded once they match.
+# older than the newest one recorded on the host, which covers what the lock
+# cannot: a command that reaches the host only after a newer release. A record
+# that cannot be read, or that names another commit for the same run number,
+# refuses every install until an operator looks at it. This release is recorded
+# before anything is installed. Last, they define how the installed copies are
+# compared with the verified artifacts.
 locked_install_commands() {
     printf '%s\n' \
         "exec 9>'$REMOTE_DEPLOY_LOCK_FILE'" \
         "flock --nonblock 9 || { echo 'Another deployment or runtime install is running on this host; nothing was installed.' >&2; exit 1; }" \
         "release_record='$REMOTE_RELEASE_RECORD'" \
-        "release_order='$GITHUB_RUN_ID'" \
+        "release_order='$GITHUB_RUN_NUMBER'" \
         "release_sha='$GITHUB_SHA'" \
-        "if [ -e \"\$release_record\" ]; then read -r installed_order installed_sha <\"\$release_record\" || true; case \"\$installed_order\" in '' | *[!0-9]*) echo \"The host runtime install record \$release_record is unreadable; nothing was installed.\" >&2; exit 1 ;; esac; [ \"\${#installed_order}\" -le 18 ] || { echo \"The host runtime install record \$release_record is unreadable; nothing was installed.\" >&2; exit 1; }; if [ \"\$installed_order\" -gt \"\$release_order\" ]; then echo \"The host runtime was installed by a newer release (run \$installed_order, \${installed_sha:-unknown}); this older release (run \$release_order) installs nothing.\" >&2; exit 1; fi; fi" \
+        "record_unreadable() { echo \"The host runtime install record \$release_record is unreadable; nothing was installed. An operator has to inspect it.\" >&2; exit 1; }" \
+        "if [ -e \"\$release_record\" ]; then read -r installed_order installed_sha <\"\$release_record\" || true; case \"\$installed_order\" in '' | *[!0-9]*) record_unreadable ;; esac; case \"\$installed_sha\" in '' | *[!0-9a-f]*) record_unreadable ;; esac; [ \"\${#installed_order}\" -le 18 ] && [ \"\${#installed_sha}\" -eq 40 ] || record_unreadable; if [ \"\$installed_order\" -gt \"\$release_order\" ]; then echo \"The host runtime was taken by a newer release (run \$installed_order, \$installed_sha); this older release (run \$release_order) installs nothing.\" >&2; exit 1; fi; if [ \"\$installed_order\" -eq \"\$release_order\" ] && [ \"\$installed_sha\" != \"\$release_sha\" ]; then echo \"The host runtime record names run \$installed_order with commit \$installed_sha, not \$release_sha; nothing was installed. An operator has to inspect it.\" >&2; exit 1; fi; fi" \
+        "{ mkdir -p '$REMOTE_RUNTIME_DIR' && printf '%s %s\\n' \"\$release_order\" \"\$release_sha\" >\"\$release_record.tmp\" && mv -f \"\$release_record.tmp\" \"\$release_record\"; } || { echo 'Unable to record this release on the host; nothing was installed.' >&2; exit 1; }" \
         "same_file() { [ -f \"\$2\" ] && [ \"\$(sha256sum <\"\$1\" | awk '{print \$1}')\" = \"\$(sha256sum <\"\$2\" | awk '{print \$1}')\" ]; }" \
-        "runtime_current() { same_file \"\$tmp_dir/$WRAPPER_FILE\" '$REMOTE_RUNTIME_DIR/$WRAPPER_FILE' && same_file \"\$tmp_dir/$DEPLOY_FILE\" '$REMOTE_RUNTIME_DIR/$DEPLOY_FILE' && same_file \"\$tmp_dir/$INSTALLER_FILE\" '$REMOTE_RUNTIME_DIR/$INSTALLER_FILE' && same_file \"\$tmp_dir/$UNIT_FILE\" '$REMOTE_SYSTEMD_DIR/$UNIT_FILE'; }" \
-        "record_release() { printf '%s %s\\n' \"\$release_order\" \"\$release_sha\" >\"\$release_record.tmp\" && mv -f \"\$release_record.tmp\" \"\$release_record\"; }"
+        "runtime_current() { same_file \"\$tmp_dir/$WRAPPER_FILE\" '$REMOTE_RUNTIME_DIR/$WRAPPER_FILE' && same_file \"\$tmp_dir/$DEPLOY_FILE\" '$REMOTE_RUNTIME_DIR/$DEPLOY_FILE' && same_file \"\$tmp_dir/$INSTALLER_FILE\" '$REMOTE_RUNTIME_DIR/$INSTALLER_FILE' && same_file \"\$tmp_dir/$UNIT_FILE\" '$REMOTE_SYSTEMD_DIR/$UNIT_FILE'; }"
 }
 
 # The command that fails the install unless the host now holds exactly the
@@ -239,7 +252,6 @@ build_install_and_run_commands() {
         printf '%s\n' "bash \"\$tmp_dir/$INSTALLER_FILE\""
         installed_copies_check_command
         printf '%s\n' \
-            "record_release" \
             "exec 9>&-" \
             "$REMOTE_RUNTIME_DIR/$WRAPPER_FILE"
     } | jq -R . | jq -s .
@@ -249,19 +261,17 @@ build_install_and_run_commands() {
 # touching the API. Under the same lock and release check, the installer runs
 # only if an installed copy differs from its verified artifact, and the installed
 # copies are compared again afterwards, so the command succeeds only once the
-# host holds exactly these four files. The release is recorded either way. The
-# wrapper never runs: no container is touched and no image is pulled.
+# host holds exactly these four files. The wrapper never runs: no container is
+# touched and no image is pulled.
 build_install_runtime_commands() {
     {
         verified_artifact_commands
         locked_install_commands
         printf '%s\n' \
-            "if runtime_current; then record_release; echo 'The host runtime already matches this release; nothing installed.'; exit 0; fi" \
+            "if runtime_current; then echo 'The host runtime already matches this release; nothing installed.'; exit 0; fi" \
             "bash \"\$tmp_dir/$INSTALLER_FILE\""
         installed_copies_check_command
-        printf '%s\n' \
-            "record_release" \
-            "echo 'Host runtime installed and verified; the API was not redeployed.'"
+        printf '%s\n' "echo 'Host runtime installed and verified; the API was not redeployed.'"
     } | jq -R . | jq -s .
 }
 
