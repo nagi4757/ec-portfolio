@@ -210,7 +210,7 @@ unitは`KillMode=control-group`、`KillSignal=SIGTERM`、`SendSIGKILL=yes`、`Fi
 
 このjobはcommit駆動ではなくdesired state駆動です。
 
-- `GITHUB_SHA`は**このjobを実行してよいかどうかの判定にだけ**使用します。remote `main` HEADと一致しない stale なqueued jobを拒否するためのものです。
+- `GITHUB_SHA`は**このjobを実行してよいかどうかの判定**に使用します。remote `main` HEADと一致しない stale なqueued jobを拒否するためのものです。あわせて、runtimeを導入したreleaseとしてhostに記録します（下記「release scope と runtime 導入の順序」）。
 - hostが実際にdeployするimageは、**host側wrapperが読んだ時点の**`/ec-portfolio/demo/deploy/desired-image-sha`の値です。
 
 したがって、後続の`main` pushが既にdesired stateを更新していた場合、先行するjobは自分のcommitではなく**より新しいdesired SHAへ収束します**。これは意図した動作です。desired stateを唯一の真実として扱うことで、実行順序が前後しても最終状態が一意に定まり、古いreleaseを後から上書きしてしまう事故を防ぎます。
@@ -220,6 +220,24 @@ unitは`KillMode=control-group`、`KillSignal=SIGTERM`、`SendSIGKILL=yes`、`Fi
 hostでの同時deploymentは`flock`による非待機lock（`/var/lock/ec-portfolio-demo-deploy.lock`）で防ぎます。lockを取得できなかった場合は待機せずfail-closedで終了します。待機しない理由は、先行runの結果を観測できないまま順番待ちしても、後続runがどの状態の上で動くか保証できないためです。
 
 CI側は`concurrency` groupでもjobの重複を抑止しますが、hostのlockはSSM Run Commandの再送や手動実行など、CI以外の経路も含めて保護します。
+
+### release scope と runtime 導入の順序（Phase 6C-5c M1）
+
+`main`へのpushは、変更した範囲だけをリリースします。
+
+- `build-and-push-api`は`publish-api-image.sh release-scope`で`api_changed`、`api_converge`、`runtime_pending`を判定します。`apps/api`が変わらないpushでは、imageを公開しません。
+- desired image SHAは`deploy-api`が記録します。runtime 4 artifactも変わるreleaseでは、`deploy-runtime.sh install-runtime`がOnlineのhostへruntimeを導入し、digestを検証してから記録します。offlineなら記録せずにjobが失敗します。
+- 記録後にreleaseが失敗・取消された場合は、`restore-desired`が元の値へ戻し、読み戻して確認します。ただし強制取消やrunnerの消失ではこのstepが実行されないため、best-effortです。`RESTORE NOT CONFIRMED`が出た場合や、record後にrunが異常終了した場合は、次回のhost起動と次の`main` pushの前に、desiredを元のSHA（`Remember the desired API image this release replaces`のlogに出力）へ戻してください。
+
+hostへのruntime導入（`install-runtime`、runtimeのみのrelease、deploy commandのinstaller）は、すべて上記のlockの下で行い、次の順序を守ります。
+
+1. lockを非待機で取得します。取得できなければ何も導入せずに失敗します。
+2. `/opt/ec-portfolio/runtime/demo/.runtime-release`（`<GITHUB_RUN_NUMBER> <GITHUB_SHA>`）と比べ、記録より古いrun numberのcommandは拒否します。run numberが同じでSHAが異なる場合や、記録が読めない場合は、すべての導入を拒否します。
+3. 自分のreleaseを記録してから導入し、導入後のcopyがartifactと一致することを確認します。deploy commandはwrapperの直前にlockを解放します（wrapperは同じlockを自分で取得します）。
+
+run numberは`.github/workflows/ci.yml`の`main`上の実行だけで比較します。GitHubは`GITHUB_RUN_NUMBER`を「同じworkflowの新しいrunごとに増え、re-runでは変わらない」と定義しています。re-runは同じ`GITHUB_SHA`を使います。`deploy-runtime.sh`は`GITHUB_WORKFLOW_REF`がこのworkflowでない場合、AWSを呼ぶ前に失敗します。
+
+recordが読めない、またはrun numberとSHAが食い違ってすべての導入が拒否された場合は、運用者がhost上のrecordとruntime 4 fileを確認します。そのうえで、承認を得てrecordを削除するか、正しい`<run number> <SHA>`に書き直してください。recordがなければ、次の導入が新しく作成します。
 
 ### CI polling budget と timeout 契約
 
