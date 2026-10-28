@@ -2739,7 +2739,17 @@ the role passed in the request, for which the caller also needs `iam:PassRole`
 
 Maintained by hand; this root does not manage it. The Plan permission set's reads
 for the Demo root's plans and for the operator's observation of runs and of the
-control table. Read actions only, and the same redrive denial.
+control table. Read actions only, the definition check below, and the same
+redrive denial.
+
+`states:ValidateStateMachineDefinition` is the one action that is not a read by
+name. AWS provider 6.62 calls it while it plans a state machine whose definition
+is known, so the Demo root cannot be planned without it; the first P3-a plan
+(2026-10-29) stopped with an AccessDenied on each of the five state machines. The
+API checks the definition it is sent and returns the problems it finds; it does
+not create, change, start or read any state machine. It has no resource-level
+permission, so the statement names `*`, as the same statement in
+`ECPortfolioTerraformApplyRuntimeOrchestration` does.
 
 ```json
 {
@@ -2761,6 +2771,12 @@ control table. Read actions only, and the same redrive denial.
         "arn:aws:states:ap-northeast-1:<ACCOUNT_ID>:stateMachine:ec-portfolio-demo-origin-guard",
         "arn:aws:states:ap-northeast-1:<ACCOUNT_ID>:stateMachine:ec-portfolio-demo-od-standby"
       ]
+    },
+    {
+      "Sid": "ValidateStateMachineDefinitions",
+      "Effect": "Allow",
+      "Action": "states:ValidateStateMachineDefinition",
+      "Resource": "*"
     },
     {
       "Sid": "ReadExactRuntimeExecutions",
@@ -2852,14 +2868,15 @@ control table. Read actions only, and the same redrive denial.
 }
 ```
 
-Canonical SHA-256: `f885a264c5798030da5c918b21b594579f5202417cf89a4be8d4134ba8afc84b`. 3,303 of 6,144 characters.
+Canonical SHA-256: `0cddfdab77886feef085f7382ab373ff4812ea2f7553cd37729dba482cfda8fd`. 3,426 of 6,144 characters.
 
 ### Verification of the cold standby policies
 
 Offline, on every pull request: `scripts/cold-standby-policy.test.sh` reads the
 five documents from this README, checks their recorded digests, runs a shape
-gate (exact resources, exact conditions, read-only Plan, no forbidden action, the
-exact redrive denial, sizes) and requires the gate to reject a set of mutants.
+gate (exact resources, exact conditions, read-only Plan apart from the definition
+check, no forbidden action, the exact redrive denial, sizes) and requires the gate
+to reject a set of mutants.
 It also checks that `CustomerManagedPolicyRead` lists the five policies.
 
 After the policies are attached, read-only, each separately approved:
@@ -2923,6 +2940,31 @@ After the rehearsal and the `TestState` checks, the administrator detaches
 and deletes it; a change to this README then removes it from
 `CustomerManagedPolicyRead` (25 → 24) and from the test. Discovery shows 17
 Apply references. Keeping it attached longer is a separate, recorded decision.
+
+### Adding the definition check to the Plan policy
+
+`ECPortfolioTerraformPlanRuntimeOrchestration` was created without
+`ValidateStateMachineDefinitions`. The document above adds that one statement and
+nothing else; the other four documents are unchanged. Each step is approved
+separately; any AccessDenied or difference is a STOP.
+
+1. Discovery: Plan carries 7 and Apply 17 customer managed policy references, and
+   the baseline equals the previous one.
+2. An administrator renders the Plan document above from merged `main`, checks its
+   canonical SHA-256 against the one recorded here, fills `<ACCOUNT_ID>`, creates
+   it as a new default version of `ECPortfolioTerraformPlanRuntimeOrchestration`
+   and deletes the previous version. The policy stays attached under the same
+   name, so no permission set reference changes. AccessAdmin cannot do this:
+   its `iam:CreatePolicyVersion` names `ECPortfolioTerraformApplyOriginTls` only.
+3. Discovery: Plan 7 and Apply 17 again; the permission set baseline equals the
+   previous one, and the customer managed policy export differs only in this
+   policy's row (default version and document digest). The policy reads back as
+   AccessAdmin with one version, the default, whose canonical SHA-256 is the one
+   recorded here.
+4. The Demo root: the P3-a saved plan, as before.
+
+Rollback: create the previous document again as the default version and delete
+this one; the Demo plan then fails closed with the same AccessDenied.
 
 ### Rollback
 
