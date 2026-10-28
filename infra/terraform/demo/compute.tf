@@ -51,6 +51,12 @@ resource "aws_eip" "ec2_origin" {
   tags = {
     Name = "${local.name_prefix}-ec2-origin"
   }
+
+  # The origin A record and the CloudFront origin point at this address; the
+  # cold standby moves it between hosts and must never lose it.
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 # Terraform no longer owns which instance holds the origin EIP. Phase 6C-5
