@@ -3,6 +3,7 @@ package com.nagi4757.ec.api.product.application
 import com.nagi4757.ec.api.product.application.command.CreateProductCommand
 import com.nagi4757.ec.api.product.application.command.UpdateProductCommand
 import com.nagi4757.ec.api.product.domain.model.Product
+import com.nagi4757.ec.api.product.domain.repository.ProductFieldChanges
 import com.nagi4757.ec.api.product.domain.repository.ProductRepository
 import com.nagi4757.ec.api.product.domain.repository.ProductSearchCondition
 import com.nagi4757.ec.api.common.error.ApiErrorCode
@@ -72,9 +73,11 @@ class ProductService(
     }
 
     /**
-     * The stock is not written back with the other fields: checkout and refunds may
-     * have moved it since the product was read. A stock change applies only while the
-     * stock is still the one the admin saw, and otherwise fails the whole edit.
+     * Writes only what the request carries. Copying the product as read and writing it
+     * back whole would undo whatever committed in between: a deactivation, another
+     * admin's edit, or the stock that checkout and refunds move. A stock change applies
+     * only while the stock is still the one the admin saw, and otherwise fails the
+     * whole edit.
      */
     @Transactional
     fun update(id: Long, cmd: UpdateProductCommand): Product {
@@ -82,16 +85,20 @@ class ProductService(
         val expected = cmd.expectedStockQuantity
         if ((target == null) != (expected == null)) throw IncompleteStockChangeException()
 
-        val current = productRepository.findById(id)
-            ?: throw ResourceNotFoundException(ApiErrorCode.PRODUCT_NOT_FOUND)
-        val updated = current.copy(
-            name = cmd.name ?: current.name,
-            price = cmd.price ?: current.price,
-            imageUrl = cmd.imageUrl ?: current.imageUrl,
-            description = cmd.description ?: current.description,
-            active = cmd.active ?: current.active
+        if (productRepository.findById(id) == null) {
+            throw ResourceNotFoundException(ApiErrorCode.PRODUCT_NOT_FOUND)
+        }
+        val changes = ProductFieldChanges(
+            name = cmd.name,
+            price = cmd.price,
+            imageUrl = cmd.imageUrl,
+            description = cmd.description,
+            active = cmd.active
         )
-        productRepository.update(updated)
+        // A stock-only edit has nothing else to write.
+        if (!changes.isEmpty) {
+            productRepository.updateFields(id, changes)
+        }
 
         // Sending back the stock the form was loaded with is not a change, whatever
         // the stock has become since.

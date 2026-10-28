@@ -27,6 +27,7 @@ import com.nagi4757.ec.api.payment.application.PaymentRequestFingerprint
 import com.nagi4757.ec.api.payment.domain.model.PaymentAttemptStatus
 import com.nagi4757.ec.api.payment.domain.repository.PaymentAttemptRepository
 import com.nagi4757.ec.api.product.domain.model.Product
+import com.nagi4757.ec.api.product.domain.repository.ProductFieldChanges
 import com.nagi4757.ec.api.product.domain.repository.ProductRepository
 import com.nagi4757.ec.api.product.domain.repository.ProductSearchCondition
 import org.assertj.core.api.Assertions.assertThat
@@ -712,12 +713,12 @@ class InfrastructureIntegrationTest @Autowired constructor(
         val created = requireNotNull(productRepository.findById(productId))
         assertThat(created.stockQuantity).isEqualTo(12)
 
-        // The field update writes the other fields but never the stock, even when it is
-        // handed a product whose stock differs.
-        val renamed = created.copy(name = "${created.name}-renamed", stockQuantity = 4)
-        assertThat(productRepository.update(renamed)).isTrue()
+        // The field update writes the fields it is given and never the stock: the changes
+        // it takes have no stock to carry.
+        val renamed = "${created.name}-renamed"
+        assertThat(productRepository.updateFields(productId, ProductFieldChanges(name = renamed))).isTrue()
         val updated = requireNotNull(productRepository.findById(productId))
-        assertThat(updated.name).isEqualTo(renamed.name)
+        assertThat(updated.name).isEqualTo(renamed)
         assertThat(updated.stockQuantity).isEqualTo(12)
         assertThat(storedStock()).isEqualTo(12)
 
@@ -730,6 +731,34 @@ class InfrastructureIntegrationTest @Autowired constructor(
         assertThat(productRepository.compareAndSetStock(productId, 12, 9)).isFalse()
         assertThat(productRepository.findById(productId)?.stockQuantity).isEqualTo(4)
         assertThat(storedStock()).isEqualTo(4)
+    }
+
+    @Test
+    @Transactional
+    fun `updates only the product fields it is given`() {
+        val productId = productRepository.create(
+            Product(
+                name = "partial-${UUID.randomUUID()}",
+                price = 15_000L,
+                stockQuantity = 7,
+                imageUrl = "https://example.test/before.png",
+                description = "before"
+            )
+        )
+        val created = requireNotNull(productRepository.findById(productId))
+
+        assertThat(productRepository.updateFields(productId, ProductFieldChanges(name = "renamed"))).isTrue()
+        assertThat(productRepository.findById(productId)).isEqualTo(created.copy(name = "renamed"))
+
+        // Zero, false and an empty string are values, not "leave it".
+        val falsy = ProductFieldChanges(price = 0L, imageUrl = "", description = "", active = false)
+        assertThat(productRepository.updateFields(productId, falsy)).isTrue()
+        val expected = created.copy(name = "renamed", price = 0L, imageUrl = "", description = "", active = false)
+        assertThat(productRepository.findById(productId)).isEqualTo(expected)
+
+        // Nothing to set writes nothing.
+        assertThat(productRepository.updateFields(productId, ProductFieldChanges())).isFalse()
+        assertThat(productRepository.findById(productId)).isEqualTo(expected)
     }
 
     @Test

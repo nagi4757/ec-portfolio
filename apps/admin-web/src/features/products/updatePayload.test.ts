@@ -55,19 +55,26 @@ const loaded: Product = {
     price: 12000,
     stockQuantity: 10,
     active: true,
-    imageUrl: '',
-    description: '',
+    imageUrl: 'https://example.test/mug.png',
+    description: 'Ceramic mug',
 }
 
-function edited(changes: Partial<ProductFormValues>): ProductFormValues {
+/** A product stored without an image URL or description. */
+const bare: Product = { ...loaded, imageUrl: null, description: null }
+
+/** The form as it opens on [product]: a missing image URL or description shows as ''. */
+function formOf(product: Product): ProductFormValues {
     return {
-        name: loaded.name,
-        price: loaded.price,
-        stockQuantity: loaded.stockQuantity,
-        imageUrl: '',
-        description: '',
-        ...changes,
+        name: product.name,
+        price: product.price,
+        stockQuantity: product.stockQuantity,
+        imageUrl: product.imageUrl ?? '',
+        description: product.description ?? '',
     }
+}
+
+function edited(changes: Partial<ProductFormValues>, product: Product = loaded): ProductFormValues {
+    return { ...formOf(product), ...changes }
 }
 
 beforeEach(() => {
@@ -85,26 +92,70 @@ afterEach(() => {
 })
 
 describe('product edit payload', () => {
-    it('leaves the stock out when the admin did not change it', () => {
-        // Sending the loaded stock back is exactly what used to undo a reservation
-        // made while the form was open.
-        const payload = buildUpdatePayload(loaded, edited({ name: 'Renamed' }))
+    it('sends only the name when only the name changed', () => {
+        // Sending the other fields back as loaded would overwrite whatever another
+        // admin, checkout or a refund changed while the form was open.
+        expect(buildUpdatePayload(loaded, edited({ name: 'Big mug' }))).toEqual({ name: 'Big mug' })
+    })
 
-        expect(payload).toEqual({ name: 'Renamed', price: 12000, imageUrl: '', description: '' })
-        expect(payload).not.toHaveProperty('stockQuantity')
-        expect(payload).not.toHaveProperty('expectedStockQuantity')
+    it('sends only the price when only the price changed', () => {
+        expect(buildUpdatePayload(loaded, edited({ price: 15000 }))).toEqual({ price: 15000 })
+    })
+
+    it('treats a price set to zero as a change', () => {
+        expect(buildUpdatePayload(loaded, edited({ price: 0 }))).toEqual({ price: 0 })
+    })
+
+    it('detects a changed image URL and a changed description', () => {
+        expect(buildUpdatePayload(loaded, edited({ imageUrl: 'https://example.test/new.png' })))
+            .toEqual({ imageUrl: 'https://example.test/new.png' })
+        expect(buildUpdatePayload(loaded, edited({ description: 'Stoneware mug' })))
+            .toEqual({ description: 'Stoneware mug' })
+    })
+
+    it('sends a cleared image URL or description as an empty string, as before', () => {
+        expect(buildUpdatePayload(loaded, edited({ imageUrl: '', description: '' })))
+            .toEqual({ imageUrl: '', description: '' })
+    })
+
+    it('sends nothing when nothing changed', () => {
+        expect(buildUpdatePayload(loaded, formOf(loaded))).toEqual({})
+    })
+
+    it('treats a missing image URL or description left empty as unchanged', () => {
+        // The form shows null as ''. Sending that '' would replace null on every save.
+        expect(buildUpdatePayload(bare, formOf(bare))).toEqual({})
+        const absent: Product = { ...loaded, imageUrl: undefined, description: undefined }
+        expect(buildUpdatePayload(absent, formOf(absent))).toEqual({})
+    })
+
+    it('sends what was typed into a field that was missing', () => {
+        expect(buildUpdatePayload(bare, edited({ imageUrl: 'https://example.test/new.png' }, bare)))
+            .toEqual({ imageUrl: 'https://example.test/new.png' })
+        expect(buildUpdatePayload(bare, edited({ description: 'New' }, bare)))
+            .toEqual({ description: 'New' })
+    })
+
+    it('treats fields changed and then changed back as unchanged', () => {
+        // The admin edited the name, price and stock, then restored what was loaded.
+        const restored = edited({ name: 'Mug', price: 12000, stockQuantity: 10 })
+
+        expect(buildUpdatePayload(loaded, restored)).toEqual({})
     })
 
     it('sends a changed stock together with the stock the form was loaded with', () => {
-        const payload = buildUpdatePayload(loaded, edited({ stockQuantity: 25 }))
-
-        expect(payload).toMatchObject({ stockQuantity: 25, expectedStockQuantity: 10 })
+        expect(buildUpdatePayload(loaded, edited({ stockQuantity: 25 })))
+            .toEqual({ stockQuantity: 25, expectedStockQuantity: 10 })
     })
 
     it('treats a stock set to zero as a change', () => {
-        const payload = buildUpdatePayload(loaded, edited({ stockQuantity: 0 }))
+        expect(buildUpdatePayload(loaded, edited({ stockQuantity: 0 })))
+            .toEqual({ stockQuantity: 0, expectedStockQuantity: 10 })
+    })
 
-        expect(payload).toMatchObject({ stockQuantity: 0, expectedStockQuantity: 10 })
+    it('keeps the stock pair alongside other changes', () => {
+        expect(buildUpdatePayload(loaded, edited({ name: 'Big mug', stockQuantity: 25 })))
+            .toEqual({ name: 'Big mug', stockQuantity: 25, expectedStockQuantity: 10 })
     })
 
     it('goes out as the PATCH body for the product', async () => {
