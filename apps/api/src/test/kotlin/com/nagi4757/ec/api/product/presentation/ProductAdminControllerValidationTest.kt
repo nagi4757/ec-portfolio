@@ -4,11 +4,17 @@ import com.nagi4757.ec.api.common.error.GlobalExceptionHandler
 import com.nagi4757.ec.api.common.logging.CorrelationIdFilter
 import com.nagi4757.ec.api.product.application.ProductService
 import com.nagi4757.ec.api.product.domain.model.Product
+import com.nagi4757.ec.api.product.domain.repository.ProductRepository
 import com.nagi4757.ec.api.product.presentation.admin.ProductAdminController
 import com.nagi4757.ec.api.product.presentation.public.ProductPublicController
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
+import org.mockito.ArgumentMatchers.anyInt
+import org.mockito.ArgumentMatchers.anyLong
 import org.mockito.Mockito.mock
+import org.mockito.Mockito.never
+import org.mockito.Mockito.verify
+import org.mockito.Mockito.verifyNoInteractions
 import org.mockito.Mockito.`when`
 import org.springframework.http.MediaType
 import org.springframework.test.web.servlet.MockMvc
@@ -22,19 +28,27 @@ import org.springframework.test.web.servlet.setup.StandaloneMockMvcBuilder
 class ProductAdminControllerValidationTest {
     private lateinit var productService: ProductService
     private lateinit var mockMvc: MockMvc
+    private lateinit var productRepository: ProductRepository
+    private lateinit var stockContractMockMvc: MockMvc
 
     @BeforeEach
     fun setUp() {
         productService = mock(ProductService::class.java)
-        mockMvc = MockMvcBuilders
-            .standaloneSetup(
-                ProductAdminController(productService),
-                ProductPublicController(productService)
-            )
-            .setControllerAdvice(GlobalExceptionHandler())
-            .addFilters<StandaloneMockMvcBuilder>(CorrelationIdFilter())
-            .build()
+        mockMvc = mockMvcFor(productService)
+        // The stock change contract belongs to the service, so these requests run
+        // through a real ProductService over a mocked repository.
+        productRepository = mock(ProductRepository::class.java)
+        stockContractMockMvc = mockMvcFor(ProductService(productRepository))
     }
+
+    private fun mockMvcFor(service: ProductService): MockMvc = MockMvcBuilders
+        .standaloneSetup(
+            ProductAdminController(service),
+            ProductPublicController(service)
+        )
+        .setControllerAdvice(GlobalExceptionHandler())
+        .addFilters<StandaloneMockMvcBuilder>(CorrelationIdFilter())
+        .build()
 
     @Test
     fun `create requires stock quantity`() {
@@ -72,6 +86,114 @@ class ProductAdminControllerValidationTest {
             jsonPath("$.code") { value("VALIDATION_FAILED") }
             jsonPath("$.fieldErrors[0].field") { value("stockQuantity") }
             jsonPath("$.fieldErrors[0].code") { value("Min") }
+        }
+    }
+
+    @Test
+    fun `update rejects negative expected stock quantity`() {
+        mockMvc.patch("/api/admin/products/1") {
+            contentType = MediaType.APPLICATION_JSON
+            content = """{"stockQuantity":1,"expectedStockQuantity":-1}"""
+        }.andExpect {
+            status { isBadRequest() }
+            jsonPath("$.code") { value("VALIDATION_FAILED") }
+            jsonPath("$.fieldErrors[0].field") { value("expectedStockQuantity") }
+            jsonPath("$.fieldErrors[0].code") { value("Min") }
+        }
+    }
+
+    @Test
+    fun `update without stock fields edits the product and leaves the stock alone`() {
+        val current = storedProduct(stockQuantity = 5)
+        `when`(productRepository.findById(1L)).thenReturn(current, current.copy(name = "Renamed"))
+
+        stockContractMockMvc.patch("/api/admin/products/1") {
+            contentType = MediaType.APPLICATION_JSON
+            content = """{"name":"Renamed"}"""
+        }.andExpect {
+            status { isOk() }
+            jsonPath("$.name") { value("Renamed") }
+            jsonPath("$.stockQuantity") { value(5) }
+        }
+
+        verify(productRepository).update(current.copy(name = "Renamed"))
+        verify(productRepository, never()).compareAndSetStock(anyLong(), anyInt(), anyInt())
+    }
+
+    @Test
+    fun `update rejects a stock quantity sent without the expected value`() {
+        // What an admin page from before this contract sends on every save.
+        stockContractMockMvc.patch("/api/admin/products/1") {
+            contentType = MediaType.APPLICATION_JSON
+            content = """{"name":"Renamed","stockQuantity":8}"""
+        }.andExpect {
+            status { isBadRequest() }
+            jsonPath("$.code") { value("VALIDATION_FAILED") }
+        }
+
+        verifyNoInteractions(productRepository)
+    }
+
+    @Test
+    fun `update rejects an expected value sent without a stock quantity`() {
+        stockContractMockMvc.patch("/api/admin/products/1") {
+            contentType = MediaType.APPLICATION_JSON
+            content = """{"name":"Renamed","expectedStockQuantity":5}"""
+        }.andExpect {
+            status { isBadRequest() }
+            jsonPath("$.code") { value("VALIDATION_FAILED") }
+        }
+
+        verifyNoInteractions(productRepository)
+    }
+
+    @Test
+    fun `update skips the stock write when the stock is sent unchanged`() {
+        // The form still shows the five it loaded; checkout has since taken two.
+        val current = storedProduct(stockQuantity = 3)
+        `when`(productRepository.findById(1L)).thenReturn(current, current.copy(name = "Renamed"))
+
+        stockContractMockMvc.patch("/api/admin/products/1") {
+            contentType = MediaType.APPLICATION_JSON
+            content = """{"name":"Renamed","stockQuantity":5,"expectedStockQuantity":5}"""
+        }.andExpect {
+            status { isOk() }
+            jsonPath("$.stockQuantity") { value(3) }
+        }
+
+        verify(productRepository).update(current.copy(name = "Renamed"))
+        verify(productRepository, never()).compareAndSetStock(anyLong(), anyInt(), anyInt())
+    }
+
+    @Test
+    fun `update applies a stock change that still matches the expected value`() {
+        val current = storedProduct(stockQuantity = 5)
+        `when`(productRepository.findById(1L)).thenReturn(current, current.copy(stockQuantity = 8))
+        `when`(productRepository.compareAndSetStock(1L, 5, 8)).thenReturn(true)
+
+        stockContractMockMvc.patch("/api/admin/products/1") {
+            contentType = MediaType.APPLICATION_JSON
+            content = """{"stockQuantity":8,"expectedStockQuantity":5}"""
+        }.andExpect {
+            status { isOk() }
+            jsonPath("$.stockQuantity") { value(8) }
+        }
+
+        verify(productRepository).compareAndSetStock(1L, 5, 8)
+    }
+
+    @Test
+    fun `update answers a stale stock change with 409 PRODUCT_STOCK_CONFLICT`() {
+        `when`(productRepository.findById(1L)).thenReturn(storedProduct(stockQuantity = 3))
+        `when`(productRepository.compareAndSetStock(1L, 5, 8)).thenReturn(false)
+
+        stockContractMockMvc.patch("/api/admin/products/1") {
+            contentType = MediaType.APPLICATION_JSON
+            content = """{"name":"Renamed","stockQuantity":8,"expectedStockQuantity":5}"""
+        }.andExpect {
+            status { isConflict() }
+            jsonPath("$.code") { value("PRODUCT_STOCK_CONFLICT") }
+            jsonPath("$.status") { value(409) }
         }
     }
 
@@ -137,4 +259,13 @@ class ProductAdminControllerValidationTest {
                 jsonPath("$.code") { value("PRODUCT_NOT_FOUND") }
             }
     }
+
+    private fun storedProduct(stockQuantity: Int) = Product(
+        id = 1L,
+        name = "Product",
+        price = 1_000L,
+        stockQuantity = stockQuantity,
+        imageUrl = null,
+        description = null
+    )
 }

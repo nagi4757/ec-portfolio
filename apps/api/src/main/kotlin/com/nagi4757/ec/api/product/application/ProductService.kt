@@ -6,6 +6,8 @@ import com.nagi4757.ec.api.product.domain.model.Product
 import com.nagi4757.ec.api.product.domain.repository.ProductRepository
 import com.nagi4757.ec.api.product.domain.repository.ProductSearchCondition
 import com.nagi4757.ec.api.common.error.ApiErrorCode
+import com.nagi4757.ec.api.common.error.IncompleteStockChangeException
+import com.nagi4757.ec.api.common.error.ProductStockConflictException
 import com.nagi4757.ec.api.common.error.ResourceNotFoundException
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
@@ -69,19 +71,36 @@ class ProductService(
         return getRequired(newId)
     }
 
+    /**
+     * The stock is not written back with the other fields: checkout and refunds may
+     * have moved it since the product was read. A stock change applies only while the
+     * stock is still the one the admin saw, and otherwise fails the whole edit.
+     */
     @Transactional
     fun update(id: Long, cmd: UpdateProductCommand): Product {
+        val target = cmd.stockQuantity
+        val expected = cmd.expectedStockQuantity
+        if ((target == null) != (expected == null)) throw IncompleteStockChangeException()
+
         val current = productRepository.findById(id)
             ?: throw ResourceNotFoundException(ApiErrorCode.PRODUCT_NOT_FOUND)
         val updated = current.copy(
             name = cmd.name ?: current.name,
             price = cmd.price ?: current.price,
-            stockQuantity = cmd.stockQuantity ?: current.stockQuantity,
             imageUrl = cmd.imageUrl ?: current.imageUrl,
             description = cmd.description ?: current.description,
             active = cmd.active ?: current.active
         )
         productRepository.update(updated)
+
+        // Sending back the stock the form was loaded with is not a change, whatever
+        // the stock has become since.
+        if (target != null && expected != null && target != expected &&
+            !productRepository.compareAndSetStock(id, expected, target)
+        ) {
+            // Thrown out of this transaction, it rolls back the field update above too.
+            throw ProductStockConflictException()
+        }
         return getRequired(id)
     }
 

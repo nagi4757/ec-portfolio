@@ -12,9 +12,12 @@ import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Test
+import org.mockito.ArgumentMatchers.anyInt
+import org.mockito.ArgumentMatchers.anyLong
 import org.mockito.Mockito.mock
 import org.mockito.Mockito.never
 import org.mockito.Mockito.verify
+import org.mockito.Mockito.verifyNoInteractions
 import org.mockito.Mockito.`when`
 
 class ProductServiceTest {
@@ -55,18 +58,77 @@ class ProductServiceTest {
         productService.update(1L, UpdateProductCommand(name = "Updated"))
 
         verify(productRepository).update(current.copy(name = "Updated"))
+        verify(productRepository, never()).compareAndSetStock(anyLong(), anyInt(), anyInt())
     }
 
     @Test
-    fun `update replaces stock quantity when provided`() {
+    fun `update replaces stock quantity when it still matches the expected value`() {
         val current = product(stockQuantity = 6).copy(id = 1L)
         val updated = current.copy(stockQuantity = 2)
         `when`(productRepository.findById(1L)).thenReturn(current, updated)
+        `when`(productRepository.compareAndSetStock(1L, 6, 2)).thenReturn(true)
 
-        val result = productService.update(1L, UpdateProductCommand(stockQuantity = 2))
+        val result = productService.update(
+            1L,
+            UpdateProductCommand(stockQuantity = 2, expectedStockQuantity = 6)
+        )
 
-        verify(productRepository).update(updated)
+        // The field write never carries the stock; only the compare-and-set does.
+        verify(productRepository).update(current)
+        verify(productRepository).compareAndSetStock(1L, 6, 2)
         assertEquals(2, result.stockQuantity)
+    }
+
+    @Test
+    fun `update reports a conflict when the stock moved since it was loaded`() {
+        // Checkout took two units after the admin loaded a stock of six.
+        val current = product(stockQuantity = 4).copy(id = 1L)
+        `when`(productRepository.findById(1L)).thenReturn(current)
+        `when`(productRepository.compareAndSetStock(1L, 6, 2)).thenReturn(false)
+
+        val exception = assertThrows(ApplicationException::class.java) {
+            productService.update(
+                1L,
+                UpdateProductCommand(name = "Updated", stockQuantity = 2, expectedStockQuantity = 6)
+            )
+        }
+
+        assertEquals(ApiErrorCode.PRODUCT_STOCK_CONFLICT, exception.errorCode)
+    }
+
+    @Test
+    fun `update leaves the stock alone when it is sent unchanged`() {
+        // The form still shows the six it loaded; checkout has since taken two.
+        val current = product(stockQuantity = 4).copy(id = 1L)
+        `when`(productRepository.findById(1L)).thenReturn(current)
+
+        productService.update(
+            1L,
+            UpdateProductCommand(name = "Updated", stockQuantity = 6, expectedStockQuantity = 6)
+        )
+
+        verify(productRepository).update(current.copy(name = "Updated"))
+        verify(productRepository, never()).compareAndSetStock(anyLong(), anyInt(), anyInt())
+    }
+
+    @Test
+    fun `update rejects a stock quantity without the expected value`() {
+        val exception = assertThrows(ApplicationException::class.java) {
+            productService.update(1L, UpdateProductCommand(name = "Updated", stockQuantity = 2))
+        }
+
+        assertEquals(ApiErrorCode.VALIDATION_FAILED, exception.errorCode)
+        verifyNoInteractions(productRepository)
+    }
+
+    @Test
+    fun `update rejects an expected value without a stock quantity`() {
+        val exception = assertThrows(ApplicationException::class.java) {
+            productService.update(1L, UpdateProductCommand(name = "Updated", expectedStockQuantity = 6))
+        }
+
+        assertEquals(ApiErrorCode.VALIDATION_FAILED, exception.errorCode)
+        verifyNoInteractions(productRepository)
     }
 
     @Test

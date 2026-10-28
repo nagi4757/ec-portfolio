@@ -81,15 +81,26 @@
         VALUES (#{name}, #{price}, #{stockQuantity}, #{imageUrl}, #{description}, #{active})
     </insert>
 
+    <!--
+        stock_quantity is deliberately absent. Checkout, cancellations and refunds move
+        it concurrently, so writing back the value read earlier would undo theirs. Stock
+        changes go through compareAndSetStock instead.
+    -->
     <update id="update">
         UPDATE products
         SET name = #{name},
             price = #{price},
-            stock_quantity = #{stockQuantity},
             image_url = #{imageUrl},
             description = #{description},
             active = #{active}
         WHERE id = #{id}
+    </update>
+
+    <update id="compareAndSetStock">
+        UPDATE products
+        SET stock_quantity = #{quantity}
+        WHERE id = #{productId}
+          AND stock_quantity = #{expectedQuantity}
     </update>
 
     <update id="decreaseStockIfAvailable">

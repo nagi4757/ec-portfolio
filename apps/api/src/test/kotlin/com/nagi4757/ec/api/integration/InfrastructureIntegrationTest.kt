@@ -704,11 +704,32 @@ class InfrastructureIntegrationTest @Autowired constructor(
             )
         )
 
+        // Read straight from the column, past the MyBatis mapping.
+        fun storedStock(): Int? = jdbcTemplate.queryForObject(
+            "SELECT stock_quantity FROM products WHERE id = ?", Int::class.java, productId
+        )
+
         val created = requireNotNull(productRepository.findById(productId))
         assertThat(created.stockQuantity).isEqualTo(12)
 
-        assertThat(productRepository.update(created.copy(stockQuantity = 4))).isTrue()
+        // The field update writes the other fields but never the stock, even when it is
+        // handed a product whose stock differs.
+        val renamed = created.copy(name = "${created.name}-renamed", stockQuantity = 4)
+        assertThat(productRepository.update(renamed)).isTrue()
+        val updated = requireNotNull(productRepository.findById(productId))
+        assertThat(updated.name).isEqualTo(renamed.name)
+        assertThat(updated.stockQuantity).isEqualTo(12)
+        assertThat(storedStock()).isEqualTo(12)
+
+        // The stock changes only through compare-and-set against the current value.
+        assertThat(productRepository.compareAndSetStock(productId, 12, 4)).isTrue()
         assertThat(productRepository.findById(productId)?.stockQuantity).isEqualTo(4)
+        assertThat(storedStock()).isEqualTo(4)
+
+        // 12 is stale now, so the change is refused and the stock is left as it was.
+        assertThat(productRepository.compareAndSetStock(productId, 12, 9)).isFalse()
+        assertThat(productRepository.findById(productId)?.stockQuantity).isEqualTo(4)
+        assertThat(storedStock()).isEqualTo(4)
     }
 
     @Test
