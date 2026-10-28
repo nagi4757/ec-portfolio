@@ -4,6 +4,7 @@ import com.nagi4757.ec.api.common.error.GlobalExceptionHandler
 import com.nagi4757.ec.api.common.logging.CorrelationIdFilter
 import com.nagi4757.ec.api.product.application.ProductService
 import com.nagi4757.ec.api.product.domain.model.Product
+import com.nagi4757.ec.api.product.domain.repository.ProductFieldChanges
 import com.nagi4757.ec.api.product.domain.repository.ProductRepository
 import com.nagi4757.ec.api.product.presentation.admin.ProductAdminController
 import com.nagi4757.ec.api.product.presentation.public.ProductPublicController
@@ -13,8 +14,10 @@ import org.mockito.ArgumentMatchers.anyInt
 import org.mockito.ArgumentMatchers.anyLong
 import org.mockito.Mockito.mock
 import org.mockito.Mockito.never
+import org.mockito.Mockito.times
 import org.mockito.Mockito.verify
 import org.mockito.Mockito.verifyNoInteractions
+import org.mockito.Mockito.verifyNoMoreInteractions
 import org.mockito.Mockito.`when`
 import org.springframework.http.MediaType
 import org.springframework.test.web.servlet.MockMvc
@@ -116,8 +119,44 @@ class ProductAdminControllerValidationTest {
             jsonPath("$.stockQuantity") { value(5) }
         }
 
-        verify(productRepository).update(current.copy(name = "Renamed"))
+        verify(productRepository).updateFields(1L, ProductFieldChanges(name = "Renamed"))
         verify(productRepository, never()).compareAndSetStock(anyLong(), anyInt(), anyInt())
+    }
+
+    @Test
+    fun `update writes only the fields the request carries`() {
+        `when`(productRepository.findById(1L)).thenReturn(storedProduct(stockQuantity = 5))
+
+        // An explicit null still means "leave it"; zero, false and "" are values.
+        stockContractMockMvc.patch("/api/admin/products/1") {
+            contentType = MediaType.APPLICATION_JSON
+            content = """{"price":0,"active":false,"description":"","imageUrl":null}"""
+        }.andExpect {
+            status { isOk() }
+        }
+
+        verify(productRepository).updateFields(
+            1L,
+            ProductFieldChanges(price = 0L, description = "", active = false)
+        )
+        verify(productRepository, never()).compareAndSetStock(anyLong(), anyInt(), anyInt())
+    }
+
+    @Test
+    fun `reactivation writes only the active state`() {
+        val inactive = storedProduct(stockQuantity = 5).copy(active = false)
+        `when`(productRepository.findById(1L)).thenReturn(inactive, inactive.copy(active = true))
+
+        // What the product list sends to put a product back on sale.
+        stockContractMockMvc.patch("/api/admin/products/1") {
+            contentType = MediaType.APPLICATION_JSON
+            content = """{"active":true}"""
+        }.andExpect {
+            status { isOk() }
+            jsonPath("$.active") { value(true) }
+        }
+
+        verify(productRepository).updateFields(1L, ProductFieldChanges(active = true))
     }
 
     @Test
@@ -161,7 +200,7 @@ class ProductAdminControllerValidationTest {
             jsonPath("$.stockQuantity") { value(3) }
         }
 
-        verify(productRepository).update(current.copy(name = "Renamed"))
+        verify(productRepository).updateFields(1L, ProductFieldChanges(name = "Renamed"))
         verify(productRepository, never()).compareAndSetStock(anyLong(), anyInt(), anyInt())
     }
 
@@ -179,7 +218,10 @@ class ProductAdminControllerValidationTest {
             jsonPath("$.stockQuantity") { value(8) }
         }
 
+        // A stock-only edit writes nothing but the stock.
+        verify(productRepository, times(2)).findById(1L)
         verify(productRepository).compareAndSetStock(1L, 5, 8)
+        verifyNoMoreInteractions(productRepository)
     }
 
     @Test

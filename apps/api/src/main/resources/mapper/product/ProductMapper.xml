@@ -82,17 +82,21 @@
     </insert>
 
     <!--
-        stock_quantity is deliberately absent. Checkout, cancellations and refunds move
-        it concurrently, so writing back the value read earlier would undo theirs. Stock
-        changes go through compareAndSetStock instead.
+        Only the columns the edit sets. A null property is "leave it": writing back what
+        was read would undo a deactivation or another admin's change committed in between.
+        An empty string is a value. stock_quantity is never set here: checkout,
+        cancellations and refunds move it concurrently, so it changes through
+        compareAndSetStock instead.
     -->
-    <update id="update">
+    <update id="updateFields">
         UPDATE products
-        SET name = #{name},
-            price = #{price},
-            image_url = #{imageUrl},
-            description = #{description},
-            active = #{active}
+        <set>
+            <if test="name != null">name = #{name},</if>
+            <if test="price != null">price = #{price},</if>
+            <if test="imageUrl != null">image_url = #{imageUrl},</if>
+            <if test="description != null">description = #{description},</if>
+            <if test="active != null">active = #{active},</if>
+        </set>
         WHERE id = #{id}
     </update>
 

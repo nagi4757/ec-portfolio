@@ -39,15 +39,16 @@ import java.util.concurrent.Future
 import java.util.concurrent.TimeUnit
 
 /**
- * Admin product edits against the stock that checkout and refunds move at the same time.
+ * Admin product edits against whatever else changes the product at the same time: the
+ * stock that checkout and refunds move, a deactivation or reactivation, another edit.
  *
- * An edit reads the product and writes it back. A reservation, cancellation or refund
- * that commits in between must survive that write. Whether it does depends on how
- * InnoDB orders the row lock, so only the real database can show it.
+ * An edit reads the product before it writes. A change that commits in between must
+ * survive that write. Whether it does depends on how InnoDB orders the row lock, so only
+ * the real database can show it.
  *
  * The interleavings are forced rather than hoped for: the competing transaction is held
  * open, and it commits only once InnoDB reports the edit queued behind its row lock.
- * That is the moment the edit has already read the old stock but not yet written.
+ * That is the moment the edit has already read the old row but not yet written.
  */
 @Tag("integration")
 @Testcontainers
@@ -292,7 +293,142 @@ class ProductStockConcurrencyIntegrationTest @Autowired constructor(
         }
     }
 
+    // --- an edit against a change of the active state ------------------------------
+
+    @Test
+    fun `an edit queued behind a deactivation leaves the product off sale`() {
+        val productId = newProduct(stock = 10)
+        val executor = Executors.newFixedThreadPool(2)
+
+        try {
+            val deactivation = holdOpen(executor) { productService.deactivate(productId) }
+            val edit = executor.submit<Product> {
+                productService.update(productId, fullFormSave(name = "renamed"))
+            }
+            awaitQueuedBehind(deactivation)
+            deactivation.commit()
+            edit.get(10, TimeUnit.SECONDS)
+
+            assertThat(stored(productId)).isEqualTo(StoredProduct("renamed", ORIGINAL_PRICE, 10))
+            assertThat(isActive(productId)).isFalse()
+            // Off sale also means checkout cannot take its stock.
+            assertThat(productRepository.decreaseStockIfAvailable(productId, 1)).isFalse()
+        } finally {
+            executor.shutdownNow()
+            deleteProduct(productId)
+        }
+    }
+
+    @Test
+    fun `an edit queued behind a reactivation leaves the product on sale`() {
+        val productId = newProduct(stock = 10, active = false)
+        val executor = Executors.newFixedThreadPool(2)
+
+        try {
+            val reactivation = holdOpen(executor) {
+                productService.update(productId, UpdateProductCommand(active = true))
+            }
+            val edit = executor.submit<Product> {
+                productService.update(productId, fullFormSave(name = "renamed"))
+            }
+            awaitQueuedBehind(reactivation)
+            reactivation.commit()
+            edit.get(10, TimeUnit.SECONDS)
+
+            assertThat(stored(productId)).isEqualTo(StoredProduct("renamed", ORIGINAL_PRICE, 10))
+            assertThat(isActive(productId)).isTrue()
+        } finally {
+            executor.shutdownNow()
+            deleteProduct(productId)
+        }
+    }
+
+    @Test
+    fun `a reactivation queued behind an edit keeps the edited fields`() {
+        val productId = newProduct(stock = 10, active = false)
+        val executor = Executors.newFixedThreadPool(2)
+
+        try {
+            val edit = holdOpen(executor) {
+                productService.update(productId, UpdateProductCommand(name = "renamed", price = 2_000L))
+            }
+            val reactivation = executor.submit<Product> {
+                productService.update(productId, UpdateProductCommand(active = true))
+            }
+            awaitQueuedBehind(edit)
+            edit.commit()
+            reactivation.get(10, TimeUnit.SECONDS)
+
+            assertThat(stored(productId)).isEqualTo(StoredProduct("renamed", 2_000L, 10))
+            assertThat(isActive(productId)).isTrue()
+        } finally {
+            executor.shutdownNow()
+            deleteProduct(productId)
+        }
+    }
+
+    @Test
+    fun `a stock change queued behind a deactivation leaves the product off sale`() {
+        val productId = newProduct(stock = 10)
+        val executor = Executors.newFixedThreadPool(2)
+
+        try {
+            val deactivation = holdOpen(executor) { productService.deactivate(productId) }
+            val restock = executor.submit<Product> {
+                productService.update(
+                    productId,
+                    UpdateProductCommand(stockQuantity = 25, expectedStockQuantity = 10)
+                )
+            }
+            awaitQueuedBehind(deactivation)
+            deactivation.commit()
+            restock.get(10, TimeUnit.SECONDS)
+
+            assertThat(stored(productId).stock).isEqualTo(25)
+            assertThat(isActive(productId)).isFalse()
+        } finally {
+            executor.shutdownNow()
+            deleteProduct(productId)
+        }
+    }
+
+    // --- an edit against an edit of other fields -----------------------------------
+
+    @Test
+    fun `edits of different fields queued behind each other both stand`() {
+        val productId = newProduct(stock = 10)
+        val executor = Executors.newFixedThreadPool(2)
+
+        try {
+            val repricing = holdOpen(executor) {
+                productService.update(productId, UpdateProductCommand(price = 2_000L))
+            }
+            val renaming = executor.submit<Product> {
+                productService.update(productId, UpdateProductCommand(name = "renamed"))
+            }
+            awaitQueuedBehind(repricing)
+            repricing.commit()
+            renaming.get(10, TimeUnit.SECONDS)
+
+            assertThat(stored(productId)).isEqualTo(StoredProduct("renamed", 2_000L, 10))
+        } finally {
+            executor.shutdownNow()
+            deleteProduct(productId)
+        }
+    }
+
     // --- helpers -------------------------------------------------------------------
+
+    /**
+     * A save from an edit form that sends every field as loaded, the one being changed
+     * aside. Such a form never carries the active state.
+     */
+    private fun fullFormSave(name: String) = UpdateProductCommand(
+        name = name,
+        price = ORIGINAL_PRICE,
+        imageUrl = "",
+        description = ""
+    )
 
     /** Renames, reprices and restocks a product the admin loaded with a stock of 10. */
     private fun staleStockChange() = UpdateProductCommand(
@@ -377,6 +513,10 @@ class ProductStockConcurrencyIntegrationTest @Autowired constructor(
         )
     )
 
+    private fun isActive(productId: Long): Boolean = requireNotNull(
+        jdbcTemplate.queryForObject("SELECT active FROM products WHERE id = ?", Boolean::class.java, productId)
+    )
+
     private fun unitsHeldByOrders(productId: Long): Int = requireNotNull(
         jdbcTemplate.queryForObject(
             "SELECT COALESCE(SUM(quantity), 0) FROM order_items WHERE product_id = ?",
@@ -385,7 +525,7 @@ class ProductStockConcurrencyIntegrationTest @Autowired constructor(
         )
     )
 
-    private fun newProduct(stock: Int): Long = productRepository.create(
+    private fun newProduct(stock: Int, active: Boolean = true): Long = productRepository.create(
         Product(
             id = null,
             name = ORIGINAL_NAME,
@@ -393,7 +533,7 @@ class ProductStockConcurrencyIntegrationTest @Autowired constructor(
             stockQuantity = stock,
             imageUrl = null,
             description = null,
-            active = true
+            active = active
         )
     )
 
