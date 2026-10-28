@@ -3,7 +3,8 @@
 # Tests for the Phase 6C-5c measurement plan gate (measurement-plan-gate.sh).
 #
 # Everything runs on small synthetic plan JSON built here: one plan per mode
-# that must pass, then mutants of them that must each fail. The reviewed policy
+# that must pass, then mutants of them that must each fail, and drift
+# allowances the gate must refuse. The reviewed policy
 # documents are fixtures too; the comparison with the real documents of the
 # Access IaC README happens when the gate runs on a saved plan.
 #
@@ -169,6 +170,32 @@ plan true "$(jq -c 'to_entries | map(
     elif .key == "aws_autoscaling_group.ecs_spot_measurement[0]" then {address: .key, mode: "managed", change: {actions: ["update"], before: .value, after: .value}}
     else {address: .key, mode: "managed", change: {actions: ["no-op"], before: .value, after: .value}} end)' <<<"$measurement_after")" >switch.json
 
+# The origin Elastic IP as a refresh reads it once a cutover has moved it to a
+# Spot host: the five association-derived attributes change and nothing else
+# does. A subset of the aws_eip attributes, enough for each to be compared.
+eip_before="$(jq -cn '{allocation_id: "eipalloc-0123456789abcdef0", association_id: "eipassoc-0123456789abcdef0",
+  domain: "vpc", id: "eipalloc-0123456789abcdef0", instance: "i-0123456789abcdef0", network_border_group: "ap-northeast-1",
+  network_interface: "eni-0123456789abcdef0", private_dns: "ip-10-20-0-10.ap-northeast-1.compute.internal",
+  private_ip: "10.20.0.10", public_dns: "ec2-203-0-113-10.ap-northeast-1.compute.amazonaws.com", public_ip: "203.0.113.10",
+  public_ipv4_pool: "amazon", tags: {Name: "ec-portfolio-demo-ec2-origin"},
+  tags_all: {Name: "ec-portfolio-demo-ec2-origin", Project: "ec-portfolio", Environment: "demo", Owner: "fixture"}}')"
+eip_drift="$(jq -cn --argjson before "$eip_before" '{address: "aws_eip.ec2_origin", mode: "managed", type: "aws_eip",
+  name: "ec2_origin", provider_name: "registry.terraform.io/hashicorp/aws",
+  change: {actions: ["update"], before: $before,
+    after: ($before + {association_id: "eipassoc-0fedcba9876543210", instance: "i-0fedcba9876543210",
+      network_interface: "eni-0fedcba9876543210", private_dns: "ip-10-20-0-20.ap-northeast-1.compute.internal",
+      private_ip: "10.20.0.20"}),
+    after_unknown: {}, before_sensitive: {tags: {}, tags_all: {}}, after_sensitive: {tags: {}, tags_all: {}}}}')"
+for base in merge enable switch teardown; do
+    jq --argjson drift "$eip_drift" '.resource_drift = [$drift]' "$base.json" >"$base-drift.json"
+done
+
+# The allowance an operator gives after reading that drift in the saved plan:
+# each attribute named on its own.
+cutover_allowance=(--allow-drift aws_eip.ec2_origin:association_id --allow-drift aws_eip.ec2_origin:instance
+    --allow-drift aws_eip.ec2_origin:network_interface --allow-drift aws_eip.ec2_origin:private_dns
+    --allow-drift aws_eip.ec2_origin:private_ip)
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
@@ -205,6 +232,18 @@ expect_reject() {
     mutants=$((mutants + 1))
 }
 
+refused=0
+# expect_fail <mode> <plan> <expected message part> [gate options...]: the plan
+# as it is, refused for the drift allowance given.
+expect_fail() {
+    local mode="$1" plan_file="$2" expected="$3"
+    shift 3
+    run_gate "$mode" "$plan_file" "$@"
+    ((gate_status == 1)) || fail "expected FAIL for $mode $plan_file $* (exit $gate_status): $gate_output"
+    [[ "$gate_output" == *"$expected"* ]] || fail "$mode $plan_file $* failed for another reason: $gate_output"
+    refused=$((refused + 1))
+}
+
 # --- 1. each mode passes on its own plan --------------------------------------
 
 expect_pass merge merge.json
@@ -213,13 +252,27 @@ expect_pass switch switch.json
 expect_pass teardown teardown.json
 [[ "$gate_output" == *"delete=13"* ]] || fail "the teardown summary must count 13 deletes: $gate_output"
 
-# Allowed drift passes only for the named address.
-jq '.resource_drift = [{address: "aws_eip.ec2_origin"}]' merge.json >drift.json
-expect_pass merge drift.json --allow-drift aws_eip.ec2_origin
-for allowed in "" "--allow-drift aws_instance.demo"; do
-    run_gate merge drift.json ${allowed}
-    [[ "$gate_status" == 1 && "$gate_output" == *"PG4 drift not allowed: aws_eip.ec2_origin"* ]] ||
-        fail "drift of another address must fail (${allowed:-no allowance}): $gate_output"
+# Drift passes in every mode when each attribute it changes is named, and an
+# allowance for drift the plan does not have changes nothing. A narrower drift
+# needs only its own attribute: the address associated again with the same
+# host moves only the association ID.
+for mode in merge enable switch teardown; do
+    expect_pass "$mode" "$mode-drift.json" "${cutover_allowance[@]}"
+done
+expect_pass merge merge.json "${cutover_allowance[@]}"
+jq '.resource_drift[0].change |= (.after += (.before | {instance, network_interface, private_dns, private_ip}))' \
+    merge-drift.json >reassociated.json
+expect_pass merge reassociated.json --allow-drift aws_eip.ec2_origin:association_id
+
+# None of the five is allowed unless named: without an allowance the drift fails
+# on the address, and leaving out any one attribute fails on that one.
+expect_fail merge merge-drift.json "PG4 drift not allowed: aws_eip.ec2_origin"
+for omitted in association_id instance network_interface private_dns private_ip; do
+    set --
+    for attribute in association_id instance network_interface private_dns private_ip; do
+        [[ "$attribute" == "$omitted" ]] || set -- "$@" --allow-drift "aws_eip.ec2_origin:$attribute"
+    done
+    expect_fail merge merge-drift.json "PG4 drift not allowed: aws_eip.ec2_origin $omitted" "$@"
 done
 
 # --- 2. the wrong mode for a plan fails ---------------------------------------
@@ -334,4 +387,118 @@ expect_reject enable enable.json "PG5 policy name" 'after("aws_iam_role_policy.e
 "$GATE" enable enable.json >gate.out 2>&1 && fail "enable without reviewed documents must fail" || true
 grep -q "enable needs --reviewed-host-policy and --reviewed-exec-policy" gate.out || fail "enable without documents: $(cat gate.out)"
 
-printf '[measurement-plan-gate-test] PASS (4 modes, %d mutants rejected)\n' "$mutants"
+# --- 8. PG4: drift, one attribute at a time -----------------------------------
+
+# Every mutant keeps the whole cutover allowance: the drift itself must fail.
+eip='.resource_drift[0].change'
+
+# Any other attribute of the origin Elastic IP fails, named, in every mode.
+expect_reject merge merge-drift.json "PG4 drift not allowed: aws_eip.ec2_origin tags" \
+    "$eip.after.tags.Name = \"ec-portfolio-demo-ec2-origin-renamed\"" "${cutover_allowance[@]}"
+expect_reject merge merge-drift.json "PG4 drift not allowed: aws_eip.ec2_origin tags" \
+    "$eip.after.tags.Owner = \"someone-else\"" "${cutover_allowance[@]}"
+expect_reject merge merge-drift.json "PG4 drift not allowed: aws_eip.ec2_origin tags_all" \
+    "$eip.after.tags_all |= del(.Environment)" "${cutover_allowance[@]}"
+expect_reject merge merge-drift.json "PG4 drift not allowed: aws_eip.ec2_origin domain" \
+    "$eip.after.domain = \"standard\"" "${cutover_allowance[@]}"
+for attribute in allocation_id id public_ip public_dns network_border_group public_ipv4_pool; do
+    expect_reject merge merge-drift.json "PG4 drift not allowed: aws_eip.ec2_origin $attribute" \
+        "$eip.after.$attribute += \"-changed\"" "${cutover_allowance[@]}"
+done
+expect_reject enable enable-drift.json "PG4 drift not allowed: aws_eip.ec2_origin tags" \
+    "$eip.after.tags = {}" "${cutover_allowance[@]}"
+expect_reject switch switch-drift.json "PG4 drift not allowed: aws_eip.ec2_origin public_ip" \
+    "$eip.after.public_ip = \"198.51.100.20\"" "${cutover_allowance[@]}"
+expect_reject teardown teardown-drift.json "PG4 drift not allowed: aws_eip.ec2_origin domain" \
+    "$eip.after.domain = \"standard\"" "${cutover_allowance[@]}"
+
+# An attribute that appears or disappears fails, allowed or not.
+expect_reject merge merge-drift.json "PG4 drift of aws_eip.ec2_origin adds or removes customer_owned_ip" \
+    "$eip.after.customer_owned_ip = \"198.51.100.30\"" "${cutover_allowance[@]}"
+expect_reject merge merge-drift.json "PG4 drift of aws_eip.ec2_origin adds or removes tags" \
+    "$eip.after |= del(.tags)" "${cutover_allowance[@]}"
+expect_reject merge merge-drift.json "PG4 drift of aws_eip.ec2_origin adds or removes private_dns" \
+    "$eip.after |= del(.private_dns)" "${cutover_allowance[@]}"
+expect_reject merge merge-drift.json "PG4 drift of aws_eip.ec2_origin adds or removes instance" \
+    "$eip.before |= del(.instance)" "${cutover_allowance[@]}"
+
+# Only an update of known values is read: a delete outside Terraform, any other
+# action, a missing or malformed change, unknown values, a data source and an
+# update without a difference fail.
+expect_reject merge merge-drift.json "PG4 drift of aws_eip.ec2_origin is not an update" \
+    "$eip |= (.actions = [\"delete\"] | .after = null)" "${cutover_allowance[@]}"
+for actions in '["delete", "create"]' '["create"]' '["no-op"]' '[]'; do
+    expect_reject merge merge-drift.json "PG4 drift of aws_eip.ec2_origin is not an update" \
+        "$eip.actions = $actions" "${cutover_allowance[@]}"
+done
+expect_reject merge merge-drift.json "PG4 drift of aws_eip.ec2_origin is not an update" \
+    "$eip |= del(.actions)" "${cutover_allowance[@]}"
+expect_reject merge merge-drift.json "PG4 drift of aws_eip.ec2_origin is not an update" \
+    '.resource_drift[0] |= del(.change)' "${cutover_allowance[@]}"
+expect_reject merge merge-drift.json "PG4 drift of aws_eip.ec2_origin is not an update" \
+    '.resource_drift[0].change = "update"' "${cutover_allowance[@]}"
+for side in before after; do
+    expect_reject merge merge-drift.json "PG4 drift of aws_eip.ec2_origin has no object before and after" \
+        "$eip.$side = null" "${cutover_allowance[@]}"
+done
+expect_reject merge merge-drift.json "PG4 drift of aws_eip.ec2_origin has no object before and after" \
+    "$eip.after = \"203.0.113.10\"" "${cutover_allowance[@]}"
+for unknown in '{instance: true}' '{tags: {Name: true}}' '{tags_all: [false, {Owner: true}]}' 'true'; do
+    expect_reject merge merge-drift.json "PG4 drift of aws_eip.ec2_origin has unknown values" \
+        "$eip.after_unknown = $unknown" "${cutover_allowance[@]}"
+done
+expect_reject merge merge-drift.json "PG4 drift of aws_eip.ec2_origin has an unreadable after_unknown" \
+    "$eip.after_unknown = \"instance\"" "${cutover_allowance[@]}"
+expect_reject merge merge-drift.json "PG4 drift of aws_eip.ec2_origin is not a managed resource" \
+    '.resource_drift[0].mode = "data"' "${cutover_allowance[@]}"
+expect_reject merge merge-drift.json "PG4 drift of aws_eip.ec2_origin is not a managed resource" \
+    '.resource_drift[0] |= del(.mode)' "${cutover_allowance[@]}"
+expect_reject merge merge-drift.json "PG4 drift of aws_eip.ec2_origin changes no attribute" \
+    "$eip.after = $eip.before" "${cutover_allowance[@]}"
+
+# Each entry is judged on its own: a second entry for the address cannot hide a
+# forbidden change, after or before an allowed one, and is refused itself.
+expect_reject merge merge-drift.json "PG4 drift not allowed: aws_eip.ec2_origin tags" \
+    ".resource_drift += [.resource_drift[0] | .change.after.tags.Name = \"renamed\"]" "${cutover_allowance[@]}"
+expect_reject merge merge-drift.json "PG4 drift not allowed: aws_eip.ec2_origin tags" \
+    ".resource_drift = [.resource_drift[0] | .change.after.tags.Name = \"renamed\"] + .resource_drift" "${cutover_allowance[@]}"
+expect_reject merge merge-drift.json "PG4 drift of aws_eip.ec2_origin is listed more than once" \
+    '.resource_drift += .resource_drift' "${cutover_allowance[@]}"
+
+# Drift of any other address fails whatever is allowed for the Elastic IP, and
+# so does a drift list or entry the gate cannot read.
+expect_reject merge merge-drift.json "PG4 drift not allowed: aws_route53_record.origin_demo" \
+    '.resource_drift += [{address: "aws_route53_record.origin_demo", mode: "managed", change: {actions: ["update"],
+        before: {records: ["203.0.113.10"]}, after: {records: ["198.51.100.20"]}, after_unknown: {}}}]' "${cutover_allowance[@]}"
+expect_reject merge merge-drift.json "PG4 drift not allowed: aws_instance.demo" \
+    '.resource_drift += [{address: "aws_instance.demo", mode: "managed", change: {actions: ["update"],
+        before: {instance_state: "running"}, after: {instance_state: "stopped"}, after_unknown: {}}}]' "${cutover_allowance[@]}"
+expect_reject merge merge-drift.json "PG4 drift not allowed: aws_autoscaling_group.ecs_spot_measurement[0]" \
+    '.resource_drift += [{address: "aws_autoscaling_group.ecs_spot_measurement[0]", mode: "managed", change: {actions: ["update"],
+        before: {desired_capacity: 0}, after: {desired_capacity: 1}, after_unknown: {}}}]' "${cutover_allowance[@]}"
+expect_reject merge merge-drift.json "PG4 drift not allowed: aws_eip.ec2_origin[0]" \
+    '.resource_drift[0].address = "aws_eip.ec2_origin[0]"' "${cutover_allowance[@]}"
+expect_reject merge merge-drift.json "PG4 resource drift is not a list" \
+    '.resource_drift = {"aws_eip.ec2_origin": .resource_drift[0]}' "${cutover_allowance[@]}"
+expect_reject merge merge-drift.json "PG4 drift entry without an address" \
+    '.resource_drift[0] |= del(.address)' "${cutover_allowance[@]}"
+expect_reject merge merge-drift.json "PG4 drift entry without an address" \
+    '.resource_drift += ["aws_eip.ec2_origin"]' "${cutover_allowance[@]}"
+
+# The allowance is checked before the plan is read, here on a plan without
+# drift: the address-only form of earlier versions and malformed values, then
+# anything beyond the five attributes of the origin Elastic IP, are refused,
+# also next to a valid allowance.
+for allowance in "" aws_eip.ec2_origin aws_eip.ec2_origin: :instance; do
+    expect_fail merge merge.json "--allow-drift takes ADDRESS:ATTRIBUTE" --allow-drift "$allowance"
+done
+for allowance in aws_eip.ec2_origin:tags aws_eip.ec2_origin:tags_all aws_eip.ec2_origin:domain aws_eip.ec2_origin:public_ip \
+    aws_eip.ec2_origin:Instance "aws_eip.ec2_origin:instance,tags" "aws_eip.ec2_origin:*" aws_eip.ec2_origin:instance:tags \
+    "aws_eip.ec2_origin[0]:instance" aws_route53_record.origin_demo:records aws_instance.demo:instance_state; do
+    expect_fail merge merge.json "is outside the drift that may be allowed" --allow-drift "$allowance"
+done
+expect_fail merge merge-drift.json "is outside the drift that may be allowed" \
+    "${cutover_allowance[@]}" --allow-drift aws_eip.ec2_origin:tags
+
+printf '[measurement-plan-gate-test] PASS (4 modes, %d mutants rejected, %d runs refused for their drift allowance)\n' \
+    "$mutants" "$refused"
