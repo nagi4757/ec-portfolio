@@ -1,0 +1,641 @@
+{
+  "Comment": "P3-a real disabled-runtime definition; control table is empty until a separate approved arming session. Failures never broaden targets or authorization.",
+  "QueryLanguage": "JSONata",
+  "TimeoutSeconds": ${timeout_seconds},
+  "StartAt": "ReadMode",
+  "States": {
+    "ReadMode": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:getItem",
+      "Arguments": {
+        "TableName": "${table_name}",
+        "Key": {
+          "pk": {
+            "S": "mode"
+          }
+        },
+        "ConsistentRead": true
+      },
+      "Assign": {
+        "request": "{% $states.input %}",
+        "mode": "{% $exists($states.result.Item) ? $states.result.Item : {} %}"
+      },
+      "Next": "ReadMaintenance",
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failed"
+        }
+      ]
+    },
+    "ReadMaintenance": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:getItem",
+      "Arguments": {
+        "TableName": "${table_name}",
+        "Key": {
+          "pk": {
+            "S": "maintenance"
+          }
+        },
+        "ConsistentRead": true
+      },
+      "Assign": {
+        "maintenance": "{% $exists($states.result.Item.pk.S) %}"
+      },
+      "Next": "ArmGate",
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failed"
+        }
+      ]
+    },
+    "ArmGate": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Condition": "{% $exists($mode.pk.S) and $mode.enabled.BOOL = true and $mode.scope.S in ['production','rehearsal'] and $type($mode.approvalRef.S) = 'string' and $length($trim($mode.approvalRef.S)) > 0 and $maintenance = false and (($mode.scope.S = 'production' and $request.trigger in ['scheduler','event','manual'] and $not($exists($mode.armedUntil))) or ($mode.scope.S = 'rehearsal' and $request.trigger = 'manual' and $type($mode.armedUntil.S) = 'string' and $contains($mode.armedUntil.S, /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$/) and $toMillis($mode.armedUntil.S) > $millis() and $toMillis($mode.armedUntil.S) - $millis() <= ${rehearsal_arming_max_ms})) %}",
+          "Next": "Init"
+        }
+      ],
+      "Default": "NotArmed"
+    },
+    "Init": {
+      "Type": "Pass",
+      "Assign": {
+        "token": "{% $uuid() %}",
+        "runKey": "{% $request.trigger='event' and $type($request.event.id)='string' ? $request.event.id : $request.scheduledTime %}",
+        "startedAt": "{% $millis() %}",
+        "writeUntil": "{% $toMillis($states.context.Execution.StartTime) + ${write_window_ms} %}",
+        "redrive": "{% $exists($states.context.Execution.RedriveCount) ? $states.context.Execution.RedriveCount : 0 %}",
+        "polls": 0,
+        "attempts": 0,
+        "rdsWaitUntil": 0,
+        "odBootAt": 0,
+        "outcome": "ok",
+        "failure": "Runtime.Failed",
+        "target": "",
+        "holder": "",
+        "liveSha": "",
+        "tdArn": "",
+        "commandId": "",
+        "event": "{% $exists($request.event) ? $request.event : {} %}",
+        "nowJst": "{% $fromMillis($millis(), '[Y0001]-[M01]-[D01]T[H01]:[m01]:[s01]', '+0900') %}",
+        "dayKey": "{% 'day#' & $fromMillis($millis(), '[Y0001]-[M01]-[D01]', '+0900') %}"
+      },
+      "Next": "ValidateInput"
+    },
+    "ValidateInput": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Condition": "{% $request.trigger in ['scheduler','event','manual'] and $type($request.scheduledTime) = 'string' and $length($request.scheduledTime) > 0 and $length($request.scheduledTime) < 512 and $redrive = 0 and $millis() < $writeUntil and ($request.trigger = 'manual' or ($contains($request.scheduledTime, /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,9})?Z$/) and $toMillis($states.context.Execution.StartTime) - $toMillis($request.scheduledTime) >= -60000 and $toMillis($states.context.Execution.StartTime) - $toMillis($request.scheduledTime) <= 1200000)) and ($request.trigger!='event' or ($type($request.event.id)='string' and $length($request.event.id)>0 and $length($request.event.id)<=128)) %}",
+          "Next": "ReadLegacyRdsStart"
+        }
+      ],
+      "Default": "BadInput"
+    },
+    "ReadLegacyRdsStart": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:scheduler:getSchedule",
+      "Arguments": {
+        "GroupName": "${scheduler_group_name}",
+        "Name": "${name_prefix}-rds-start"
+      },
+      "Next": "ReadLegacyEc2Start",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "legacyRdsStart": "{% $states.result %}"
+      },
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failed"
+        }
+      ]
+    },
+    "ReadLegacyEc2Start": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:scheduler:getSchedule",
+      "Arguments": {
+        "GroupName": "${scheduler_group_name}",
+        "Name": "${name_prefix}-ec2-start"
+      },
+      "Next": "ReadLegacyEc2Stop",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "legacyEc2Start": "{% $states.result %}"
+      },
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failed"
+        }
+      ]
+    },
+    "ReadLegacyEc2Stop": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:scheduler:getSchedule",
+      "Arguments": {
+        "GroupName": "${scheduler_group_name}",
+        "Name": "${name_prefix}-ec2-stop"
+      },
+      "Next": "ReadLegacyRdsStop",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "legacyEc2Stop": "{% $states.result %}"
+      },
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failed"
+        }
+      ]
+    },
+    "ReadLegacyRdsStop": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:scheduler:getSchedule",
+      "Arguments": {
+        "GroupName": "${scheduler_group_name}",
+        "Name": "${name_prefix}-rds-stop"
+      },
+      "Next": "LegacyInterlock",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "legacyRdsStop": "{% $states.result %}"
+      },
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failed"
+        }
+      ]
+    },
+    "LegacyInterlock": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Condition": "{% (($mode.scope.S = 'production' ? ($legacyRdsStart.State = 'DISABLED' and $legacyRdsStart.ScheduleExpression = 'cron(50 9 ? * MON-FRI *)') : ($legacyRdsStart.State = 'ENABLED' and $legacyRdsStart.ScheduleExpression = 'cron(50 9 ? * MON-FRI *)')) and $legacyRdsStart.ScheduleExpressionTimezone = 'Asia/Tokyo' and $legacyRdsStart.FlexibleTimeWindow.Mode = 'OFF') and (($mode.scope.S = 'production' ? ($legacyEc2Start.State = 'DISABLED' and $legacyEc2Start.ScheduleExpression = 'cron(0 10 ? * MON-FRI *)') : ($legacyEc2Start.State = 'ENABLED' and $legacyEc2Start.ScheduleExpression = 'cron(0 10 ? * MON-FRI *)')) and $legacyEc2Start.ScheduleExpressionTimezone = 'Asia/Tokyo' and $legacyEc2Start.FlexibleTimeWindow.Mode = 'OFF') and (($mode.scope.S = 'production' ? ($legacyEc2Stop.State = 'ENABLED' and $legacyEc2Stop.ScheduleExpression = 'cron(15 0-6,22-23 * * ? *)') : ($legacyEc2Stop.State = 'ENABLED' and $legacyEc2Stop.ScheduleExpression = 'cron(0 17 ? * MON-FRI *)')) and $legacyEc2Stop.ScheduleExpressionTimezone = 'Asia/Tokyo' and $legacyEc2Stop.FlexibleTimeWindow.Mode = 'OFF') and (($mode.scope.S = 'production' ? ($legacyRdsStop.State = 'ENABLED' and $legacyRdsStop.ScheduleExpression = 'cron(30 22 ? * MON-FRI *)') : ($legacyRdsStop.State = 'ENABLED' and $legacyRdsStop.ScheduleExpression = 'cron(10 17 ? * MON-FRI *)')) and $legacyRdsStop.ScheduleExpressionTimezone = 'Asia/Tokyo' and $legacyRdsStop.FlexibleTimeWindow.Mode = 'OFF') and ($mode.scope.S='production' or ($request.trigger='manual' and $fromMillis($millis(),'[H01]:[m01]','+0900')>='17:40' and $fromMillis($millis(),'[H01]:[m01]','+0900')<'21:30')) %}",
+          "Next": "Begin"
+        }
+      ],
+      "Default": "InterlockFailed"
+    },
+    "NotArmed": {
+      "Type": "Fail",
+      "Error": "NotArmed",
+      "Cause": "Arming, approval, expiry, trigger or maintenance check failed; no write occurred."
+    },
+    "BadInput": {
+      "Type": "Fail",
+      "Error": "BadInput",
+      "Cause": "Invalid, redriven or stale input; no write occurred."
+    },
+    "InterlockFailed": {
+      "Type": "Fail",
+      "Error": "Legacy.Interlock",
+      "Cause": "Legacy schedule contract differs; no runtime write permitted."
+    },
+    "Failed": {
+      "Type": "Fail",
+      "Error": "Runtime.Failed",
+      "Cause": "A task, invariant, lease, readiness or timeout failed. Inspect execution history; independent backstops remain required."
+    },
+    "Done": {
+      "Type": "Succeed"
+    },
+    "Begin": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:autoscaling:describeAutoScalingGroups",
+      "Arguments": {
+        "AutoScalingGroupNames": [
+          "${asg_name}"
+        ]
+      },
+      "Next": "ReadInstances",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "group": "{% $states.result.AutoScalingGroups[0] %}"
+      },
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failed"
+        }
+      ]
+    },
+    "ReadInstances": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:ec2:describeInstances",
+      "Arguments": {
+        "InstanceIds": "{% $append(['${od_instance_id}'], $exists($group.Instances) ? $group.Instances.InstanceId : []) %}"
+      },
+      "Next": "ReadAddress",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "instances": "{% $append([], $states.result.Reservations.Instances) %}"
+      },
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failed"
+        }
+      ]
+    },
+    "ReadAddress": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:ec2:describeAddresses",
+      "Arguments": {
+        "AllocationIds": [
+          "${eip_allocation_id}"
+        ]
+      },
+      "Next": "ReadAssociationInstance",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "addresses": "{% $states.result.Addresses %}",
+        "holder": "{% $exists($states.result.Addresses[0].InstanceId) ? $states.result.Addresses[0].InstanceId : '' %}"
+      },
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failed"
+        }
+      ]
+    },
+    "ReadAssociationInstance": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:ec2:describeInstances",
+      "Arguments": {
+        "InstanceIds": "{% $distinct($append($append(['${od_instance_id}'], $exists($group.Instances) ? $group.Instances.InstanceId : []), $holder!='' ? [$holder] : [])) %}"
+      },
+      "Next": "ReadAssociationRecord",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "instances": "{% $append([], $states.result.Reservations.Instances) %}"
+      },
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failed"
+        }
+      ]
+    },
+    "ReadAssociationRecord": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:getItem",
+      "Arguments": {
+        "TableName": "${table_name}",
+        "Key": {
+          "pk": {
+            "S": "{% 'instance#' & $holder %}"
+          }
+        },
+        "ConsistentRead": true
+      },
+      "Next": "ReadOdAttribute",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "holderRecord": "{% $exists($states.result.Item) ? $states.result.Item : {} %}"
+      },
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failed"
+        }
+      ]
+    },
+    "ReadOdAttribute": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:ec2:describeNetworkInterfaceAttribute",
+      "Arguments": {
+        "NetworkInterfaceId": "${od_eni_id}",
+        "Attribute": "associatePublicIpAddress"
+      },
+      "Next": "ReadRds",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "odPublic": "{% $states.result.AssociatePublicIpAddress %}"
+      },
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failed"
+        }
+      ]
+    },
+    "ReadRds": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:rds:describeDBInstances",
+      "Arguments": {
+        "DbInstanceIdentifier": "${db_instance_identifier}"
+      },
+      "Next": "ReadService",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "db": "{% $states.result.DbInstances[0] %}"
+      },
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failed"
+        }
+      ]
+    },
+    "ReadService": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:ecs:describeServices",
+      "Arguments": {
+        "Cluster": "${ecs_cluster_arn}",
+        "Services": [
+          "${ecs_service_name}"
+        ]
+      },
+      "Next": "ReadTaskDefinition",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "service": "{% $states.result.Services[0] %}",
+        "tdArn": "{% $states.result.Services[0].TaskDefinition %}"
+      },
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failed"
+        }
+      ]
+    },
+    "ReadTaskDefinition": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:ecs:describeTaskDefinition",
+      "Arguments": {
+        "TaskDefinition": "{% $tdArn %}"
+      },
+      "Next": "SnapshotGate",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "liveSha": "{% ($images := $states.result.TaskDefinition.ContainerDefinitions[Name='api'].Image; $count($images)=1 and $substringBefore($images[0], ':') = '${expected_image_repository}' ? $substringAfter($images[0], ':') : '') %}"
+      },
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failed"
+        }
+      ]
+    },
+    "SnapshotGate": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Condition": "{% $group.AutoScalingGroupName = '${asg_name}' and $group.MinSize = 0 and $group.MaxSize = 2 and $group.CapacityRebalance = false and $count($group.Instances) <= 2 and $count($addresses) = 1 and $addresses[0].AllocationId = '${eip_allocation_id}' and ($holder = '' or $holder = '${od_instance_id}' or $holder in $group.Instances.InstanceId or ($holderRecord.asg.S='${asg_name}' and $instances[InstanceId=$holder][0].IamInstanceProfile.Arn='${spot_instance_profile_arn}' and $instances[InstanceId=$holder][0].InstanceLifecycle='spot' and $instances[InstanceId=$holder][0].State.Name in ['terminated','shutting-down','stopped'])) and $count($instances[InstanceId='${od_instance_id}' and IamInstanceProfile.Arn='${od_instance_profile_arn}'])=1 and $db.DbInstanceIdentifier = '${db_instance_identifier}' and $service.ServiceName = '${ecs_service_name}' and $contains($liveSha, /^[a-f0-9]{40}$/) %}",
+          "Next": "ReadReady"
+        }
+      ],
+      "Default": "Failed"
+    },
+    "ReadReady": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:getItem",
+      "Arguments": {
+        "TableName": "${table_name}",
+        "Key": {
+          "pk": {
+            "S": "{% 'ready#' & $holder %}"
+          }
+        },
+        "ConsistentRead": true
+      },
+      "Next": "ReadLease",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "ready": "{% $exists($states.result.Item) ? $states.result.Item : {} %}"
+      },
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failed"
+        }
+      ]
+    },
+    "ReadLease": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:getItem",
+      "Arguments": {
+        "TableName": "${table_name}",
+        "Key": {
+          "pk": {
+            "S": "lock#runtime"
+          }
+        },
+        "ConsistentRead": true
+      },
+      "Next": "ReadyChoice",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "lock": "{% $exists($states.result.Item) ? $states.result.Item : {} %}"
+      },
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failed"
+        }
+      ]
+    },
+    "ReadyChoice": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Condition": "{% $mode.state.S in ['spot-active','od-active'] and $db.DbInstanceStatus='available' and $service.RunningCount=1 and $ready.instanceId.S=$holder and $ready.sha.S=$liveSha and $ready.taskDefinition.S=$tdArn and $number($ready.validUntil.N)>$millis() and ($not($exists($lock.pk)) or $number($lock.expiresAt.N)<$millis()) and (($mode.state.S='spot-active' and $holder in $group.Instances[LifecycleState='InService' and HealthStatus='Healthy'].InstanceId and $instances[InstanceId=$holder][0].State.Name='running' and $instances[InstanceId=$holder][0].InstanceLifecycle='spot' and $instances[InstanceId=$holder][0].IamInstanceProfile.Arn='${spot_instance_profile_arn}' and $instances[InstanceId='${od_instance_id}'][0].State.Name='stopped' and $odPublic=false) or ($mode.state.S='od-active' and $holder='${od_instance_id}' and $instances[InstanceId='${od_instance_id}'][0].State.Name='running')) %}",
+          "Next": "Done"
+        }
+      ],
+      "Default": "Failed"
+    }
+  }
+}

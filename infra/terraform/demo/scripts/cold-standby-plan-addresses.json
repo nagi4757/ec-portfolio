@@ -1,0 +1,137 @@
+{
+  "P3A_ADDRESSES": [
+    "aws_dynamodb_table.runtime_control",
+    "aws_iam_role.runtime_orchestrator",
+    "aws_iam_role_policy.runtime_orchestrator",
+    "aws_iam_role.runtime_eip_writer",
+    "aws_iam_role_policy.runtime_eip_writer",
+    "aws_iam_role.runtime_events",
+    "aws_iam_role_policy.runtime_events",
+    "aws_sfn_state_machine.runtime[\"day_open\"]",
+    "aws_sfn_state_machine.runtime[\"ready_check\"]",
+    "aws_sfn_state_machine.runtime[\"day_close\"]",
+    "aws_sfn_state_machine.runtime[\"origin_guard\"]",
+    "aws_sfn_state_machine.runtime[\"od_standby\"]",
+    "aws_cloudwatch_event_rule.origin_guard_signals",
+    "aws_cloudwatch_event_rule.spot_capacity_unavailable",
+    "aws_cloudwatch_event_rule.runtime_orchestration_failed",
+    "aws_cloudwatch_event_target.origin_guard_signals_origin_guard",
+    "aws_cloudwatch_event_target.origin_guard_signals_od_standby",
+    "aws_cloudwatch_event_target.spot_capacity_unavailable",
+    "aws_cloudwatch_event_target.runtime_orchestration_failed",
+    "aws_scheduler_schedule.runtime_orchestration[\"day_open\"]",
+    "aws_scheduler_schedule.runtime_orchestration[\"ready_check\"]",
+    "aws_scheduler_schedule.runtime_orchestration[\"day_close\"]",
+    "aws_scheduler_schedule.runtime_orchestration[\"origin_guard_tick\"]",
+    "aws_ssm_document.od_readiness",
+    "aws_ssm_document.spot_smoke"
+  ],
+  "EXISTING_ADDRESSES": [
+    "aws_ecs_cluster.demo",
+    "aws_ecs_capacity_provider.ecs_spot",
+    "aws_ecs_cluster_capacity_providers.demo",
+    "aws_ecs_task_definition.api",
+    "aws_ecs_service.api",
+    "aws_launch_template.ecs_spot",
+    "aws_autoscaling_group.ecs_spot",
+    "aws_autoscaling_lifecycle_hook.ecs_spot_launching",
+    "aws_iam_role.ecs_spot",
+    "aws_iam_instance_profile.ecs_spot",
+    "aws_iam_role_policy.ecs_spot_container_instance",
+    "aws_iam_role_policy.ecs_spot_origin_eip_promotion",
+    "aws_iam_role.ecs_task_execution",
+    "aws_iam_role_policy.ecs_task_execution_logs",
+    "aws_iam_role_policy.ecs_task_execution_runtime_secrets",
+    "aws_cloudwatch_log_group.ecs_api",
+    "aws_s3_object.spot_runtime_bundle",
+    "aws_s3_bucket.runtime_artifacts",
+    "aws_s3_bucket.origin_tls",
+    "aws_ecr_repository.demo_api",
+    "aws_eip.ec2_origin",
+    "aws_instance.demo",
+    "aws_route53_record.origin_demo",
+    "aws_security_group.ec2_origin",
+    "aws_security_group.rds",
+    "aws_db_instance.demo",
+    "aws_cloudfront_distribution.api",
+    "aws_scheduler_schedule_group.runtime",
+    "aws_scheduler_schedule.runtime[\"ec2_start\"]",
+    "aws_scheduler_schedule.runtime[\"ec2_stop\"]",
+    "aws_scheduler_schedule.runtime[\"rds_start\"]",
+    "aws_scheduler_schedule.runtime[\"rds_stop\"]",
+    "aws_iam_role.scheduler",
+    "aws_iam_role_policy.scheduler_runtime_control",
+    "aws_sns_topic.alerts",
+    "aws_sns_topic_policy.alerts",
+    "aws_sns_topic_subscription.alerts_email",
+    "aws_cloudwatch_metric_alarm.scheduler_invocation_dropped",
+    "aws_budgets_budget.monthly_cost",
+    "aws_ssm_parameter.deploy_desired_image_sha",
+    "aws_ssm_parameter.deploy_last_known_good_image_sha",
+    "aws_ssm_parameter.deploy_pending_migration_image_sha",
+    "aws_iam_openid_connect_provider.github_actions",
+    "aws_iam_role.github_backend_deploy",
+    "aws_iam_role.github_frontend_deploy",
+    "aws_iam_role_policy.github_backend_deploy",
+    "aws_iam_role_policy.github_backend_deploy_runtime",
+    "aws_iam_role_policy.github_frontend_deploy",
+    "aws_ecs_cluster.measurement[0]",
+    "aws_cloudwatch_log_group.measurement[0]",
+    "aws_iam_role.ecs_task_execution_measurement[0]",
+    "aws_iam_role_policy.ecs_task_execution_measurement[0]",
+    "aws_ecs_task_definition.measurement[0]",
+    "aws_ecs_service.measurement[0]",
+    "aws_iam_role.ecs_spot_measurement[0]",
+    "aws_iam_role_policy.ecs_spot_measurement[0]",
+    "aws_iam_instance_profile.ecs_spot_measurement[0]",
+    "aws_launch_template.ecs_spot_measurement[0]",
+    "aws_autoscaling_group.ecs_spot_measurement[0]",
+    "aws_autoscaling_lifecycle_hook.ecs_spot_measurement_launching[0]",
+    "aws_autoscaling_schedule.ecs_spot_measurement_backstop[0]"
+  ],
+  "DRIFT_ALLOWLIST": {
+    "aws_autoscaling_group.ecs_spot_measurement[0]": ["enabled_metrics", "suspended_processes", "termination_policies"],
+    "aws_autoscaling_schedule.ecs_spot_measurement_backstop[0]": ["start_time"],
+    "aws_iam_role.ecs_spot_measurement[0]": ["inline_policy"],
+    "aws_iam_role.ecs_task_execution_measurement[0]": ["inline_policy"],
+    "aws_launch_template.ecs_spot_measurement[0]": ["network_interfaces", "security_group_names", "vpc_security_group_ids"],
+    "aws_instance.demo": [
+      "instance_state",
+      "public_ip",
+      "public_dns",
+      "associate_public_ip_address"
+    ],
+    "aws_db_instance.demo": [
+      "status"
+    ],
+    "aws_eip.ec2_origin": [
+      "association_id",
+      "instance",
+      "network_interface",
+      "private_ip",
+      "private_dns",
+      "public_dns"
+    ]
+  },
+  "MEASUREMENT_DRIFT_RULES": {
+    "aws_autoscaling_group.ecs_spot_measurement[0]": {
+      "null_to_empty": ["/enabled_metrics", "/suspended_processes", "/termination_policies"]
+    },
+    "aws_launch_template.ecs_spot_measurement[0]": {
+      "null_to_empty": ["/network_interfaces/0/ipv4_addresses", "/network_interfaces/0/ipv4_prefixes", "/network_interfaces/0/ipv6_addresses", "/network_interfaces/0/ipv6_prefixes", "/security_group_names", "/vpc_security_group_ids"]
+    },
+    "aws_autoscaling_schedule.ecs_spot_measurement_backstop[0]": {
+      "next_occurrence": "/start_time",
+      "recurrence": "30 0-11,16-23 * * *",
+      "time_zone": "Asia/Tokyo"
+    },
+    "aws_iam_role.ecs_spot_measurement[0]": {
+      "observed_inline_policy": "aws_iam_role_policy.ecs_spot_measurement[0]",
+      "policy_name": "measurement-host"
+    },
+    "aws_iam_role.ecs_task_execution_measurement[0]": {
+      "observed_inline_policy": "aws_iam_role_policy.ecs_task_execution_measurement[0]",
+      "policy_name": "measurement-task-execution"
+    }
+  }
+}

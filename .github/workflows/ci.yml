@@ -150,6 +150,10 @@ jobs:
           infra/runtime/demo/publish-api-image.test.sh
           infra/runtime/demo/deploy-runtime.test.sh
 
+      # The same for the frontends: whether a main push deploys them at all.
+      - name: Test frontend release scope
+        run: infra/runtime/demo/frontend-release-scope.test.sh
+
       - name: Test origin TLS persistence contract
         run: |
           set -euo pipefail
@@ -189,9 +193,107 @@ jobs:
       - name: Test measurement stack plan gate
         run: infra/terraform/demo/scripts/measurement-plan-gate.test.sh
 
+  # The cold standby control plane (Phase 6C-5c P3-a): the five state machine
+  # definitions, the two SSM documents, the runtime IAM documents and the gate
+  # its saved plan must pass before apply. Everything runs offline against
+  # fixtures; the only Terraform call is a provider-free `terraform console`.
+  cold-standby-tests:
+    name: Cold standby offline tests
+    runs-on: ubuntu-latest
+    env:
+      TERRAFORM_VERSION: "1.16.0"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "22"
+
+      # The gate renders the reviewed HCL with the same Terraform version the
+      # saved plan must be made with. The archive is checked against the
+      # release checksum file before it is unpacked.
+      - name: Install Terraform
+        run: |
+          set -euo pipefail
+          directory="$RUNNER_TEMP/terraform"
+          mkdir -p "$directory"
+          cd "$directory"
+          base="https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}"
+          archive="terraform_${TERRAFORM_VERSION}_linux_amd64.zip"
+          curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 -o "$archive" "$base/$archive"
+          curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 -o SHA256SUMS "$base/terraform_${TERRAFORM_VERSION}_SHA256SUMS"
+          grep " ${archive}\$" SHA256SUMS | sha256sum --check --strict -
+          unzip -q "$archive" terraform
+          echo "COLD_STANDBY_TERRAFORM=$directory/terraform" >> "$GITHUB_ENV"
+          "$directory/terraform" version
+
+      # The definitions are generated; the committed files must be exactly what
+      # the generator produces.
+      - name: Check generated state machine definitions
+        run: |
+          set -euo pipefail
+          python3 -B infra/terraform/demo/scripts/runtime-asl-build.py > /dev/null
+          git diff --exit-code -- infra/terraform/demo/state-machines
+
+      - name: Test state machine definitions
+        run: |
+          set -euo pipefail
+          node infra/terraform/demo/scripts/runtime-asl.test.mjs
+          node infra/terraform/demo/scripts/runtime-asl.mutation.mjs
+
+      - name: Test SSM documents and runtime IAM documents
+        run: |
+          set -euo pipefail
+          python3 -B infra/terraform/demo/scripts/ssm/ssm_test.py
+          python3 -B infra/terraform/demo/scripts/runtime-iam.test.py
+
+      # The gate the P3-a saved plan must pass before apply: exactly the 25
+      # inert creates, reviewed values, every existing resource no-op.
+      - name: Test cold standby plan gate
+        run: |
+          set -euo pipefail
+          infra/terraform/demo/scripts/cold-standby-plan-gate.test.sh
+          infra/terraform/demo/scripts/cold-standby-plan-gate.mutation.sh
+
+  # Whether this push changes what the Store and Admin frontends are built and
+  # published from, compared with the last successful demo-frontend deployment.
+  # It runs without a deployment environment or AWS credentials, before
+  # deploy-frontends asks for its approval, so an infrastructure, access, API or
+  # documentation push neither requests the approval nor publishes anything.
+  frontend-release-scope:
+    name: Frontend release scope
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      deployments: read
+    outputs:
+      frontend_changed: ${{ steps.scope.outputs.frontend_changed }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Decide whether the frontends changed since their last deployment
+        id: scope
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ github.sha }}
+        run: infra/runtime/demo/frontend-release-scope.sh
+
   deploy-frontends:
     name: Deploy Store and Admin frontends
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.frontend-release-scope.outputs.frontend_changed == 'true'
+    # Skipped when frontend-release-scope finds no frontend change since the last
+    # successful deployment; a frontend change still waits for deploy-api below.
+    #
     # deploy-api is a dependency so a release the API did not take cannot ship its
     # frontend alone. A migration change fails the guard inside build-and-push-api,
     # which skips deploy-api; without this the frontend would still go out and start
@@ -207,13 +309,14 @@ jobs:
     # this job waits with it.
     #
     # deploy-api always runs once build-and-push-api succeeds, also for a push
-    # that releases nothing to the host, so this dependency never skips the
-    # frontend of a push that does not touch the API.
+    # that releases nothing to the host, so this dependency never skips a
+    # frontend change in a push that does not touch the API.
     needs:
       - backend
       - frontend
       - docker
       - deploy-api
+      - frontend-release-scope
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: demo-frontend

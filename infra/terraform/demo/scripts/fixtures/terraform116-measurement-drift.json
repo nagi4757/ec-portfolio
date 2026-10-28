@@ -1,0 +1,821 @@
+{
+  "MOCK": "REDACTED HISTORICAL PROJECTION; NOT CURRENT EXECUTION EVIDENCE",
+  "configuration": {
+    "root_module": {
+      "resources": [
+        {
+          "address": "aws_autoscaling_group.ecs_spot_measurement",
+          "count_expression": {
+            "references": [
+              "local.measurement_count"
+            ]
+          },
+          "expressions": {
+            "capacity_rebalance": {
+              "constant_value": false
+            },
+            "desired_capacity": {
+              "constant_value": 0
+            },
+            "health_check_grace_period": {
+              "constant_value": 300
+            },
+            "health_check_type": {
+              "constant_value": "EC2"
+            },
+            "launch_template": [
+              {
+                "id": {
+                  "references": [
+                    "aws_launch_template.ecs_spot_measurement[0].id",
+                    "aws_launch_template.ecs_spot_measurement[0]",
+                    "aws_launch_template.ecs_spot_measurement"
+                  ]
+                },
+                "version": {
+                  "references": [
+                    "aws_launch_template.ecs_spot_measurement[0].latest_version",
+                    "aws_launch_template.ecs_spot_measurement[0]",
+                    "aws_launch_template.ecs_spot_measurement"
+                  ]
+                }
+              }
+            ],
+            "max_size": {
+              "constant_value": 1
+            },
+            "min_size": {
+              "constant_value": 0
+            },
+            "name": {
+              "references": [
+                "local.measurement_name"
+              ]
+            },
+            "tag": [
+              {
+                "key": {
+                  "constant_value": "Name"
+                },
+                "propagate_at_launch": {
+                  "constant_value": true
+                },
+                "value": {
+                  "references": [
+                    "local.measurement_name"
+                  ]
+                }
+              }
+            ],
+            "vpc_zone_identifier": {
+              "references": [
+                "aws_subnet.public_app.id",
+                "aws_subnet.public_app"
+              ]
+            }
+          },
+          "mode": "managed",
+          "name": "ecs_spot_measurement",
+          "provider_config_key": "aws",
+          "schema_version": 1,
+          "type": "aws_autoscaling_group"
+        },
+        {
+          "address": "aws_autoscaling_schedule.ecs_spot_measurement_backstop",
+          "count_expression": {
+            "references": [
+              "local.measurement_count"
+            ]
+          },
+          "expressions": {
+            "autoscaling_group_name": {
+              "references": [
+                "aws_autoscaling_group.ecs_spot_measurement[0].name",
+                "aws_autoscaling_group.ecs_spot_measurement[0]",
+                "aws_autoscaling_group.ecs_spot_measurement"
+              ]
+            },
+            "desired_capacity": {
+              "constant_value": 0
+            },
+            "max_size": {
+              "constant_value": 1
+            },
+            "min_size": {
+              "constant_value": 0
+            },
+            "recurrence": {
+              "constant_value": "30 0-11,16-23 * * *"
+            },
+            "scheduled_action_name": {
+              "references": [
+                "local.measurement_name"
+              ]
+            },
+            "time_zone": {
+              "constant_value": "Asia/Tokyo"
+            }
+          },
+          "mode": "managed",
+          "name": "ecs_spot_measurement_backstop",
+          "provider_config_key": "aws",
+          "schema_version": 0,
+          "type": "aws_autoscaling_schedule"
+        },
+        {
+          "address": "aws_iam_role.ecs_spot_measurement",
+          "count_expression": {
+            "references": [
+              "local.measurement_count"
+            ]
+          },
+          "expressions": {
+            "assume_role_policy": {},
+            "description": {
+              "constant_value": "Demo measurement ECS EC2 Spot host role: measurement cluster registration and the production runtime reads"
+            },
+            "name": {
+              "references": [
+                "local.measurement_name"
+              ]
+            },
+            "tags": {
+              "references": [
+                "local.measurement_name"
+              ]
+            }
+          },
+          "mode": "managed",
+          "name": "ecs_spot_measurement",
+          "provider_config_key": "aws",
+          "schema_version": 0,
+          "type": "aws_iam_role"
+        },
+        {
+          "address": "aws_iam_role.ecs_task_execution_measurement",
+          "count_expression": {
+            "references": [
+              "local.measurement_count"
+            ]
+          },
+          "expressions": {
+            "assume_role_policy": {},
+            "description": {
+              "constant_value": "Demo measurement ECS task execution role: API image pull, runtime secrets and measurement task logs"
+            },
+            "name": {
+              "references": [
+                "local.measurement_task_execution_role_name"
+              ]
+            },
+            "tags": {
+              "references": [
+                "local.measurement_task_execution_role_name"
+              ]
+            }
+          },
+          "mode": "managed",
+          "name": "ecs_task_execution_measurement",
+          "provider_config_key": "aws",
+          "schema_version": 0,
+          "type": "aws_iam_role"
+        },
+        {
+          "address": "aws_iam_role_policy.ecs_spot_measurement",
+          "count_expression": {
+            "references": [
+              "local.measurement_count"
+            ]
+          },
+          "expressions": {
+            "name": {
+              "constant_value": "measurement-host"
+            },
+            "policy": {
+              "references": [
+                "local.measurement_cluster_arn",
+                "local.measurement_arn_prefix",
+                "local.aws_region",
+                "local.measurement_account_id",
+                "local.measurement_cluster_name",
+                "aws_ecr_repository.demo_api.arn",
+                "aws_ecr_repository.demo_api",
+                "aws_s3_bucket.runtime_artifacts.arn",
+                "aws_s3_bucket.runtime_artifacts",
+                "local.spot_runtime_object_key",
+                "aws_s3_bucket.origin_tls.arn",
+                "aws_s3_bucket.origin_tls",
+                "aws_ssm_parameter.origin_verify_token.arn",
+                "aws_ssm_parameter.origin_verify_token",
+                "local.measurement_group_arn"
+              ]
+            },
+            "role": {
+              "references": [
+                "aws_iam_role.ecs_spot_measurement[0].id",
+                "aws_iam_role.ecs_spot_measurement[0]",
+                "aws_iam_role.ecs_spot_measurement"
+              ]
+            }
+          },
+          "mode": "managed",
+          "name": "ecs_spot_measurement",
+          "provider_config_key": "aws",
+          "schema_version": 0,
+          "type": "aws_iam_role_policy"
+        },
+        {
+          "address": "aws_iam_role_policy.ecs_task_execution_measurement",
+          "count_expression": {
+            "references": [
+              "local.measurement_count"
+            ]
+          },
+          "expressions": {
+            "name": {
+              "constant_value": "measurement-task-execution"
+            },
+            "policy": {
+              "references": [
+                "aws_ecr_repository.demo_api.arn",
+                "aws_ecr_repository.demo_api",
+                "aws_ssm_parameter.db_master_password.arn",
+                "aws_ssm_parameter.db_master_password",
+                "aws_ssm_parameter.auth_jwt_secret.arn",
+                "aws_ssm_parameter.auth_jwt_secret",
+                "local.measurement_log_group_arn"
+              ]
+            },
+            "role": {
+              "references": [
+                "aws_iam_role.ecs_task_execution_measurement[0].id",
+                "aws_iam_role.ecs_task_execution_measurement[0]",
+                "aws_iam_role.ecs_task_execution_measurement"
+              ]
+            }
+          },
+          "mode": "managed",
+          "name": "ecs_task_execution_measurement",
+          "provider_config_key": "aws",
+          "schema_version": 0,
+          "type": "aws_iam_role_policy"
+        },
+        {
+          "address": "aws_launch_template.ecs_spot_measurement",
+          "count_expression": {
+            "references": [
+              "local.measurement_count"
+            ]
+          },
+          "expressions": {
+            "block_device_mappings": [
+              {
+                "device_name": {
+                  "constant_value": "/dev/xvda"
+                },
+                "ebs": [
+                  {
+                    "delete_on_termination": {
+                      "constant_value": "true"
+                    },
+                    "encrypted": {
+                      "constant_value": "true"
+                    },
+                    "volume_size": {
+                      "constant_value": 30
+                    },
+                    "volume_type": {
+                      "constant_value": "gp3"
+                    }
+                  }
+                ]
+              }
+            ],
+            "credit_specification": [
+              {
+                "cpu_credits": {
+                  "constant_value": "standard"
+                }
+              }
+            ],
+            "description": {
+              "constant_value": "Phase 6C-5c ECS EC2 Spot host for the separate measurement cluster"
+            },
+            "iam_instance_profile": [
+              {
+                "name": {
+                  "references": [
+                    "aws_iam_instance_profile.ecs_spot_measurement[0].name",
+                    "aws_iam_instance_profile.ecs_spot_measurement[0]",
+                    "aws_iam_instance_profile.ecs_spot_measurement"
+                  ]
+                }
+              }
+            ],
+            "image_id": {
+              "references": [
+                "local.ecs_ami_id"
+              ]
+            },
+            "instance_market_options": [
+              {
+                "market_type": {
+                  "constant_value": "spot"
+                }
+              }
+            ],
+            "instance_type": {
+              "references": [
+                "local.measurement_instance_type"
+              ]
+            },
+            "metadata_options": [
+              {
+                "http_endpoint": {
+                  "constant_value": "enabled"
+                },
+                "http_put_response_hop_limit": {
+                  "constant_value": 1
+                },
+                "http_tokens": {
+                  "constant_value": "required"
+                },
+                "instance_metadata_tags": {
+                  "constant_value": "disabled"
+                }
+              }
+            ],
+            "name": {
+              "references": [
+                "local.measurement_name"
+              ]
+            },
+            "network_interfaces": [
+              {
+                "associate_public_ip_address": {
+                  "constant_value": "true"
+                },
+                "delete_on_termination": {
+                  "constant_value": "true"
+                },
+                "device_index": {
+                  "constant_value": 0
+                },
+                "security_groups": {
+                  "references": [
+                    "aws_security_group.ec2_origin.id",
+                    "aws_security_group.ec2_origin"
+                  ]
+                }
+              }
+            ],
+            "tag_specifications": [
+              {
+                "resource_type": {
+                  "constant_value": "instance"
+                },
+                "tags": {
+                  "references": [
+                    "local.common_tags",
+                    "local.measurement_name"
+                  ]
+                }
+              },
+              {
+                "resource_type": {
+                  "constant_value": "volume"
+                },
+                "tags": {
+                  "references": [
+                    "local.common_tags",
+                    "local.measurement_name"
+                  ]
+                }
+              }
+            ],
+            "tags": {
+              "references": [
+                "local.measurement_name"
+              ]
+            },
+            "user_data": {
+              "references": [
+                "local.measurement_user_data"
+              ]
+            }
+          },
+          "mode": "managed",
+          "name": "ecs_spot_measurement",
+          "provider_config_key": "aws",
+          "schema_version": 1,
+          "type": "aws_launch_template"
+        }
+      ]
+    }
+  },
+  "prior_state": {
+    "values": {
+      "root_module": {
+        "resources": [
+          {
+            "address": "aws_autoscaling_group.ecs_spot_measurement[0]",
+            "mode": "managed",
+            "values": {
+              "enabled_metrics": [],
+              "name": "ec-portfolio-demo-ecs-spot-measure",
+              "suspended_processes": [],
+              "termination_policies": []
+            }
+          },
+          {
+            "address": "aws_autoscaling_schedule.ecs_spot_measurement_backstop[0]",
+            "mode": "managed",
+            "values": {
+              "desired_capacity": 0,
+              "end_time": null,
+              "max_size": 1,
+              "min_size": 0,
+              "recurrence": "30 0-11,16-23 * * *",
+              "start_time": "2026-10-15T00:30:00Z",
+              "time_zone": "Asia/Tokyo"
+            }
+          },
+          {
+            "address": "aws_iam_role.ecs_spot_measurement[0]",
+            "mode": "managed",
+            "values": {
+              "inline_policy": [
+                {
+                  "name": "measurement-host",
+                  "policy": "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Action\":[\"ecs:RegisterContainerInstance\",\"ecs:DeregisterContainerInstance\",\"ecs:SubmitAttachmentStateChanges\",\"ecs:SubmitContainerStateChange\",\"ecs:SubmitTaskStateChange\"],\"Effect\":\"Allow\",\"Resource\":\"arn:aws:ecs:ap-northeast-1:000000000000:cluster/ec-portfolio-demo-measure\",\"Sid\":\"RegisterWithMeasurementClusterOnly\"},{\"Action\":[\"ecs:Poll\",\"ecs:StartTelemetrySession\",\"ecs:UpdateContainerInstancesState\"],\"Effect\":\"Allow\",\"Resource\":\"arn:aws:ecs:ap-northeast-1:000000000000:container-instance/ec-portfolio-demo-measure/*\",\"Sid\":\"PollAndDrainMeasurementClusterInstances\"},{\"Action\":\"ecs:DiscoverPollEndpoint\",\"Effect\":\"Allow\",\"Resource\":\"*\",\"Sid\":\"DiscoverAgentPollEndpoint\"},{\"Action\":\"ecr:GetAuthorizationToken\",\"Effect\":\"Allow\",\"Resource\":\"*\",\"Sid\":\"GetEcrAuthorizationToken\"},{\"Action\":[\"ecr:BatchCheckLayerAvailability\",\"ecr:GetDownloadUrlForLayer\",\"ecr:BatchGetImage\"],\"Effect\":\"Allow\",\"Resource\":\"arn:aws:ecr:ap-northeast-1:000000000000:repository/ec-portfolio-demo-api\",\"Sid\":\"PullDemoApiImage\"},{\"Action\":\"s3:GetObjectVersion\",\"Effect\":\"Allow\",\"Resource\":\"arn:aws:s3:::ec-portfolio-demo-runtime-artifacts-0ddd88e5d7c082248f67929741/runtime/spot-runtime.tar.gz\",\"Sid\":\"ReadPinnedRuntimeBundleVersion\"},{\"Action\":\"s3:GetObject\",\"Effect\":\"Allow\",\"Resource\":\"arn:aws:s3:::ec-portfolio-demo-origin-tls-776c2eab754b36a00164763604/origin-tls/letsencrypt.tar.gz\",\"Sid\":\"ReadOriginTlsArchiveOnly\"},{\"Action\":\"ssm:GetParameter\",\"Effect\":\"Allow\",\"Resource\":\"arn:aws:ssm:ap-northeast-1:000000000000:parameter/ec-portfolio/demo/origin/verify-token\",\"Sid\":\"ReadOriginVerificationToken\"},{\"Action\":\"autoscaling:CompleteLifecycleAction\",\"Effect\":\"Allow\",\"Resource\":\"arn:aws:autoscaling:ap-northeast-1:000000000000:autoScalingGroup:*:autoScalingGroupName/ec-portfolio-demo-ecs-spot-measure\",\"Sid\":\"CompleteOwnLaunchLifecycleAction\"}]}"
+                }
+              ],
+              "name": "ec-portfolio-demo-ecs-spot-measure"
+            }
+          },
+          {
+            "address": "aws_iam_role.ecs_task_execution_measurement[0]",
+            "mode": "managed",
+            "values": {
+              "inline_policy": [
+                {
+                  "name": "measurement-task-execution",
+                  "policy": "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Action\":\"ecr:GetAuthorizationToken\",\"Effect\":\"Allow\",\"Resource\":\"*\",\"Sid\":\"GetEcrAuthorizationToken\"},{\"Action\":[\"ecr:BatchCheckLayerAvailability\",\"ecr:GetDownloadUrlForLayer\",\"ecr:BatchGetImage\"],\"Effect\":\"Allow\",\"Resource\":\"arn:aws:ecr:ap-northeast-1:000000000000:repository/ec-portfolio-demo-api\",\"Sid\":\"PullDemoApiImage\"},{\"Action\":\"ssm:GetParameters\",\"Effect\":\"Allow\",\"Resource\":[\"arn:aws:ssm:ap-northeast-1:000000000000:parameter/ec-portfolio/demo/db/master-password\",\"arn:aws:ssm:ap-northeast-1:000000000000:parameter/ec-portfolio/demo/app/auth-jwt-secret\"],\"Sid\":\"ReadApiRuntimeSecrets\"},{\"Action\":[\"logs:CreateLogStream\",\"logs:PutLogEvents\"],\"Effect\":\"Allow\",\"Resource\":\"arn:aws:logs:ap-northeast-1:000000000000:log-group:/ec-portfolio/demo/ecs/measure:log-stream:*\",\"Sid\":\"WriteMeasurementTaskLogs\"}]}"
+                }
+              ],
+              "name": "ec-portfolio-demo-ecs-task-execution-measure"
+            }
+          },
+          {
+            "address": "aws_iam_role_policy.ecs_spot_measurement[0]",
+            "mode": "managed",
+            "values": {
+              "name": "measurement-host",
+              "policy": "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Action\":[\"ecs:RegisterContainerInstance\",\"ecs:DeregisterContainerInstance\",\"ecs:SubmitAttachmentStateChanges\",\"ecs:SubmitContainerStateChange\",\"ecs:SubmitTaskStateChange\"],\"Effect\":\"Allow\",\"Resource\":\"arn:aws:ecs:ap-northeast-1:000000000000:cluster/ec-portfolio-demo-measure\",\"Sid\":\"RegisterWithMeasurementClusterOnly\"},{\"Action\":[\"ecs:Poll\",\"ecs:StartTelemetrySession\",\"ecs:UpdateContainerInstancesState\"],\"Effect\":\"Allow\",\"Resource\":\"arn:aws:ecs:ap-northeast-1:000000000000:container-instance/ec-portfolio-demo-measure/*\",\"Sid\":\"PollAndDrainMeasurementClusterInstances\"},{\"Action\":\"ecs:DiscoverPollEndpoint\",\"Effect\":\"Allow\",\"Resource\":\"*\",\"Sid\":\"DiscoverAgentPollEndpoint\"},{\"Action\":\"ecr:GetAuthorizationToken\",\"Effect\":\"Allow\",\"Resource\":\"*\",\"Sid\":\"GetEcrAuthorizationToken\"},{\"Action\":[\"ecr:BatchCheckLayerAvailability\",\"ecr:GetDownloadUrlForLayer\",\"ecr:BatchGetImage\"],\"Effect\":\"Allow\",\"Resource\":\"arn:aws:ecr:ap-northeast-1:000000000000:repository/ec-portfolio-demo-api\",\"Sid\":\"PullDemoApiImage\"},{\"Action\":\"s3:GetObjectVersion\",\"Effect\":\"Allow\",\"Resource\":\"arn:aws:s3:::ec-portfolio-demo-runtime-artifacts-0ddd88e5d7c082248f67929741/runtime/spot-runtime.tar.gz\",\"Sid\":\"ReadPinnedRuntimeBundleVersion\"},{\"Action\":\"s3:GetObject\",\"Effect\":\"Allow\",\"Resource\":\"arn:aws:s3:::ec-portfolio-demo-origin-tls-776c2eab754b36a00164763604/origin-tls/letsencrypt.tar.gz\",\"Sid\":\"ReadOriginTlsArchiveOnly\"},{\"Action\":\"ssm:GetParameter\",\"Effect\":\"Allow\",\"Resource\":\"arn:aws:ssm:ap-northeast-1:000000000000:parameter/ec-portfolio/demo/origin/verify-token\",\"Sid\":\"ReadOriginVerificationToken\"},{\"Action\":\"autoscaling:CompleteLifecycleAction\",\"Effect\":\"Allow\",\"Resource\":\"arn:aws:autoscaling:ap-northeast-1:000000000000:autoScalingGroup:*:autoScalingGroupName/ec-portfolio-demo-ecs-spot-measure\",\"Sid\":\"CompleteOwnLaunchLifecycleAction\"}]}",
+              "role": "ec-portfolio-demo-ecs-spot-measure"
+            }
+          },
+          {
+            "address": "aws_iam_role_policy.ecs_task_execution_measurement[0]",
+            "mode": "managed",
+            "values": {
+              "name": "measurement-task-execution",
+              "policy": "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Action\":\"ecr:GetAuthorizationToken\",\"Effect\":\"Allow\",\"Resource\":\"*\",\"Sid\":\"GetEcrAuthorizationToken\"},{\"Action\":[\"ecr:BatchCheckLayerAvailability\",\"ecr:GetDownloadUrlForLayer\",\"ecr:BatchGetImage\"],\"Effect\":\"Allow\",\"Resource\":\"arn:aws:ecr:ap-northeast-1:000000000000:repository/ec-portfolio-demo-api\",\"Sid\":\"PullDemoApiImage\"},{\"Action\":\"ssm:GetParameters\",\"Effect\":\"Allow\",\"Resource\":[\"arn:aws:ssm:ap-northeast-1:000000000000:parameter/ec-portfolio/demo/db/master-password\",\"arn:aws:ssm:ap-northeast-1:000000000000:parameter/ec-portfolio/demo/app/auth-jwt-secret\"],\"Sid\":\"ReadApiRuntimeSecrets\"},{\"Action\":[\"logs:CreateLogStream\",\"logs:PutLogEvents\"],\"Effect\":\"Allow\",\"Resource\":\"arn:aws:logs:ap-northeast-1:000000000000:log-group:/ec-portfolio/demo/ecs/measure:log-stream:*\",\"Sid\":\"WriteMeasurementTaskLogs\"}]}",
+              "role": "ec-portfolio-demo-ecs-task-execution-measure"
+            }
+          },
+          {
+            "address": "aws_launch_template.ecs_spot_measurement[0]",
+            "mode": "managed",
+            "values": {
+              "network_interfaces": [
+                {
+                  "ipv4_addresses": [],
+                  "ipv4_prefixes": [],
+                  "ipv6_addresses": [],
+                  "ipv6_prefixes": []
+                }
+              ],
+              "security_group_names": [],
+              "vpc_security_group_ids": []
+            }
+          }
+        ]
+      }
+    }
+  },
+  "resource_changes": [
+    {
+      "address": "aws_autoscaling_group.ecs_spot_measurement[0]",
+      "change": {
+        "actions": [
+          "no-op"
+        ],
+        "after": {
+          "enabled_metrics": [],
+          "name": "ec-portfolio-demo-ecs-spot-measure",
+          "suspended_processes": [],
+          "termination_policies": []
+        },
+        "before": {
+          "enabled_metrics": [],
+          "name": "ec-portfolio-demo-ecs-spot-measure",
+          "suspended_processes": [],
+          "termination_policies": []
+        }
+      },
+      "mode": "managed"
+    },
+    {
+      "address": "aws_autoscaling_schedule.ecs_spot_measurement_backstop[0]",
+      "change": {
+        "actions": [
+          "no-op"
+        ],
+        "after": {
+          "desired_capacity": 0,
+          "end_time": null,
+          "max_size": 1,
+          "min_size": 0,
+          "recurrence": "30 0-11,16-23 * * *",
+          "start_time": "2026-10-15T00:30:00Z",
+          "time_zone": "Asia/Tokyo"
+        },
+        "before": {
+          "desired_capacity": 0,
+          "end_time": null,
+          "max_size": 1,
+          "min_size": 0,
+          "recurrence": "30 0-11,16-23 * * *",
+          "start_time": "2026-10-15T00:30:00Z",
+          "time_zone": "Asia/Tokyo"
+        }
+      },
+      "mode": "managed"
+    },
+    {
+      "address": "aws_iam_role.ecs_spot_measurement[0]",
+      "change": {
+        "actions": [
+          "no-op"
+        ],
+        "after": {
+          "inline_policy": [
+            {
+              "name": "measurement-host",
+              "policy": "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Action\":[\"ecs:RegisterContainerInstance\",\"ecs:DeregisterContainerInstance\",\"ecs:SubmitAttachmentStateChanges\",\"ecs:SubmitContainerStateChange\",\"ecs:SubmitTaskStateChange\"],\"Effect\":\"Allow\",\"Resource\":\"arn:aws:ecs:ap-northeast-1:000000000000:cluster/ec-portfolio-demo-measure\",\"Sid\":\"RegisterWithMeasurementClusterOnly\"},{\"Action\":[\"ecs:Poll\",\"ecs:StartTelemetrySession\",\"ecs:UpdateContainerInstancesState\"],\"Effect\":\"Allow\",\"Resource\":\"arn:aws:ecs:ap-northeast-1:000000000000:container-instance/ec-portfolio-demo-measure/*\",\"Sid\":\"PollAndDrainMeasurementClusterInstances\"},{\"Action\":\"ecs:DiscoverPollEndpoint\",\"Effect\":\"Allow\",\"Resource\":\"*\",\"Sid\":\"DiscoverAgentPollEndpoint\"},{\"Action\":\"ecr:GetAuthorizationToken\",\"Effect\":\"Allow\",\"Resource\":\"*\",\"Sid\":\"GetEcrAuthorizationToken\"},{\"Action\":[\"ecr:BatchCheckLayerAvailability\",\"ecr:GetDownloadUrlForLayer\",\"ecr:BatchGetImage\"],\"Effect\":\"Allow\",\"Resource\":\"arn:aws:ecr:ap-northeast-1:000000000000:repository/ec-portfolio-demo-api\",\"Sid\":\"PullDemoApiImage\"},{\"Action\":\"s3:GetObjectVersion\",\"Effect\":\"Allow\",\"Resource\":\"arn:aws:s3:::ec-portfolio-demo-runtime-artifacts-0ddd88e5d7c082248f67929741/runtime/spot-runtime.tar.gz\",\"Sid\":\"ReadPinnedRuntimeBundleVersion\"},{\"Action\":\"s3:GetObject\",\"Effect\":\"Allow\",\"Resource\":\"arn:aws:s3:::ec-portfolio-demo-origin-tls-776c2eab754b36a00164763604/origin-tls/letsencrypt.tar.gz\",\"Sid\":\"ReadOriginTlsArchiveOnly\"},{\"Action\":\"ssm:GetParameter\",\"Effect\":\"Allow\",\"Resource\":\"arn:aws:ssm:ap-northeast-1:000000000000:parameter/ec-portfolio/demo/origin/verify-token\",\"Sid\":\"ReadOriginVerificationToken\"},{\"Action\":\"autoscaling:CompleteLifecycleAction\",\"Effect\":\"Allow\",\"Resource\":\"arn:aws:autoscaling:ap-northeast-1:000000000000:autoScalingGroup:*:autoScalingGroupName/ec-portfolio-demo-ecs-spot-measure\",\"Sid\":\"CompleteOwnLaunchLifecycleAction\"}]}"
+            }
+          ],
+          "name": "ec-portfolio-demo-ecs-spot-measure"
+        },
+        "before": {
+          "inline_policy": [
+            {
+              "name": "measurement-host",
+              "policy": "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Action\":[\"ecs:RegisterContainerInstance\",\"ecs:DeregisterContainerInstance\",\"ecs:SubmitAttachmentStateChanges\",\"ecs:SubmitContainerStateChange\",\"ecs:SubmitTaskStateChange\"],\"Effect\":\"Allow\",\"Resource\":\"arn:aws:ecs:ap-northeast-1:000000000000:cluster/ec-portfolio-demo-measure\",\"Sid\":\"RegisterWithMeasurementClusterOnly\"},{\"Action\":[\"ecs:Poll\",\"ecs:StartTelemetrySession\",\"ecs:UpdateContainerInstancesState\"],\"Effect\":\"Allow\",\"Resource\":\"arn:aws:ecs:ap-northeast-1:000000000000:container-instance/ec-portfolio-demo-measure/*\",\"Sid\":\"PollAndDrainMeasurementClusterInstances\"},{\"Action\":\"ecs:DiscoverPollEndpoint\",\"Effect\":\"Allow\",\"Resource\":\"*\",\"Sid\":\"DiscoverAgentPollEndpoint\"},{\"Action\":\"ecr:GetAuthorizationToken\",\"Effect\":\"Allow\",\"Resource\":\"*\",\"Sid\":\"GetEcrAuthorizationToken\"},{\"Action\":[\"ecr:BatchCheckLayerAvailability\",\"ecr:GetDownloadUrlForLayer\",\"ecr:BatchGetImage\"],\"Effect\":\"Allow\",\"Resource\":\"arn:aws:ecr:ap-northeast-1:000000000000:repository/ec-portfolio-demo-api\",\"Sid\":\"PullDemoApiImage\"},{\"Action\":\"s3:GetObjectVersion\",\"Effect\":\"Allow\",\"Resource\":\"arn:aws:s3:::ec-portfolio-demo-runtime-artifacts-0ddd88e5d7c082248f67929741/runtime/spot-runtime.tar.gz\",\"Sid\":\"ReadPinnedRuntimeBundleVersion\"},{\"Action\":\"s3:GetObject\",\"Effect\":\"Allow\",\"Resource\":\"arn:aws:s3:::ec-portfolio-demo-origin-tls-776c2eab754b36a00164763604/origin-tls/letsencrypt.tar.gz\",\"Sid\":\"ReadOriginTlsArchiveOnly\"},{\"Action\":\"ssm:GetParameter\",\"Effect\":\"Allow\",\"Resource\":\"arn:aws:ssm:ap-northeast-1:000000000000:parameter/ec-portfolio/demo/origin/verify-token\",\"Sid\":\"ReadOriginVerificationToken\"},{\"Action\":\"autoscaling:CompleteLifecycleAction\",\"Effect\":\"Allow\",\"Resource\":\"arn:aws:autoscaling:ap-northeast-1:000000000000:autoScalingGroup:*:autoScalingGroupName/ec-portfolio-demo-ecs-spot-measure\",\"Sid\":\"CompleteOwnLaunchLifecycleAction\"}]}"
+            }
+          ],
+          "name": "ec-portfolio-demo-ecs-spot-measure"
+        }
+      },
+      "mode": "managed"
+    },
+    {
+      "address": "aws_iam_role.ecs_task_execution_measurement[0]",
+      "change": {
+        "actions": [
+          "no-op"
+        ],
+        "after": {
+          "inline_policy": [
+            {
+              "name": "measurement-task-execution",
+              "policy": "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Action\":\"ecr:GetAuthorizationToken\",\"Effect\":\"Allow\",\"Resource\":\"*\",\"Sid\":\"GetEcrAuthorizationToken\"},{\"Action\":[\"ecr:BatchCheckLayerAvailability\",\"ecr:GetDownloadUrlForLayer\",\"ecr:BatchGetImage\"],\"Effect\":\"Allow\",\"Resource\":\"arn:aws:ecr:ap-northeast-1:000000000000:repository/ec-portfolio-demo-api\",\"Sid\":\"PullDemoApiImage\"},{\"Action\":\"ssm:GetParameters\",\"Effect\":\"Allow\",\"Resource\":[\"arn:aws:ssm:ap-northeast-1:000000000000:parameter/ec-portfolio/demo/db/master-password\",\"arn:aws:ssm:ap-northeast-1:000000000000:parameter/ec-portfolio/demo/app/auth-jwt-secret\"],\"Sid\":\"ReadApiRuntimeSecrets\"},{\"Action\":[\"logs:CreateLogStream\",\"logs:PutLogEvents\"],\"Effect\":\"Allow\",\"Resource\":\"arn:aws:logs:ap-northeast-1:000000000000:log-group:/ec-portfolio/demo/ecs/measure:log-stream:*\",\"Sid\":\"WriteMeasurementTaskLogs\"}]}"
+            }
+          ],
+          "name": "ec-portfolio-demo-ecs-task-execution-measure"
+        },
+        "before": {
+          "inline_policy": [
+            {
+              "name": "measurement-task-execution",
+              "policy": "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Action\":\"ecr:GetAuthorizationToken\",\"Effect\":\"Allow\",\"Resource\":\"*\",\"Sid\":\"GetEcrAuthorizationToken\"},{\"Action\":[\"ecr:BatchCheckLayerAvailability\",\"ecr:GetDownloadUrlForLayer\",\"ecr:BatchGetImage\"],\"Effect\":\"Allow\",\"Resource\":\"arn:aws:ecr:ap-northeast-1:000000000000:repository/ec-portfolio-demo-api\",\"Sid\":\"PullDemoApiImage\"},{\"Action\":\"ssm:GetParameters\",\"Effect\":\"Allow\",\"Resource\":[\"arn:aws:ssm:ap-northeast-1:000000000000:parameter/ec-portfolio/demo/db/master-password\",\"arn:aws:ssm:ap-northeast-1:000000000000:parameter/ec-portfolio/demo/app/auth-jwt-secret\"],\"Sid\":\"ReadApiRuntimeSecrets\"},{\"Action\":[\"logs:CreateLogStream\",\"logs:PutLogEvents\"],\"Effect\":\"Allow\",\"Resource\":\"arn:aws:logs:ap-northeast-1:000000000000:log-group:/ec-portfolio/demo/ecs/measure:log-stream:*\",\"Sid\":\"WriteMeasurementTaskLogs\"}]}"
+            }
+          ],
+          "name": "ec-portfolio-demo-ecs-task-execution-measure"
+        }
+      },
+      "mode": "managed"
+    },
+    {
+      "address": "aws_iam_role_policy.ecs_spot_measurement[0]",
+      "change": {
+        "actions": [
+          "no-op"
+        ],
+        "after": {
+          "name": "measurement-host",
+          "policy": "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Action\":[\"ecs:RegisterContainerInstance\",\"ecs:DeregisterContainerInstance\",\"ecs:SubmitAttachmentStateChanges\",\"ecs:SubmitContainerStateChange\",\"ecs:SubmitTaskStateChange\"],\"Effect\":\"Allow\",\"Resource\":\"arn:aws:ecs:ap-northeast-1:000000000000:cluster/ec-portfolio-demo-measure\",\"Sid\":\"RegisterWithMeasurementClusterOnly\"},{\"Action\":[\"ecs:Poll\",\"ecs:StartTelemetrySession\",\"ecs:UpdateContainerInstancesState\"],\"Effect\":\"Allow\",\"Resource\":\"arn:aws:ecs:ap-northeast-1:000000000000:container-instance/ec-portfolio-demo-measure/*\",\"Sid\":\"PollAndDrainMeasurementClusterInstances\"},{\"Action\":\"ecs:DiscoverPollEndpoint\",\"Effect\":\"Allow\",\"Resource\":\"*\",\"Sid\":\"DiscoverAgentPollEndpoint\"},{\"Action\":\"ecr:GetAuthorizationToken\",\"Effect\":\"Allow\",\"Resource\":\"*\",\"Sid\":\"GetEcrAuthorizationToken\"},{\"Action\":[\"ecr:BatchCheckLayerAvailability\",\"ecr:GetDownloadUrlForLayer\",\"ecr:BatchGetImage\"],\"Effect\":\"Allow\",\"Resource\":\"arn:aws:ecr:ap-northeast-1:000000000000:repository/ec-portfolio-demo-api\",\"Sid\":\"PullDemoApiImage\"},{\"Action\":\"s3:GetObjectVersion\",\"Effect\":\"Allow\",\"Resource\":\"arn:aws:s3:::ec-portfolio-demo-runtime-artifacts-0ddd88e5d7c082248f67929741/runtime/spot-runtime.tar.gz\",\"Sid\":\"ReadPinnedRuntimeBundleVersion\"},{\"Action\":\"s3:GetObject\",\"Effect\":\"Allow\",\"Resource\":\"arn:aws:s3:::ec-portfolio-demo-origin-tls-776c2eab754b36a00164763604/origin-tls/letsencrypt.tar.gz\",\"Sid\":\"ReadOriginTlsArchiveOnly\"},{\"Action\":\"ssm:GetParameter\",\"Effect\":\"Allow\",\"Resource\":\"arn:aws:ssm:ap-northeast-1:000000000000:parameter/ec-portfolio/demo/origin/verify-token\",\"Sid\":\"ReadOriginVerificationToken\"},{\"Action\":\"autoscaling:CompleteLifecycleAction\",\"Effect\":\"Allow\",\"Resource\":\"arn:aws:autoscaling:ap-northeast-1:000000000000:autoScalingGroup:*:autoScalingGroupName/ec-portfolio-demo-ecs-spot-measure\",\"Sid\":\"CompleteOwnLaunchLifecycleAction\"}]}",
+          "role": "ec-portfolio-demo-ecs-spot-measure"
+        },
+        "before": {
+          "name": "measurement-host",
+          "policy": "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Action\":[\"ecs:RegisterContainerInstance\",\"ecs:DeregisterContainerInstance\",\"ecs:SubmitAttachmentStateChanges\",\"ecs:SubmitContainerStateChange\",\"ecs:SubmitTaskStateChange\"],\"Effect\":\"Allow\",\"Resource\":\"arn:aws:ecs:ap-northeast-1:000000000000:cluster/ec-portfolio-demo-measure\",\"Sid\":\"RegisterWithMeasurementClusterOnly\"},{\"Action\":[\"ecs:Poll\",\"ecs:StartTelemetrySession\",\"ecs:UpdateContainerInstancesState\"],\"Effect\":\"Allow\",\"Resource\":\"arn:aws:ecs:ap-northeast-1:000000000000:container-instance/ec-portfolio-demo-measure/*\",\"Sid\":\"PollAndDrainMeasurementClusterInstances\"},{\"Action\":\"ecs:DiscoverPollEndpoint\",\"Effect\":\"Allow\",\"Resource\":\"*\",\"Sid\":\"DiscoverAgentPollEndpoint\"},{\"Action\":\"ecr:GetAuthorizationToken\",\"Effect\":\"Allow\",\"Resource\":\"*\",\"Sid\":\"GetEcrAuthorizationToken\"},{\"Action\":[\"ecr:BatchCheckLayerAvailability\",\"ecr:GetDownloadUrlForLayer\",\"ecr:BatchGetImage\"],\"Effect\":\"Allow\",\"Resource\":\"arn:aws:ecr:ap-northeast-1:000000000000:repository/ec-portfolio-demo-api\",\"Sid\":\"PullDemoApiImage\"},{\"Action\":\"s3:GetObjectVersion\",\"Effect\":\"Allow\",\"Resource\":\"arn:aws:s3:::ec-portfolio-demo-runtime-artifacts-0ddd88e5d7c082248f67929741/runtime/spot-runtime.tar.gz\",\"Sid\":\"ReadPinnedRuntimeBundleVersion\"},{\"Action\":\"s3:GetObject\",\"Effect\":\"Allow\",\"Resource\":\"arn:aws:s3:::ec-portfolio-demo-origin-tls-776c2eab754b36a00164763604/origin-tls/letsencrypt.tar.gz\",\"Sid\":\"ReadOriginTlsArchiveOnly\"},{\"Action\":\"ssm:GetParameter\",\"Effect\":\"Allow\",\"Resource\":\"arn:aws:ssm:ap-northeast-1:000000000000:parameter/ec-portfolio/demo/origin/verify-token\",\"Sid\":\"ReadOriginVerificationToken\"},{\"Action\":\"autoscaling:CompleteLifecycleAction\",\"Effect\":\"Allow\",\"Resource\":\"arn:aws:autoscaling:ap-northeast-1:000000000000:autoScalingGroup:*:autoScalingGroupName/ec-portfolio-demo-ecs-spot-measure\",\"Sid\":\"CompleteOwnLaunchLifecycleAction\"}]}",
+          "role": "ec-portfolio-demo-ecs-spot-measure"
+        }
+      },
+      "mode": "managed"
+    },
+    {
+      "address": "aws_iam_role_policy.ecs_task_execution_measurement[0]",
+      "change": {
+        "actions": [
+          "no-op"
+        ],
+        "after": {
+          "name": "measurement-task-execution",
+          "policy": "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Action\":\"ecr:GetAuthorizationToken\",\"Effect\":\"Allow\",\"Resource\":\"*\",\"Sid\":\"GetEcrAuthorizationToken\"},{\"Action\":[\"ecr:BatchCheckLayerAvailability\",\"ecr:GetDownloadUrlForLayer\",\"ecr:BatchGetImage\"],\"Effect\":\"Allow\",\"Resource\":\"arn:aws:ecr:ap-northeast-1:000000000000:repository/ec-portfolio-demo-api\",\"Sid\":\"PullDemoApiImage\"},{\"Action\":\"ssm:GetParameters\",\"Effect\":\"Allow\",\"Resource\":[\"arn:aws:ssm:ap-northeast-1:000000000000:parameter/ec-portfolio/demo/db/master-password\",\"arn:aws:ssm:ap-northeast-1:000000000000:parameter/ec-portfolio/demo/app/auth-jwt-secret\"],\"Sid\":\"ReadApiRuntimeSecrets\"},{\"Action\":[\"logs:CreateLogStream\",\"logs:PutLogEvents\"],\"Effect\":\"Allow\",\"Resource\":\"arn:aws:logs:ap-northeast-1:000000000000:log-group:/ec-portfolio/demo/ecs/measure:log-stream:*\",\"Sid\":\"WriteMeasurementTaskLogs\"}]}",
+          "role": "ec-portfolio-demo-ecs-task-execution-measure"
+        },
+        "before": {
+          "name": "measurement-task-execution",
+          "policy": "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Action\":\"ecr:GetAuthorizationToken\",\"Effect\":\"Allow\",\"Resource\":\"*\",\"Sid\":\"GetEcrAuthorizationToken\"},{\"Action\":[\"ecr:BatchCheckLayerAvailability\",\"ecr:GetDownloadUrlForLayer\",\"ecr:BatchGetImage\"],\"Effect\":\"Allow\",\"Resource\":\"arn:aws:ecr:ap-northeast-1:000000000000:repository/ec-portfolio-demo-api\",\"Sid\":\"PullDemoApiImage\"},{\"Action\":\"ssm:GetParameters\",\"Effect\":\"Allow\",\"Resource\":[\"arn:aws:ssm:ap-northeast-1:000000000000:parameter/ec-portfolio/demo/db/master-password\",\"arn:aws:ssm:ap-northeast-1:000000000000:parameter/ec-portfolio/demo/app/auth-jwt-secret\"],\"Sid\":\"ReadApiRuntimeSecrets\"},{\"Action\":[\"logs:CreateLogStream\",\"logs:PutLogEvents\"],\"Effect\":\"Allow\",\"Resource\":\"arn:aws:logs:ap-northeast-1:000000000000:log-group:/ec-portfolio/demo/ecs/measure:log-stream:*\",\"Sid\":\"WriteMeasurementTaskLogs\"}]}",
+          "role": "ec-portfolio-demo-ecs-task-execution-measure"
+        }
+      },
+      "mode": "managed"
+    },
+    {
+      "address": "aws_launch_template.ecs_spot_measurement[0]",
+      "change": {
+        "actions": [
+          "no-op"
+        ],
+        "after": {
+          "network_interfaces": [
+            {
+              "ipv4_addresses": [],
+              "ipv4_prefixes": [],
+              "ipv6_addresses": [],
+              "ipv6_prefixes": []
+            }
+          ],
+          "security_group_names": [],
+          "vpc_security_group_ids": []
+        },
+        "before": {
+          "network_interfaces": [
+            {
+              "ipv4_addresses": [],
+              "ipv4_prefixes": [],
+              "ipv6_addresses": [],
+              "ipv6_prefixes": []
+            }
+          ],
+          "security_group_names": [],
+          "vpc_security_group_ids": []
+        }
+      },
+      "mode": "managed"
+    }
+  ],
+  "resource_drift": [
+    {
+      "address": "aws_autoscaling_group.ecs_spot_measurement[0]",
+      "change": {
+        "actions": [
+          "update"
+        ],
+        "after": {
+          "enabled_metrics": [],
+          "name": "ec-portfolio-demo-ecs-spot-measure",
+          "suspended_processes": [],
+          "termination_policies": []
+        },
+        "before": {
+          "enabled_metrics": null,
+          "name": "ec-portfolio-demo-ecs-spot-measure",
+          "suspended_processes": null,
+          "termination_policies": null
+        }
+      },
+      "mode": "managed"
+    },
+    {
+      "address": "aws_autoscaling_schedule.ecs_spot_measurement_backstop[0]",
+      "change": {
+        "actions": [
+          "update"
+        ],
+        "after": {
+          "desired_capacity": 0,
+          "end_time": null,
+          "max_size": 1,
+          "min_size": 0,
+          "recurrence": "30 0-11,16-23 * * *",
+          "start_time": "2026-10-15T00:30:00Z",
+          "time_zone": "Asia/Tokyo"
+        },
+        "before": {
+          "desired_capacity": 0,
+          "end_time": null,
+          "max_size": 1,
+          "min_size": 0,
+          "recurrence": "30 0-11,16-23 * * *",
+          "start_time": "2026-10-14T13:30:00Z",
+          "time_zone": "Asia/Tokyo"
+        }
+      },
+      "mode": "managed"
+    },
+    {
+      "address": "aws_iam_role.ecs_spot_measurement[0]",
+      "change": {
+        "actions": [
+          "update"
+        ],
+        "after": {
+          "inline_policy": [
+            {
+              "name": "measurement-host",
+              "policy": "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Action\":[\"ecs:RegisterContainerInstance\",\"ecs:DeregisterContainerInstance\",\"ecs:SubmitAttachmentStateChanges\",\"ecs:SubmitContainerStateChange\",\"ecs:SubmitTaskStateChange\"],\"Effect\":\"Allow\",\"Resource\":\"arn:aws:ecs:ap-northeast-1:000000000000:cluster/ec-portfolio-demo-measure\",\"Sid\":\"RegisterWithMeasurementClusterOnly\"},{\"Action\":[\"ecs:Poll\",\"ecs:StartTelemetrySession\",\"ecs:UpdateContainerInstancesState\"],\"Effect\":\"Allow\",\"Resource\":\"arn:aws:ecs:ap-northeast-1:000000000000:container-instance/ec-portfolio-demo-measure/*\",\"Sid\":\"PollAndDrainMeasurementClusterInstances\"},{\"Action\":\"ecs:DiscoverPollEndpoint\",\"Effect\":\"Allow\",\"Resource\":\"*\",\"Sid\":\"DiscoverAgentPollEndpoint\"},{\"Action\":\"ecr:GetAuthorizationToken\",\"Effect\":\"Allow\",\"Resource\":\"*\",\"Sid\":\"GetEcrAuthorizationToken\"},{\"Action\":[\"ecr:BatchCheckLayerAvailability\",\"ecr:GetDownloadUrlForLayer\",\"ecr:BatchGetImage\"],\"Effect\":\"Allow\",\"Resource\":\"arn:aws:ecr:ap-northeast-1:000000000000:repository/ec-portfolio-demo-api\",\"Sid\":\"PullDemoApiImage\"},{\"Action\":\"s3:GetObjectVersion\",\"Effect\":\"Allow\",\"Resource\":\"arn:aws:s3:::ec-portfolio-demo-runtime-artifacts-0ddd88e5d7c082248f67929741/runtime/spot-runtime.tar.gz\",\"Sid\":\"ReadPinnedRuntimeBundleVersion\"},{\"Action\":\"s3:GetObject\",\"Effect\":\"Allow\",\"Resource\":\"arn:aws:s3:::ec-portfolio-demo-origin-tls-776c2eab754b36a00164763604/origin-tls/letsencrypt.tar.gz\",\"Sid\":\"ReadOriginTlsArchiveOnly\"},{\"Action\":\"ssm:GetParameter\",\"Effect\":\"Allow\",\"Resource\":\"arn:aws:ssm:ap-northeast-1:000000000000:parameter/ec-portfolio/demo/origin/verify-token\",\"Sid\":\"ReadOriginVerificationToken\"},{\"Action\":\"autoscaling:CompleteLifecycleAction\",\"Effect\":\"Allow\",\"Resource\":\"arn:aws:autoscaling:ap-northeast-1:000000000000:autoScalingGroup:*:autoScalingGroupName/ec-portfolio-demo-ecs-spot-measure\",\"Sid\":\"CompleteOwnLaunchLifecycleAction\"}]}"
+            }
+          ],
+          "name": "ec-portfolio-demo-ecs-spot-measure"
+        },
+        "before": {
+          "inline_policy": [],
+          "name": "ec-portfolio-demo-ecs-spot-measure"
+        }
+      },
+      "mode": "managed"
+    },
+    {
+      "address": "aws_iam_role.ecs_task_execution_measurement[0]",
+      "change": {
+        "actions": [
+          "update"
+        ],
+        "after": {
+          "inline_policy": [
+            {
+              "name": "measurement-task-execution",
+              "policy": "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Action\":\"ecr:GetAuthorizationToken\",\"Effect\":\"Allow\",\"Resource\":\"*\",\"Sid\":\"GetEcrAuthorizationToken\"},{\"Action\":[\"ecr:BatchCheckLayerAvailability\",\"ecr:GetDownloadUrlForLayer\",\"ecr:BatchGetImage\"],\"Effect\":\"Allow\",\"Resource\":\"arn:aws:ecr:ap-northeast-1:000000000000:repository/ec-portfolio-demo-api\",\"Sid\":\"PullDemoApiImage\"},{\"Action\":\"ssm:GetParameters\",\"Effect\":\"Allow\",\"Resource\":[\"arn:aws:ssm:ap-northeast-1:000000000000:parameter/ec-portfolio/demo/db/master-password\",\"arn:aws:ssm:ap-northeast-1:000000000000:parameter/ec-portfolio/demo/app/auth-jwt-secret\"],\"Sid\":\"ReadApiRuntimeSecrets\"},{\"Action\":[\"logs:CreateLogStream\",\"logs:PutLogEvents\"],\"Effect\":\"Allow\",\"Resource\":\"arn:aws:logs:ap-northeast-1:000000000000:log-group:/ec-portfolio/demo/ecs/measure:log-stream:*\",\"Sid\":\"WriteMeasurementTaskLogs\"}]}"
+            }
+          ],
+          "name": "ec-portfolio-demo-ecs-task-execution-measure"
+        },
+        "before": {
+          "inline_policy": [],
+          "name": "ec-portfolio-demo-ecs-task-execution-measure"
+        }
+      },
+      "mode": "managed"
+    },
+    {
+      "address": "aws_launch_template.ecs_spot_measurement[0]",
+      "change": {
+        "actions": [
+          "update"
+        ],
+        "after": {
+          "network_interfaces": [
+            {
+              "ipv4_addresses": [],
+              "ipv4_prefixes": [],
+              "ipv6_addresses": [],
+              "ipv6_prefixes": []
+            }
+          ],
+          "security_group_names": [],
+          "vpc_security_group_ids": []
+        },
+        "before": {
+          "network_interfaces": [
+            {
+              "ipv4_addresses": null,
+              "ipv4_prefixes": null,
+              "ipv6_addresses": null,
+              "ipv6_prefixes": null
+            }
+          ],
+          "security_group_names": null,
+          "vpc_security_group_ids": null
+        }
+      },
+      "mode": "managed"
+    }
+  ],
+  "sources": [
+    {
+      "path": "phase6c5c-measure-converge-main-20261015T000721Z/converge.plan.json",
+      "sha256": "76afd7ed93d0a79066c75514f2cdf0885d76ea773dd86d73b3f9d40d399102ce"
+    },
+    {
+      "path": "phase6c5c-measure-converge-pr-20261014T233842Z/converge.plan.json",
+      "sha256": "22b14b76eab0e9f6e1441cb103f98fb95d85f80127f9664d95964be8e39972ed"
+    }
+  ],
+  "terraform_version": "1.16.0",
+  "timestamp": "2026-10-15T00:08:52Z"
+}
