@@ -150,6 +150,10 @@ jobs:
           infra/runtime/demo/publish-api-image.test.sh
           infra/runtime/demo/deploy-runtime.test.sh
 
+      # The same for the frontends: whether a main push deploys them at all.
+      - name: Test frontend release scope
+        run: infra/runtime/demo/frontend-release-scope.test.sh
+
       - name: Test origin TLS persistence contract
         run: |
           set -euo pipefail
@@ -255,9 +259,41 @@ jobs:
           infra/terraform/demo/scripts/cold-standby-plan-gate.test.sh
           infra/terraform/demo/scripts/cold-standby-plan-gate.mutation.sh
 
+  # Whether this push changes what the Store and Admin frontends are built and
+  # published from, compared with the last successful demo-frontend deployment.
+  # It runs without a deployment environment or AWS credentials, before
+  # deploy-frontends asks for its approval, so an infrastructure, access, API or
+  # documentation push neither requests the approval nor publishes anything.
+  frontend-release-scope:
+    name: Frontend release scope
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      deployments: read
+    outputs:
+      frontend_changed: ${{ steps.scope.outputs.frontend_changed }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Decide whether the frontends changed since their last deployment
+        id: scope
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ github.sha }}
+        run: infra/runtime/demo/frontend-release-scope.sh
+
   deploy-frontends:
     name: Deploy Store and Admin frontends
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.frontend-release-scope.outputs.frontend_changed == 'true'
+    # Skipped when frontend-release-scope finds no frontend change since the last
+    # successful deployment; a frontend change still waits for deploy-api below.
+    #
     # deploy-api is a dependency so a release the API did not take cannot ship its
     # frontend alone. A migration change fails the guard inside build-and-push-api,
     # which skips deploy-api; without this the frontend would still go out and start
@@ -273,13 +309,14 @@ jobs:
     # this job waits with it.
     #
     # deploy-api always runs once build-and-push-api succeeds, also for a push
-    # that releases nothing to the host, so this dependency never skips the
-    # frontend of a push that does not touch the API.
+    # that releases nothing to the host, so this dependency never skips a
+    # frontend change in a push that does not touch the API.
     needs:
       - backend
       - frontend
       - docker
       - deploy-api
+      - frontend-release-scope
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: demo-frontend

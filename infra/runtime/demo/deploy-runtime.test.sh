@@ -1242,7 +1242,11 @@ runtime_install_budget=$(($(read_constant "$DEPLOY_SCRIPT" "RUNTIME_INSTALL_POLL
 assert_contains "$deploy_job" "    if: github.event_name == 'push' && github.ref == 'refs/heads/main'" \
     "deploy-api's job-level if must stay the push condition alone."
 assert_absent "$(printf '%s\n' "$deploy_job" | grep '^    if:')" "outputs" "deploy-api's job-level if must not read the scope."
-assert_absent "$(printf '%s\n' "$frontend_job" | grep '^    if:')" "outputs" "deploy-frontends must not read the scope."
+# deploy-frontends is skipped only by its own frontend scope
+# (frontend-release-scope.test.sh), never by this one.
+for api_scope_reference in "needs.build-and-push-api" "needs.deploy-api" "api_changed" "api_converge" "runtime_pending"; do
+    assert_absent "$(printf '%s\n' "$frontend_job" | grep '^    if:')" "$api_scope_reference" "deploy-frontends must not read the API release scope."
+done
 
 # Run numbers order installs only within one workflow. ci.yml must therefore be
 # the one workflow that runs this script, and the one the script accepts.
