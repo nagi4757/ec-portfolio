@@ -17,6 +17,21 @@ class InsufficientStockException : ApplicationException(ApiErrorCode.INSUFFICIEN
 
 class ProductNotAvailableException : ApplicationException(ApiErrorCode.PRODUCT_NOT_AVAILABLE)
 
+/**
+ * A stock change has to name the stock it replaces. Without that, a deliberate change
+ * cannot be told apart from a value the form loaded before checkout or a refund moved it.
+ */
+class IncompleteStockChangeException : ApplicationException(
+    ApiErrorCode.VALIDATION_FAILED,
+    "stockQuantity and expectedStockQuantity must be sent together"
+)
+
+/**
+ * The stock is no longer what the admin changed it from: checkout, a cancellation or a
+ * refund moved it first. Writing the new value anyway would silently undo theirs.
+ */
+class ProductStockConflictException : ApplicationException(ApiErrorCode.PRODUCT_STOCK_CONFLICT)
+
 class InvalidOrderStatusException : ApplicationException(ApiErrorCode.INVALID_ORDER_STATUS)
 
 class InvalidOrderTransitionException : ApplicationException(ApiErrorCode.INVALID_ORDER_TRANSITION)

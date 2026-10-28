@@ -79,6 +79,13 @@ class MyBatisProductRepository(
     }
 
     @Transactional
+    override fun compareAndSetStock(productId: Long, expectedQuantity: Int, quantity: Int): Boolean {
+        require(expectedQuantity >= 0) { "expectedQuantity must be greater than or equal to 0" }
+        require(quantity >= 0) { "quantity must be greater than or equal to 0" }
+        return mapper.compareAndSetStock(productId, expectedQuantity, quantity) > 0
+    }
+
+    @Transactional
     override fun decreaseStockIfAvailable(productId: Long, quantity: Int): Boolean {
         require(quantity > 0) { "quantity must be greater than 0" }
         return mapper.decreaseStockIfAvailable(productId, quantity) > 0
