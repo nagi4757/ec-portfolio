@@ -26,7 +26,10 @@
 #                                   one attribute the operator has read drifting
 #                                   in this saved plan, repeatable, one each;
 #                                   only DRIFT_ALLOWANCE_CEILING can be named,
-#                                   and nothing in it is allowed unless named
+#                                   and nothing in it is allowed unless named;
+#                                   a value that is not one attribute name
+#                                   (a-z, 0-9, _) is a usage error (exit 2),
+#                                   one outside the ceiling fails (exit 1)
 #
 # Checks (any failure exits 1 and the plan must not be applied):
 #   PG0  the plan is complete, not errored, applyable unless it is empty
@@ -224,7 +227,11 @@ def drift_entry_violations:
     elif $c.actions != ["update"] then "PG4 drift of \($address) is not an update: \($c.actions | tojson)"
     elif ($c.before | type) != "object" or ($c.after | type) != "object" then "PG4 drift of \($address) has no object before and after"
     elif [$c.after_unknown | .. | select(. == true)] != [] then "PG4 drift of \($address) has unknown values"
-    elif ($c.after_unknown | type | IN("null", "object")) | not then "PG4 drift of \($address) has an unreadable after_unknown"
+    # Terraform writes true for an unknown value, false for a known list
+    # element, and objects and lists of these: nothing else may be inside.
+    elif ($c.after_unknown | type | IN("null", "object") | not)
+         or ([$c.after_unknown | objects | .. | select(type | IN("boolean", "object", "array") | not)] != [])
+    then "PG4 drift of \($address) has an unreadable after_unknown"
     else
       ([$c.before, $c.after | keys[]] | unique) as $attributes
       | [$attributes[] | select(. as $k | ($c.before | has($k)) != ($c.after | has($k)))] as $added_or_removed
@@ -282,18 +289,23 @@ usage() {
 }
 
 # allow_drift <allowance> <address>:<attribute>: the allowance, an object of
-# address to attributes, with that one attribute added. Anything else, or an
-# attribute outside DRIFT_ALLOWANCE_CEILING, is refused before the plan is read.
+# address to attributes, with that one attribute added, before the plan is read.
+# A value that is not ADDRESS:ATTRIBUTE with one top-level attribute name is a
+# usage error (exit 2); a well-formed one outside DRIFT_ALLOWANCE_CEILING fails.
 allow_drift() {
     local allowance="$1" address="${2%:*}" attribute="${2##*:}"
-    [[ "$2" == *:* && -n "$address" && -n "$attribute" ]] ||
-        fail "--allow-drift takes ADDRESS:ATTRIBUTE, one attribute each: '$2'"
+    [[ "$2" == *:* && -n "$address" && -n "$attribute" &&
+        "$attribute" != *[!abcdefghijklmnopqrstuvwxyz0123456789_]* ]] || {
+        printf '%s --allow-drift takes ADDRESS:ATTRIBUTE, one attribute name (a-z, 0-9, _) each: %s\n' \
+            "$LOG_PREFIX" "'$2'" >&2
+        usage
+    }
     jq -e --arg address "$address" --arg attribute "$attribute" 'any(.[$address][]?; . == $attribute)' \
         <<<"$DRIFT_ALLOWANCE_CEILING" >/dev/null ||
         fail "--allow-drift $2 is outside the drift that may be allowed: $(jq -r \
             'to_entries | map("\(.value | join(", ")) of \(.key)") | join("; ")' <<<"$DRIFT_ALLOWANCE_CEILING")"
     jq -c --arg address "$address" --arg attribute "$attribute" '.[$address] = (.[$address] + [$attribute] | unique)' \
-        <<<"$allowance"
+        <<<"$allowance" || fail "the drift allowance could not be built"
 }
 
 work_directory=""
@@ -342,7 +354,7 @@ main() {
         case "$1" in
         --reviewed-host-policy) [[ $# -ge 2 ]] || usage; host_policy="$2"; shift 2 ;;
         --reviewed-exec-policy) [[ $# -ge 2 ]] || usage; exec_policy="$2"; shift 2 ;;
-        --allow-drift) [[ $# -ge 2 ]] || usage; allowed_drift="$(allow_drift "$allowed_drift" "$2")" || exit 1; shift 2 ;;
+        --allow-drift) [[ $# -ge 2 ]] || usage; allowed_drift="$(allow_drift "$allowed_drift" "$2")" || exit $?; shift 2 ;;
         *) usage ;;
         esac
     done

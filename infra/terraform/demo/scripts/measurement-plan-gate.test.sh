@@ -244,6 +244,18 @@ expect_fail() {
     refused=$((refused + 1))
 }
 
+usage_errors=0
+# expect_usage <mode> <plan> <expected message part> [gate options...]: options
+# that are malformed, a usage error (exit 2) before the plan is judged.
+expect_usage() {
+    local mode="$1" plan_file="$2" expected="$3"
+    shift 3
+    run_gate "$mode" "$plan_file" "$@"
+    ((gate_status == 2)) || fail "expected a usage error for $mode $plan_file $* (exit $gate_status): $gate_output"
+    [[ "$gate_output" == *"$expected"* ]] || fail "$mode $plan_file $* is a usage error for another reason: $gate_output"
+    usage_errors=$((usage_errors + 1))
+}
+
 # --- 1. each mode passes on its own plan --------------------------------------
 
 expect_pass merge merge.json
@@ -449,6 +461,23 @@ for unknown in '{instance: true}' '{tags: {Name: true}}' '{tags_all: [false, {Ow
 done
 expect_reject merge merge-drift.json "PG4 drift of aws_eip.ec2_origin has an unreadable after_unknown" \
     "$eip.after_unknown = \"instance\"" "${cutover_allowance[@]}"
+
+# Inside, after_unknown holds only what Terraform writes there: true for an
+# unknown value, false for a known element of a list, and objects and lists of
+# these. A string, number or null anywhere in it fails; Terraform's own shapes
+# without an unknown value pass, and so does an entry without after_unknown, as
+# before.
+for unreadable in '{instance: "true"}' '{instance: 1}' '{instance: null}' '{tags: {Name: "unknown"}}' \
+    '{ids: [false, 0]}' '{blocks: [{name: "true"}]}'; do
+    expect_reject merge merge-drift.json "PG4 drift of aws_eip.ec2_origin has an unreadable after_unknown" \
+        "$eip.after_unknown = $unreadable" "${cutover_allowance[@]}"
+done
+for known in '{tags: {}, tags_all: {}}' '{ids: [false, false], blocks: [{}, {settings: [false]}], empty: []}'; do
+    jq "$eip.after_unknown = $known" merge-drift.json >known.json
+    expect_pass merge known.json "${cutover_allowance[@]}"
+done
+jq "$eip |= del(.after_unknown)" merge-drift.json >known.json
+expect_pass merge known.json "${cutover_allowance[@]}"
 expect_reject merge merge-drift.json "PG4 drift of aws_eip.ec2_origin is not a managed resource" \
     '.resource_drift[0].mode = "data"' "${cutover_allowance[@]}"
 expect_reject merge merge-drift.json "PG4 drift of aws_eip.ec2_origin is not a managed resource" \
@@ -486,19 +515,25 @@ expect_reject merge merge-drift.json "PG4 drift entry without an address" \
     '.resource_drift += ["aws_eip.ec2_origin"]' "${cutover_allowance[@]}"
 
 # The allowance is checked before the plan is read, here on a plan without
-# drift: the address-only form of earlier versions and malformed values, then
-# anything beyond the five attributes of the origin Elastic IP, are refused,
-# also next to a valid allowance.
-for allowance in "" aws_eip.ec2_origin aws_eip.ec2_origin: :instance; do
-    expect_fail merge merge.json "--allow-drift takes ADDRESS:ATTRIBUTE" --allow-drift "$allowance"
+# drift. A value that is not ADDRESS:ATTRIBUTE with one top-level attribute name
+# (a-z, 0-9, _), the address-only form of earlier versions among them, is a
+# usage error (exit 2), also next to a valid allowance, and so is --allow-drift
+# without a value. A well-formed value beyond the five attributes of the origin
+# Elastic IP is refused (exit 1), as is every plan above that breaks the policy.
+for allowance in "" aws_eip.ec2_origin aws_eip.ec2_origin: :instance aws_eip.ec2_origin:Instance \
+    "aws_eip.ec2_origin:instance,tags" "aws_eip.ec2_origin:*" aws_eip.ec2_origin:tags.Name "aws_eip.ec2_origin: instance"; do
+    expect_usage merge merge.json "--allow-drift takes ADDRESS:ATTRIBUTE" --allow-drift "$allowance"
 done
+expect_usage merge merge-drift.json "--allow-drift takes ADDRESS:ATTRIBUTE" \
+    "${cutover_allowance[@]}" --allow-drift aws_eip.ec2_origin
+expect_usage merge merge.json "Usage:" --allow-drift
 for allowance in aws_eip.ec2_origin:tags aws_eip.ec2_origin:tags_all aws_eip.ec2_origin:domain aws_eip.ec2_origin:public_ip \
-    aws_eip.ec2_origin:Instance "aws_eip.ec2_origin:instance,tags" "aws_eip.ec2_origin:*" aws_eip.ec2_origin:instance:tags \
-    "aws_eip.ec2_origin[0]:instance" aws_route53_record.origin_demo:records aws_instance.demo:instance_state; do
+    aws_eip.ec2_origin:instance:tags "aws_eip.ec2_origin[0]:instance" aws_route53_record.origin_demo:records \
+    aws_instance.demo:instance_state; do
     expect_fail merge merge.json "is outside the drift that may be allowed" --allow-drift "$allowance"
 done
 expect_fail merge merge-drift.json "is outside the drift that may be allowed" \
     "${cutover_allowance[@]}" --allow-drift aws_eip.ec2_origin:tags
 
-printf '[measurement-plan-gate-test] PASS (4 modes, %d mutants rejected, %d runs refused for their drift allowance)\n' \
-    "$mutants" "$refused"
+printf '[measurement-plan-gate-test] PASS (4 modes, %d mutants rejected, %d runs refused for their drift allowance, %d usage errors)\n' \
+    "$mutants" "$refused" "$usage_errors"
