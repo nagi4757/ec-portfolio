@@ -994,9 +994,17 @@ The account digest comes from the reviewed baseline, not from the plan. Expected
 - runs `terraform show -json` on the saved plan itself (without AWS variables) and rejects a plan JSON that is not exactly that output;
 - accepts exactly the 25 creates with the values the reviewed source renders to (state machine definitions, IAM and trust documents, SSM content), no replace, delete, import or move, every existing resource and output a no-op, and only the listed drift fields;
 - requires every new schedule and rule to be `DISABLED`, known at plan time;
+- lets AWS provider 6.62.0 leave unknown only the settings it computes and the source does not set, by exact address (`PROVIDER_COMPUTED_UNKNOWN` in `scripts/cold-standby-plan-addresses.json`): logging, tracing, encryption and version description of the five state machines, `inline_policy` of the three roles, point-in-time recovery and global secondary indexes of the table. Each must be unknown as a whole with no planned value; any other unknown of a checked setting, or a planned value that turns one on, is a rejection. The database's `latest_restorable_time` may drift with its `status`, as in the measurement stack plans;
 - requires the Demo source to be committed and unchanged while it runs, and records the commit, the account digest, the Terraform version and the digests of the saved plan and of the plan JSON.
 
 `verify` checks, right before the apply, that the saved plan still has the reviewed digest and the checkout is still the reviewed commit with a clean Demo source. Terraform itself refuses a saved plan whose state changed after it was made. Any rejected plan is kept as evidence and not applied. After the apply a convergence plan reports `No changes`, and a read-only check confirms the four new schedules and three rules are `DISABLED`, no state machine has an execution, and the On-Demand host, Elastic IP, database, Spot group and the existing schedules are as before.
+
+Because those settings are final only after the apply, the read-only check after it also reads them back:
+
+- each role: its inline policies are exactly its reviewed `aws_iam_role_policy`, no managed policy is attached, no permissions boundary;
+- each state machine: logging `OFF` with no destination, tracing disabled, encryption `AWS_OWNED_KEY`, no published version;
+- the table: point-in-time recovery disabled, no global or local secondary index, streams disabled, AWS owned encryption, deletion protection on;
+- the four schedules and three rules `DISABLED`, the 25 new resources and nothing else, and every existing resource as before.
 
 No state machine is started by hand and no rehearsal runs after this apply. The live check of the On-Demand public IPv4 condition (V2-B), which the orchestrator policy depends on, is a prerequisite of the rehearsal step (P3-b), not of this one; until it has passed, nothing after P3-a starts. If it shows that the condition must change, the policy change gets its own plan and gate before P3-b.
 

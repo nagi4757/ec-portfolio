@@ -102,6 +102,7 @@
       "associate_public_ip_address"
     ],
     "aws_db_instance.demo": [
+      "latest_restorable_time",
       "status"
     ],
     "aws_eip.ec2_origin": [
@@ -112,6 +113,13 @@
       "private_dns",
       "public_dns"
     ]
+  },
+  "PROVIDER_COMPUTED_UNKNOWN": {
+    "aws_sfn_state_machine.runtime": ["encryption_configuration", "logging_configuration", "tracing_configuration", "version_description"],
+    "aws_iam_role.runtime_orchestrator": ["inline_policy"],
+    "aws_iam_role.runtime_eip_writer": ["inline_policy"],
+    "aws_iam_role.runtime_events": ["inline_policy"],
+    "aws_dynamodb_table.runtime_control": ["global_secondary_index", "point_in_time_recovery"]
   },
   "MEASUREMENT_DRIFT_RULES": {
     "aws_autoscaling_group.ecs_spot_measurement[0]": {
