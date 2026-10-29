@@ -13,7 +13,8 @@
 #     that the README records the same digest next to the block;
 #   - runs a shape gate on each: every action bound to its exact resources, the
 #     exact conditions where a statement needs one and no condition elsewhere,
-#     read-only Plan, the exact redrive denial, no wildcard, the size limit;
+#     read-only Plan apart from the definition check the provider makes while
+#     it plans, the exact redrive denial, no wildcard, the size limit;
 #   - checks that ECPortfolioAccessAdmin's CustomerManagedPolicyRead lists the
 #     five policies by exact ARN;
 #   - mutates the documents and requires the gate to reject every mutant, so the
@@ -33,7 +34,9 @@ readonly APPLY_SHA="326e60d18d480c759f259c330aed3ce83e76d09a57c7c10c9afaabbe17d6
 readonly STANDBY_SHA="01f97613658bd6bfefd6ddf605c1dd1766f905f1eeb168ecfa20745c86ee569d"
 readonly OPERATOR_SHA="740d96e849a4708c68940e9255e7e53e609db3e120cf5d3c660676b4655938fe"
 readonly REHEARSAL_SHA="022e7348539315e7f5f4a886815ac48beb198687712b2a16a5c50117810951ac"
-readonly PLAN_SHA="f885a264c5798030da5c918b21b594579f5202417cf89a4be8d4134ba8afc84b"
+readonly PLAN_SHA="0cddfdab77886feef085f7382ab373ff4812ea2f7553cd37729dba482cfda8fd"
+# The Plan document before the definition check, kept in IAM as the rollback version.
+readonly PLAN_PREVIOUS_SHA="f885a264c5798030da5c918b21b594579f5202417cf89a4be8d4134ba8afc84b"
 
 readonly APPLY_HEADING='### `ECPortfolioTerraformApplyRuntimeOrchestration`'
 readonly STANDBY_HEADING='### `ECPortfolioTerraformApplyColdStandby`'
@@ -41,6 +44,7 @@ readonly OPERATOR_HEADING='### `ECPortfolioColdStandbyOperator`'
 readonly REHEARSAL_HEADING='### `ECPortfolioColdStandbyRehearsal`'
 readonly PLAN_HEADING='### `ECPortfolioTerraformPlanRuntimeOrchestration`'
 readonly ACCESS_ADMIN_HEADING='### `ECPortfolioAccessAdmin` inline policy'
+readonly PLAN_CHANGE_HEADING='### Adding the definition check to the Plan policy'
 
 # The shape gate. Input: one policy document. Argument: $kind (apply, standby,
 # operator, rehearsal or plan). Output: one line per violation; none means the
@@ -120,6 +124,7 @@ def action_table: {
     ([("states:DescribeStateMachine", "states:ListStateMachineVersions", "states:ListTagsForResource",
        "states:ListExecutions")
       | {key: ., value: machine_arns}] | from_entries)
+    + {"states:ValidateStateMachineDefinition": ["*"]}
     + {"states:DescribeExecution": execution_arns, "states:GetExecutionHistory": execution_arns}
     + ([("dynamodb:DescribeTable", "dynamodb:DescribeContinuousBackups", "dynamodb:DescribeTimeToLive",
          "dynamodb:ListTagsOfResource", "dynamodb:GetItem")
@@ -147,6 +152,10 @@ def required_condition($kind; $actions; $resources):
 
 # Order and the one-element-list form carry no meaning in a condition.
 def normalized_condition: if . == null then null else with_entries(.value |= with_entries(.value |= (as_list | map(tostring) | sort))) end;
+
+# The one Plan action that is not a read by name: AWS provider 6.62 validates a
+# known state machine definition while it plans. It changes nothing.
+def plan_definition_check: ["states:ValidateStateMachineDefinition"];
 
 # Actions that must stay sole occupants of their statement, so a condition meant
 # for them cannot be widened to another action.
@@ -204,6 +213,7 @@ def statement_violations($kind):
            else ($resources - $table[$a]) as $extra
              | if ($extra | length) > 0 then "\($sid): \($a) on \($extra | join(","))" else empty end end),
           (if $kind == "plan" and (($a | test(":(Describe|List|Get)[A-Za-z]*$")) | not)
+              and (plan_definition_check | index($a) | not)
            then "\($sid): non-read action \($a) in the Plan document" else empty end)),
       (if ($actions | map(select(. as $a | solitary | index($a))) | length) > 0 and (($actions | length) != 1 or ($resources | length) != 1 and $actions != ["ec2:ModifyNetworkInterfaceAttribute"])
        then "\($sid): \($actions | join(",")) must stand alone on one resource" else empty end),
@@ -348,6 +358,24 @@ for index in 0 1 2 3 4; do
     [[ -z "$gate_output" ]] || fail "$kind: the reviewed document fails the shape gate:
 $gate_output"
 done
+
+# The Plan document is the previous version plus the definition check and nothing
+# else, and its change keeps that previous version for the rollback: the read-back
+# names its digest, the rollback makes it the default again, and no step deletes a
+# version.
+jq 'del(.Statement[] | select(.Sid == "ValidateStateMachineDefinitions"))' "$work_directory/plan.json" \
+    >"$work_directory/plan-previous.json"
+[[ "$("$GATE_SCRIPT" canonical "$work_directory/plan-previous.json")" == "$PLAN_PREVIOUS_SHA" ]] ||
+    fail "plan: the document is not the previous version plus ValidateStateMachineDefinitions"
+plan_change="$(awk -v heading="$PLAN_CHANGE_HEADING" '$0 == heading { found = 1; next } found && /^#/ { exit } found { print }' "$README")"
+[[ -n "$plan_change" ]] || fail "no section: $PLAN_CHANGE_HEADING"
+printf '%s' "$plan_change" | grep -Fq "\`$PLAN_PREVIOUS_SHA\`" ||
+    fail "the Plan change does not name the previous version's digest for the read-back"
+printf '%s' "$plan_change" | grep -Fq 'iam:SetDefaultPolicyVersion' ||
+    fail "the Plan change does not roll back by making the previous version the default"
+if printf '%s' "$plan_change" | grep -Eiq 'DeletePolicyVersion|delete-policy-version'; then
+    fail "the Plan change must not delete a policy version"
+fi
 
 # The gate must see every statement: a positive control that is not empty.
 run_gate apply <(jq '.Statement += [{"Sid": "Probe", "Effect": "Allow", "Action": "ec2:RunInstances", "Resource": "*"}]' \
@@ -494,6 +522,18 @@ expect_rejected plan "executions of od-standby not readable" \
     'st("ReadExactRuntimeExecutions").Resource |= map(select(test("od-standby") | not))'
 expect_rejected plan "the EIP writer role unread" \
     'st("ReadExactRuntimeRolePolicies").Resource |= map(select(test("eip-writer") | not))'
+expect_rejected plan "CreateStateMachine on * instead of the definition check" \
+    'st("ValidateStateMachineDefinitions").Action = "states:CreateStateMachine"'
+expect_rejected plan "a write action next to the definition check" \
+    'st("ValidateStateMachineDefinitions").Action = ["states:ValidateStateMachineDefinition", "states:UpdateStateMachine"]'
+expect_rejected plan "TestState on * in the Plan document" \
+    'st("ValidateStateMachineDefinitions").Action = "states:TestState"'
+expect_rejected plan "the definition check widened to all of Step Functions" \
+    'st("ValidateStateMachineDefinitions").Action = "states:*"'
+expect_rejected plan "the definition check with a pattern action" \
+    'st("ValidateStateMachineDefinitions").Action = "states:Validate*"'
+expect_rejected plan "the definition check on a state machine role" \
+    'st("ValidateStateMachineDefinitions").Resource = "arn:aws:iam::<ACCOUNT_ID>:role/ec-portfolio-demo-runtime-orchestrator"'
 
 # The AccessAdmin gate rejects a missing, widened or duplicated reference.
 access_admin_rejects() {
