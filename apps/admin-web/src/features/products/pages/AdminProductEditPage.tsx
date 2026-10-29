@@ -4,7 +4,12 @@ import { useTranslation } from 'react-i18next'
 import { ProductApi } from '@/features/products/api'
 import type { Product, CreateProduct, UpdateProduct } from '@/types/product'
 import ProductForm from '../components/ProductForm'
-import { ApiError } from '@/lib/api'
+import { saveEdit } from '../updatePayload'
+import { ApiError, isApiErrorCode } from '@/lib/api'
+
+const STOCK_CONFLICT = 'admin.feedback.stockConflict'
+const CHANGED_SINCE_LOAD = 'admin.feedback.changedSinceLoad'
+const NO_CHANGES = 'admin.feedback.noChanges'
 
 export default function AdminProductEditPage() {
     const { id } = useParams<{ id: string }>()
@@ -20,12 +25,18 @@ export default function AdminProductEditPage() {
     const [saving, setSaving] = useState(false)
     const [loadError, setLoadError] = useState<string | null>(null)
     const [saveError, setSaveError] = useState<string | null>(null)
+    const [notice, setNotice] = useState<string | null>(null)
+    // The last save if its outcome is unknown: the server may have written it.
+    const [unconfirmed, setUnconfirmed] = useState<UpdateProduct | null>(null)
     const [reloadVersion, setReloadVersion] = useState(0)
 
     useEffect(() => {
         setInitial(null)
         setLoadError(null)
         setSaveError(null)
+        setNotice(null)
+        // The next save is worked out against this load.
+        setUnconfirmed(null)
         setLoading(isEdit)
         if (!isEdit) return;
         let active = true;
@@ -47,18 +58,47 @@ export default function AdminProductEditPage() {
 
     async function handleSubmit(data: CreateProduct | UpdateProduct) {
         if (saving || (!isNew && (!isEdit || initial?.id !== productId))) return
+        const stockConflictShown = saveError === STOCK_CONFLICT
         setSaving(true)
         setSaveError(null)
+        setNotice(null)
         try {
             if (isNew) {
                 await ProductApi.create(data as CreateProduct)
             } else if (isEdit) {
-                await ProductApi.update(productId!, data as UpdateProduct)
+                const result = await saveEdit(initial!, data as UpdateProduct, unconfirmed, {
+                    read: () => ProductApi.get(productId!),
+                    update: changes => ProductApi.update(productId!, changes),
+                })
+                setUnconfirmed(result.unconfirmed)
+                // A refusal wrote nothing, and is shown below as before.
+                if (result.outcome === 'refused') throw result.cause
+                if (result.outcome === 'noChanges') {
+                    // The form still holds the stock a conflict refused, so the conflict's
+                    // warning and the reload stay up.
+                    if (stockConflictShown) setSaveError(STOCK_CONFLICT)
+                    setNotice(NO_CHANGES)
+                    return
+                }
+                if (result.outcome !== 'saved') {
+                    setSaveError(result.outcome === 'changedSinceLoad'
+                        ? CHANGED_SINCE_LOAD
+                        : result.outcome === 'checkFailed'
+                            ? 'admin.feedback.checkFailed' : 'admin.feedback.saveOutcomeUnknown')
+                    return
+                }
             } else {
                 throw new Error(`Invalid product id: ${id}`)
             }
             navigate('/products')
         } catch (cause) {
+            if (isApiErrorCode(cause, 'PRODUCT_STOCK_CONFLICT')) {
+                // Checkout or a refund moved the stock after this form loaded, and
+                // nothing was saved. Reloading is left to the admin: it replaces
+                // everything they typed.
+                setSaveError(STOCK_CONFLICT)
+                return
+            }
             setSaveError(cause instanceof ApiError && cause.status === 400
                 ? 'admin.feedback.invalidInput'
                 : cause instanceof ApiError && cause.status === 404
@@ -85,7 +125,20 @@ export default function AdminProductEditPage() {
         <div style={{ padding: 24 }}>
             <h1>{isNew ? '상품 등록' : `상품 수정 #${id}`}</h1>
             {saveError && <p role="alert" style={{ color: '#e53e3e' }}>{t(saveError)}</p>}
-            <ProductForm key={id ?? 'new'} initial={isNew ? null : initial} onSubmit={handleSubmit} submitting={saving} />
+            {(saveError === STOCK_CONFLICT || saveError === CHANGED_SINCE_LOAD) && (
+                // Refetches from the server; the new key rebuilds the form from that
+                // response instead of keeping the state of the rejected edit.
+                <button type="button" onClick={() => setReloadVersion(value => value + 1)}>
+                    {t('admin.feedback.reloadLatest')}
+                </button>
+            )}
+            {notice && <p role="status">{t(notice)}</p>}
+            <ProductForm
+                key={`${id ?? 'new'}:${reloadVersion}`}
+                initial={isNew ? null : initial}
+                onSubmit={handleSubmit}
+                submitting={saving}
+            />
         </div>
     )
 }

@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { CreateProduct, UpdateProduct, Product } from '@/types/product'
+import { buildUpdatePayload } from '../updatePayload'
 
 type Props = {
     initial?: Product | null
@@ -22,7 +23,7 @@ export default function ProductForm({ initial, onSubmit, submitting }: Props) {
             onSubmit={async (e) => {
                 e.preventDefault()
                 const payload = initial
-                    ? ({ name, price, stockQuantity, imageUrl, description } as UpdateProduct)
+                    ? buildUpdatePayload(initial, { name, price, stockQuantity, imageUrl, description })
                     : ({ name, price, stockQuantity, imageUrl, description } as CreateProduct)
                 await onSubmit(payload)
             }}

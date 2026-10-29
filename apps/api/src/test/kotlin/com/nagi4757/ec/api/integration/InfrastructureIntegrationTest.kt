@@ -27,6 +27,7 @@ import com.nagi4757.ec.api.payment.application.PaymentRequestFingerprint
 import com.nagi4757.ec.api.payment.domain.model.PaymentAttemptStatus
 import com.nagi4757.ec.api.payment.domain.repository.PaymentAttemptRepository
 import com.nagi4757.ec.api.product.domain.model.Product
+import com.nagi4757.ec.api.product.domain.repository.ProductFieldChanges
 import com.nagi4757.ec.api.product.domain.repository.ProductRepository
 import com.nagi4757.ec.api.product.domain.repository.ProductSearchCondition
 import org.assertj.core.api.Assertions.assertThat
@@ -704,11 +705,60 @@ class InfrastructureIntegrationTest @Autowired constructor(
             )
         )
 
+        // Read straight from the column, past the MyBatis mapping.
+        fun storedStock(): Int? = jdbcTemplate.queryForObject(
+            "SELECT stock_quantity FROM products WHERE id = ?", Int::class.java, productId
+        )
+
         val created = requireNotNull(productRepository.findById(productId))
         assertThat(created.stockQuantity).isEqualTo(12)
 
-        assertThat(productRepository.update(created.copy(stockQuantity = 4))).isTrue()
+        // The field update writes the fields it is given and never the stock: the changes
+        // it takes have no stock to carry.
+        val renamed = "${created.name}-renamed"
+        assertThat(productRepository.updateFields(productId, ProductFieldChanges(name = renamed))).isTrue()
+        val updated = requireNotNull(productRepository.findById(productId))
+        assertThat(updated.name).isEqualTo(renamed)
+        assertThat(updated.stockQuantity).isEqualTo(12)
+        assertThat(storedStock()).isEqualTo(12)
+
+        // The stock changes only through compare-and-set against the current value.
+        assertThat(productRepository.compareAndSetStock(productId, 12, 4)).isTrue()
         assertThat(productRepository.findById(productId)?.stockQuantity).isEqualTo(4)
+        assertThat(storedStock()).isEqualTo(4)
+
+        // 12 is stale now, so the change is refused and the stock is left as it was.
+        assertThat(productRepository.compareAndSetStock(productId, 12, 9)).isFalse()
+        assertThat(productRepository.findById(productId)?.stockQuantity).isEqualTo(4)
+        assertThat(storedStock()).isEqualTo(4)
+    }
+
+    @Test
+    @Transactional
+    fun `updates only the product fields it is given`() {
+        val productId = productRepository.create(
+            Product(
+                name = "partial-${UUID.randomUUID()}",
+                price = 15_000L,
+                stockQuantity = 7,
+                imageUrl = "https://example.test/before.png",
+                description = "before"
+            )
+        )
+        val created = requireNotNull(productRepository.findById(productId))
+
+        assertThat(productRepository.updateFields(productId, ProductFieldChanges(name = "renamed"))).isTrue()
+        assertThat(productRepository.findById(productId)).isEqualTo(created.copy(name = "renamed"))
+
+        // Zero, false and an empty string are values, not "leave it".
+        val falsy = ProductFieldChanges(price = 0L, imageUrl = "", description = "", active = false)
+        assertThat(productRepository.updateFields(productId, falsy)).isTrue()
+        val expected = created.copy(name = "renamed", price = 0L, imageUrl = "", description = "", active = false)
+        assertThat(productRepository.findById(productId)).isEqualTo(expected)
+
+        // Nothing to set writes nothing.
+        assertThat(productRepository.updateFields(productId, ProductFieldChanges())).isFalse()
+        assertThat(productRepository.findById(productId)).isEqualTo(expected)
     }
 
     @Test

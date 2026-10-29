@@ -25,7 +25,12 @@ interface ProductMapper {
     ): List<ProductRecord>
 
     fun insert(record: ProductRecord): Int
-    fun update(record: ProductRecord): Int
+    fun updateFields(record: ProductRecord): Int
+    fun compareAndSetStock(
+        @Param("productId") productId: Long,
+        @Param("expectedQuantity") expectedQuantity: Int,
+        @Param("quantity") quantity: Int
+    ): Int
     fun decreaseStockIfAvailable(
         @Param("productId") productId: Long,
         @Param("quantity") quantity: Int
