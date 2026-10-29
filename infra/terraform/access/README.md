@@ -2882,7 +2882,8 @@ It also checks that `CustomerManagedPolicyRead` lists the five policies.
 After the policies are attached, read-only, each separately approved:
 
 1. Discovery: Plan lists 7 references and Apply 18; nothing else changed.
-2. The five policies read back as AccessAdmin: one version, the default,
+2. The five policies read back as AccessAdmin: one version, the default
+   (two for the Plan policy once the definition check below is applied),
    attached once, and documents whose canonical SHA-256 (account ID replaced by
    `<ACCOUNT_ID>`) is the one recorded here.
 3. The dry-run matrix, as Apply, with `--dry-run` only (no attribute is changed):
@@ -2945,26 +2946,35 @@ Apply references. Keeping it attached longer is a separate, recorded decision.
 
 `ECPortfolioTerraformPlanRuntimeOrchestration` was created without
 `ValidateStateMachineDefinitions`. The document above adds that one statement and
-nothing else; the other four documents are unchanged. Each step is approved
-separately; any AccessDenied or difference is a STOP.
+nothing else; the other four documents are unchanged. The previous version stays
+in IAM for the rollback. Each step is approved separately; any AccessDenied or
+difference is a STOP.
 
 1. Discovery: Plan carries 7 and Apply 17 customer managed policy references, and
-   the baseline equals the previous one.
+   the baseline equals the previous one. The Plan policy has fewer than five
+   versions; IAM keeps at most five, so with five the change STOPs here and no
+   version is deleted to make room.
 2. An administrator renders the Plan document above from merged `main`, checks its
-   canonical SHA-256 against the one recorded here, fills `<ACCOUNT_ID>`, creates
-   it as a new default version of `ECPortfolioTerraformPlanRuntimeOrchestration`
-   and deletes the previous version. The policy stays attached under the same
-   name, so no permission set reference changes. AccessAdmin cannot do this:
-   its `iam:CreatePolicyVersion` names `ECPortfolioTerraformApplyOriginTls` only.
+   canonical SHA-256 against the one recorded here, fills `<ACCOUNT_ID>` and
+   creates it as a new version of `ECPortfolioTerraformPlanRuntimeOrchestration`
+   with `--set-as-default`. The previous version is kept, not deleted. The policy
+   stays attached under the same name, so no permission set reference changes.
+   AccessAdmin cannot do this: its `iam:CreatePolicyVersion` names
+   `ECPortfolioTerraformApplyOriginTls` only.
 3. Discovery: Plan 7 and Apply 17 again; the permission set baseline equals the
    previous one, and the customer managed policy export differs only in this
-   policy's row (default version and document digest). The policy reads back as
-   AccessAdmin with one version, the default, whose canonical SHA-256 is the one
-   recorded here.
+   policy's row (default version, version count and document digest). Read back
+   as AccessAdmin: the new version is the default and its canonical SHA-256 is the
+   one recorded here; the previous version is still present, not the default,
+   and its canonical SHA-256 is
+   `f885a264c5798030da5c918b21b594579f5202417cf89a4be8d4134ba8afc84b`, the
+   document before this change.
 4. The Demo root: the P3-a saved plan, as before.
 
-Rollback: create the previous document again as the default version and delete
-this one; the Demo plan then fails closed with the same AccessDenied.
+Rollback: the administrator makes the previous version the default again
+(`iam:SetDefaultPolicyVersion`) and deletes nothing; the read-back of step 3 then
+shows the previous version as the default, and the Demo plan fails closed with
+the same AccessDenied.
 
 ### Rollback
 

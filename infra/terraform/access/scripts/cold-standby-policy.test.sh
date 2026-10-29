@@ -35,6 +35,8 @@ readonly STANDBY_SHA="01f97613658bd6bfefd6ddf605c1dd1766f905f1eeb168ecfa20745c86
 readonly OPERATOR_SHA="740d96e849a4708c68940e9255e7e53e609db3e120cf5d3c660676b4655938fe"
 readonly REHEARSAL_SHA="022e7348539315e7f5f4a886815ac48beb198687712b2a16a5c50117810951ac"
 readonly PLAN_SHA="0cddfdab77886feef085f7382ab373ff4812ea2f7553cd37729dba482cfda8fd"
+# The Plan document before the definition check, kept in IAM as the rollback version.
+readonly PLAN_PREVIOUS_SHA="f885a264c5798030da5c918b21b594579f5202417cf89a4be8d4134ba8afc84b"
 
 readonly APPLY_HEADING='### `ECPortfolioTerraformApplyRuntimeOrchestration`'
 readonly STANDBY_HEADING='### `ECPortfolioTerraformApplyColdStandby`'
@@ -42,6 +44,7 @@ readonly OPERATOR_HEADING='### `ECPortfolioColdStandbyOperator`'
 readonly REHEARSAL_HEADING='### `ECPortfolioColdStandbyRehearsal`'
 readonly PLAN_HEADING='### `ECPortfolioTerraformPlanRuntimeOrchestration`'
 readonly ACCESS_ADMIN_HEADING='### `ECPortfolioAccessAdmin` inline policy'
+readonly PLAN_CHANGE_HEADING='### Adding the definition check to the Plan policy'
 
 # The shape gate. Input: one policy document. Argument: $kind (apply, standby,
 # operator, rehearsal or plan). Output: one line per violation; none means the
@@ -355,6 +358,24 @@ for index in 0 1 2 3 4; do
     [[ -z "$gate_output" ]] || fail "$kind: the reviewed document fails the shape gate:
 $gate_output"
 done
+
+# The Plan document is the previous version plus the definition check and nothing
+# else, and its change keeps that previous version for the rollback: the read-back
+# names its digest, the rollback makes it the default again, and no step deletes a
+# version.
+jq 'del(.Statement[] | select(.Sid == "ValidateStateMachineDefinitions"))' "$work_directory/plan.json" \
+    >"$work_directory/plan-previous.json"
+[[ "$("$GATE_SCRIPT" canonical "$work_directory/plan-previous.json")" == "$PLAN_PREVIOUS_SHA" ]] ||
+    fail "plan: the document is not the previous version plus ValidateStateMachineDefinitions"
+plan_change="$(awk -v heading="$PLAN_CHANGE_HEADING" '$0 == heading { found = 1; next } found && /^#/ { exit } found { print }' "$README")"
+[[ -n "$plan_change" ]] || fail "no section: $PLAN_CHANGE_HEADING"
+printf '%s' "$plan_change" | grep -Fq "\`$PLAN_PREVIOUS_SHA\`" ||
+    fail "the Plan change does not name the previous version's digest for the read-back"
+printf '%s' "$plan_change" | grep -Fq 'iam:SetDefaultPolicyVersion' ||
+    fail "the Plan change does not roll back by making the previous version the default"
+if printf '%s' "$plan_change" | grep -Eiq 'DeletePolicyVersion|delete-policy-version'; then
+    fail "the Plan change must not delete a policy version"
+fi
 
 # The gate must see every statement: a positive control that is not empty.
 run_gate apply <(jq '.Statement += [{"Sid": "Probe", "Effect": "Allow", "Action": "ec2:RunInstances", "Resource": "*"}]' \
