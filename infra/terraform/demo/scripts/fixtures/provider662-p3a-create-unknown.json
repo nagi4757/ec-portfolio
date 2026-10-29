@@ -1,0 +1,395 @@
+{
+  "MOCK": "after_unknown of the 25 creates of the real P3-a saved plan (AWS provider 6.62.0, Terraform 1.16.0, 2026-10-29); booleans only, no planned value",
+  "after_unknown": {
+    "aws_cloudwatch_event_rule.origin_guard_signals": {
+      "arn": true,
+      "id": true,
+      "name_prefix": true,
+      "tags": {},
+      "tags_all": {}
+    },
+    "aws_cloudwatch_event_rule.runtime_orchestration_failed": {
+      "arn": true,
+      "id": true,
+      "name_prefix": true,
+      "tags": {},
+      "tags_all": {}
+    },
+    "aws_cloudwatch_event_rule.spot_capacity_unavailable": {
+      "arn": true,
+      "id": true,
+      "name_prefix": true,
+      "tags": {},
+      "tags_all": {}
+    },
+    "aws_cloudwatch_event_target.origin_guard_signals_od_standby": {
+      "appsync_target": [],
+      "arn": true,
+      "batch_target": [],
+      "dead_letter_config": [],
+      "ecs_target": [],
+      "http_target": [],
+      "id": true,
+      "input_transformer": [
+        {
+          "input_paths": {}
+        }
+      ],
+      "kinesis_target": [],
+      "redshift_target": [],
+      "retry_policy": [],
+      "role_arn": true,
+      "run_command_targets": [],
+      "sagemaker_pipeline_target": [],
+      "sqs_target": []
+    },
+    "aws_cloudwatch_event_target.origin_guard_signals_origin_guard": {
+      "appsync_target": [],
+      "arn": true,
+      "batch_target": [],
+      "dead_letter_config": [],
+      "ecs_target": [],
+      "http_target": [],
+      "id": true,
+      "input_transformer": [
+        {
+          "input_paths": {}
+        }
+      ],
+      "kinesis_target": [],
+      "redshift_target": [],
+      "retry_policy": [],
+      "role_arn": true,
+      "run_command_targets": [],
+      "sagemaker_pipeline_target": [],
+      "sqs_target": []
+    },
+    "aws_cloudwatch_event_target.runtime_orchestration_failed": {
+      "appsync_target": [],
+      "batch_target": [],
+      "dead_letter_config": [],
+      "ecs_target": [],
+      "http_target": [],
+      "id": true,
+      "input_transformer": [
+        {
+          "input_paths": {}
+        }
+      ],
+      "kinesis_target": [],
+      "redshift_target": [],
+      "retry_policy": [],
+      "run_command_targets": [],
+      "sagemaker_pipeline_target": [],
+      "sqs_target": []
+    },
+    "aws_cloudwatch_event_target.spot_capacity_unavailable": {
+      "appsync_target": [],
+      "batch_target": [],
+      "dead_letter_config": [],
+      "ecs_target": [],
+      "http_target": [],
+      "id": true,
+      "input_transformer": [
+        {
+          "input_paths": {}
+        }
+      ],
+      "kinesis_target": [],
+      "redshift_target": [],
+      "retry_policy": [],
+      "run_command_targets": [],
+      "sagemaker_pipeline_target": [],
+      "sqs_target": []
+    },
+    "aws_dynamodb_table.runtime_control": {
+      "arn": true,
+      "attribute": [
+        {}
+      ],
+      "global_secondary_index": true,
+      "global_table_witness": true,
+      "id": true,
+      "import_table": [],
+      "local_secondary_index": [],
+      "on_demand_throughput": [],
+      "point_in_time_recovery": true,
+      "read_capacity": true,
+      "replica": [],
+      "server_side_encryption": true,
+      "stream_arn": true,
+      "stream_label": true,
+      "stream_view_type": true,
+      "tags": {},
+      "tags_all": {},
+      "ttl": [
+        {}
+      ],
+      "warm_throughput": true,
+      "write_capacity": true
+    },
+    "aws_iam_role.runtime_eip_writer": {
+      "arn": true,
+      "create_date": true,
+      "id": true,
+      "inline_policy": true,
+      "managed_policy_arns": true,
+      "name_prefix": true,
+      "tags": {},
+      "tags_all": {},
+      "unique_id": true
+    },
+    "aws_iam_role.runtime_events": {
+      "arn": true,
+      "create_date": true,
+      "id": true,
+      "inline_policy": true,
+      "managed_policy_arns": true,
+      "name_prefix": true,
+      "tags": {},
+      "tags_all": {},
+      "unique_id": true
+    },
+    "aws_iam_role.runtime_orchestrator": {
+      "arn": true,
+      "create_date": true,
+      "id": true,
+      "inline_policy": true,
+      "managed_policy_arns": true,
+      "name_prefix": true,
+      "tags": {},
+      "tags_all": {},
+      "unique_id": true
+    },
+    "aws_iam_role_policy.runtime_eip_writer": {
+      "id": true,
+      "name_prefix": true,
+      "role": true
+    },
+    "aws_iam_role_policy.runtime_events": {
+      "id": true,
+      "name_prefix": true,
+      "role": true
+    },
+    "aws_iam_role_policy.runtime_orchestrator": {
+      "id": true,
+      "name_prefix": true,
+      "role": true
+    },
+    "aws_scheduler_schedule.runtime_orchestration[\"day_close\"]": {
+      "action_after_completion": true,
+      "arn": true,
+      "flexible_time_window": [
+        {}
+      ],
+      "id": true,
+      "name_prefix": true,
+      "target": [
+        {
+          "arn": true,
+          "dead_letter_config": [],
+          "ecs_parameters": [],
+          "eventbridge_parameters": [],
+          "kinesis_parameters": [],
+          "retry_policy": [
+            {}
+          ],
+          "sagemaker_pipeline_parameters": [],
+          "sqs_parameters": []
+        }
+      ]
+    },
+    "aws_scheduler_schedule.runtime_orchestration[\"day_open\"]": {
+      "action_after_completion": true,
+      "arn": true,
+      "flexible_time_window": [
+        {}
+      ],
+      "id": true,
+      "name_prefix": true,
+      "target": [
+        {
+          "arn": true,
+          "dead_letter_config": [],
+          "ecs_parameters": [],
+          "eventbridge_parameters": [],
+          "kinesis_parameters": [],
+          "retry_policy": [
+            {}
+          ],
+          "sagemaker_pipeline_parameters": [],
+          "sqs_parameters": []
+        }
+      ]
+    },
+    "aws_scheduler_schedule.runtime_orchestration[\"origin_guard_tick\"]": {
+      "action_after_completion": true,
+      "arn": true,
+      "flexible_time_window": [
+        {}
+      ],
+      "id": true,
+      "name_prefix": true,
+      "target": [
+        {
+          "arn": true,
+          "dead_letter_config": [],
+          "ecs_parameters": [],
+          "eventbridge_parameters": [],
+          "kinesis_parameters": [],
+          "retry_policy": [
+            {}
+          ],
+          "sagemaker_pipeline_parameters": [],
+          "sqs_parameters": []
+        }
+      ]
+    },
+    "aws_scheduler_schedule.runtime_orchestration[\"ready_check\"]": {
+      "action_after_completion": true,
+      "arn": true,
+      "flexible_time_window": [
+        {}
+      ],
+      "id": true,
+      "name_prefix": true,
+      "target": [
+        {
+          "arn": true,
+          "dead_letter_config": [],
+          "ecs_parameters": [],
+          "eventbridge_parameters": [],
+          "kinesis_parameters": [],
+          "retry_policy": [
+            {}
+          ],
+          "sagemaker_pipeline_parameters": [],
+          "sqs_parameters": []
+        }
+      ]
+    },
+    "aws_sfn_state_machine.runtime[\"day_close\"]": {
+      "arn": true,
+      "creation_date": true,
+      "description": true,
+      "encryption_configuration": true,
+      "id": true,
+      "logging_configuration": true,
+      "name_prefix": true,
+      "revision_id": true,
+      "role_arn": true,
+      "state_machine_version_arn": true,
+      "status": true,
+      "tags": {},
+      "tags_all": {},
+      "tracing_configuration": true,
+      "version_description": true
+    },
+    "aws_sfn_state_machine.runtime[\"day_open\"]": {
+      "arn": true,
+      "creation_date": true,
+      "description": true,
+      "encryption_configuration": true,
+      "id": true,
+      "logging_configuration": true,
+      "name_prefix": true,
+      "revision_id": true,
+      "role_arn": true,
+      "state_machine_version_arn": true,
+      "status": true,
+      "tags": {},
+      "tags_all": {},
+      "tracing_configuration": true,
+      "version_description": true
+    },
+    "aws_sfn_state_machine.runtime[\"od_standby\"]": {
+      "arn": true,
+      "creation_date": true,
+      "description": true,
+      "encryption_configuration": true,
+      "id": true,
+      "logging_configuration": true,
+      "name_prefix": true,
+      "revision_id": true,
+      "role_arn": true,
+      "state_machine_version_arn": true,
+      "status": true,
+      "tags": {},
+      "tags_all": {},
+      "tracing_configuration": true,
+      "version_description": true
+    },
+    "aws_sfn_state_machine.runtime[\"origin_guard\"]": {
+      "arn": true,
+      "creation_date": true,
+      "description": true,
+      "encryption_configuration": true,
+      "id": true,
+      "logging_configuration": true,
+      "name_prefix": true,
+      "revision_id": true,
+      "role_arn": true,
+      "state_machine_version_arn": true,
+      "status": true,
+      "tags": {},
+      "tags_all": {},
+      "tracing_configuration": true,
+      "version_description": true
+    },
+    "aws_sfn_state_machine.runtime[\"ready_check\"]": {
+      "arn": true,
+      "creation_date": true,
+      "description": true,
+      "encryption_configuration": true,
+      "id": true,
+      "logging_configuration": true,
+      "name_prefix": true,
+      "revision_id": true,
+      "role_arn": true,
+      "state_machine_version_arn": true,
+      "status": true,
+      "tags": {},
+      "tags_all": {},
+      "tracing_configuration": true,
+      "version_description": true
+    },
+    "aws_ssm_document.od_readiness": {
+      "arn": true,
+      "attachments_source": [],
+      "created_date": true,
+      "default_version": true,
+      "description": true,
+      "document_version": true,
+      "hash": true,
+      "hash_type": true,
+      "id": true,
+      "latest_version": true,
+      "owner": true,
+      "parameter": true,
+      "platform_types": true,
+      "schema_version": true,
+      "status": true,
+      "tags": {},
+      "tags_all": {}
+    },
+    "aws_ssm_document.spot_smoke": {
+      "arn": true,
+      "attachments_source": [],
+      "created_date": true,
+      "default_version": true,
+      "description": true,
+      "document_version": true,
+      "hash": true,
+      "hash_type": true,
+      "id": true,
+      "latest_version": true,
+      "owner": true,
+      "parameter": true,
+      "platform_types": true,
+      "schema_version": true,
+      "status": true,
+      "tags": {},
+      "tags_all": {}
+    }
+  }
+}

@@ -106,11 +106,42 @@ def bind_refreshed(plan, address, values):
         synchronize(plan)
 
 
+# The after_unknown AWS provider 6.62.0 gave the 25 creates of the real P3-a
+# saved plan (booleans only; no planned value of that plan is kept).
+PROVIDER_SHAPE = json.loads((HERE / "fixtures/provider662-p3a-create-unknown.json").read_text())["after_unknown"]
+
+
+def unknown_to_null(value, unknown):
+    """The planned value as the provider leaves it: null wherever it is unknown."""
+    if unknown is True:
+        return None
+    if isinstance(unknown, dict):
+        value = dict(value) if isinstance(value, dict) else {}
+        for key, child in unknown.items():
+            if child is True or child not in ({}, [], False):
+                value[key] = unknown_to_null(value.get(key), child)
+        return value
+    if isinstance(unknown, list) and isinstance(value, list):
+        return [unknown_to_null(v, unknown[i]) if i < len(unknown) else v for i, v in enumerate(value)]
+    return value
+
+
+def provider_plan():
+    """The fixture plan with the real provider's unknown structure on the 25 creates."""
+    plan = copy.deepcopy(PLAN)
+    for address, unknown in PROVIDER_SHAPE.items():
+        change = resource(plan, address)["change"]
+        change["after_unknown"] = copy.deepcopy(unknown)
+        change["after"] = unknown_to_null(change["after"], unknown)
+    synchronize(plan)
+    return plan
+
+
 class FixtureTests(unittest.TestCase):
-    def reject(self, mutate, prefix=None, sync=True, context=False):
+    def reject(self, mutate, prefix=None, sync=True, context=False, base=None):
         global FIXTURE_CHECKS
         FIXTURE_CHECKS += 1
-        plan = copy.deepcopy(PLAN)
+        plan = copy.deepcopy(PLAN if base is None else base)
         mutate(plan)
         if sync:
             synchronize(plan)
@@ -285,12 +316,92 @@ class FixtureTests(unittest.TestCase):
         target["values"] = copy.deepcopy(after(plan, address))
         target["values"].pop("managed_policy_arns")
         self.assertEqual(G.validate(plan, RENDERED)["result"], "PASS")
-        for field in ("inline_policy", "permissions_boundary", "force_detach_policies"):
+        # inline_policy is the one other role setting the provider computes; it
+        # may be unknown as a whole with no planned policy. Boundaries and
+        # force-detach have no such exception.
+        inline = copy.deepcopy(plan)
+        after(inline, address)["inline_policy"] = None
+        resource(inline, address)["change"]["after_unknown"]["inline_policy"] = True
+        synchronize(inline)
+        self.assertEqual(G.validate(inline, RENDERED)["result"], "PASS")
+        for field in ("permissions_boundary", "force_detach_policies"):
             def unknown(p):
                 after(p, address)[field] = None
                 resource(p, address)["change"]["after_unknown"] = {field: True}
             self.reject(unknown, "PG5")
         self.reject(lambda p: configuration(p, address)["expressions"].update(managed_policy_arns={"references": ["aws_iam_policy.unreviewed.arn"]}), "PG5")
+
+    def test_real_provider_662_unknown_shape_passes(self):
+        listed = {(base, key) for base, keys in G.COMPUTED_UNKNOWN.items() for key in keys}
+        seen = {(address.split("[")[0], key) for address, unknown in PROVIDER_SHAPE.items() for key, value in unknown.items() if value is True}
+        self.assertTrue(listed <= seen, sorted(listed - seen))
+        self.assertEqual(set(PROVIDER_SHAPE), G.NEW)
+        self.assertEqual(G.validate(provider_plan(), RENDERED)["result"], "PASS")
+
+    def test_provider_computed_unknown_only_as_listed_whole_and_unplanned(self):
+        base = provider_plan()
+        machine = 'aws_sfn_state_machine.runtime["day_open"]'
+        table = "aws_dynamodb_table.runtime_control"
+        def unknown(address, key, value=None, mark=True):
+            def mutate(p):
+                after(p, address)[key] = value
+                resource(p, address)["change"]["after_unknown"][key] = mark
+            return mutate
+        for address, key in ((machine, "publish"), (table, "stream_enabled"), (table, "local_secondary_index"), (table, "replica"),
+                             ("aws_iam_role.runtime_events", "permissions_boundary"), ("aws_iam_role.runtime_orchestrator", "force_detach_policies")):
+            self.reject(unknown(address, key), "PG5 unexpected unknown " + address.split("[")[0] + "/" + key, base=base)
+        self.reject(unknown(machine, "tracing_configuration", [], [{"enabled": True}]), "PG5 partially unknown computed setting", base=base)
+        # An unknown setting with a planned value is already rejected as an
+        # unknown leaf with a concrete value, before the setting checks.
+        self.reject(unknown(machine, "logging_configuration", [{"level": "OFF", "include_execution_data": False}]), "PG2 unknown leaf has concrete value", base=base)
+        self.reject(unknown("aws_iam_role.runtime_eip_writer", "inline_policy", [{"name": "MOCK", "policy": "{}"}]), "PG2 unknown leaf has concrete value", base=base)
+        self.reject(unknown(table, "global_secondary_index", [{"name": "MOCK", "hash_key": "pk", "projection_type": "ALL"}]), "PG2 unknown leaf has concrete value", base=base)
+        self.reject(lambda p: configuration(p, "aws_sfn_state_machine.runtime")["expressions"].update(logging_configuration=[{"level": {"constant_value": "OFF"}}]), "PG5", base=base)
+        self.reject(lambda p: configuration(p, table)["expressions"].update(point_in_time_recovery=[{"enabled": {"constant_value": False}}]), "PG5", base=base)
+
+    def test_enabled_logging_tracing_kms_pitr_index_stream_and_grants_reject(self):
+        base = provider_plan()
+        machine = 'aws_sfn_state_machine.runtime["origin_guard"]'
+        table = "aws_dynamodb_table.runtime_control"
+        role = "aws_iam_role.runtime_orchestrator"
+        def known(address, key, value):
+            def mutate(p):
+                after(p, address)[key] = value
+                resource(p, address)["change"]["after_unknown"].pop(key, None)
+            return mutate
+        for address, key, value in ((machine, "logging_configuration", [{"level": "ALL", "include_execution_data": True, "log_destination": "arn:aws:logs:MOCK"}]),
+                                    (machine, "tracing_configuration", [{"enabled": True}]),
+                                    (machine, "encryption_configuration", [{"type": "CUSTOMER_MANAGED_KMS_KEY", "kms_key_id": "MOCK"}]),
+                                    (machine, "publish", True), (machine, "version_description", "MOCK"),
+                                    (table, "point_in_time_recovery", [{"enabled": True, "recovery_period_in_days": 35}]),
+                                    (table, "global_secondary_index", [{"name": "MOCK", "hash_key": "pk", "projection_type": "ALL"}]),
+                                    (table, "local_secondary_index", [{"name": "MOCK", "range_key": "sk", "projection_type": "ALL"}]),
+                                    (table, "stream_enabled", True), (table, "replica", [{"region_name": "us-east-1"}]),
+                                    (role, "inline_policy", [{"name": "MOCK", "policy": "{\"Statement\":[]}"}]),
+                                    (role, "permissions_boundary", "arn:aws:iam::aws:policy/MOCK"),
+                                    (role, "managed_policy_arns", ["arn:aws:iam::aws:policy/MOCK"])):
+            self.reject(known(address, key, value), "PG5", base=base)
+
+    def test_pg4_database_restorable_time_drifts_only_with_the_listed_fields(self):
+        value = copy.deepcopy(after(PLAN, "aws_db_instance.demo"))
+        before = dict(value, status="stopped", latest_restorable_time="2026-10-21T08:00:00Z")
+        refreshed = dict(value, status="available", latest_restorable_time="2026-10-29T02:10:00Z")
+        def drift(extra=None, actions=None):
+            def mutate(p):
+                b, a = dict(before), dict(refreshed)
+                if extra:
+                    b[extra[0]], a[extra[0]] = extra[1], extra[2]
+                p["resource_drift"] = [{"address": "aws_db_instance.demo", "change": {"actions": ["update"], "before": b, "after": a}}]
+                bind_refreshed(p, "aws_db_instance.demo", a)
+                if actions:
+                    resource(p, "aws_db_instance.demo")["change"]["actions"] = actions
+            return mutate
+        plan = copy.deepcopy(PLAN)
+        drift()(plan)
+        self.assertEqual(G.validate(plan, RENDERED)["result"], "PASS")
+        for extra in (("engine_version", "10.11.9", "10.11.10"), ("allocated_storage", 20, 30), ("publicly_accessible", False, True)):
+            self.reject(drift(extra), "PG4 unexpected drift fields")
+        self.reject(drift(actions=["update"]), "PG1")
 
     def test_context_rejects_missing_account_identity_targets_and_resource_scope(self):
         prior = lambda p, a: next(r["values"] for r in p["prior_state"]["values"]["root_module"]["resources"] if r["address"] == a)
@@ -613,7 +724,12 @@ def mutations():
                 "PG4 unexpected drift fields", "PG5 configuration provider/mode", "PG5 for_each mapping", "PG5 SM logging/tracing/version",
                 "PG5 table extras", "PG5 shared SSM document", "PG5 target extras", "PG5 role extra permissions", "PG0 instance context", "PG0 ENI context", "PG0 EIP context", "PG0 unapproved account", "PG0 planned caller account mismatch",
                 "PG0 database scope", "PG0 ASG scope", "PG0 CloudFront context", "PG2 unknown leaf has concrete value"}
+    # "PG5 computed setting with a planned value " and "PG5 computed setting
+    # configured " are not mutated: an unknown leaf with a value is rejected by
+    # PG2 first, and a configured setting by the exact configuration match and
+    # the reviewed values; they stay as a second line.
     prefixes = {"PG2 existing changed ", "PG2 existing unknown/moved", "PG5 configuration references ", "PG5 configuration constant ", "PG5 configuration block ",
+                "PG5 unexpected unknown ", "PG5 partially unknown computed setting ",
                 "PG5 configuration attributes ", "PG5 unverifiable unknown ", "PG5 reviewed JSON content ", "PG5 reviewed source value ", "PG5 reviewed source collection ", "PG0 scope "}
     chosen = []
     for call in ast.walk(tree):

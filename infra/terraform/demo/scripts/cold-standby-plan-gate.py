@@ -7,6 +7,12 @@ HCL/ASL/SSM source renders to, and leaves every existing resource, output and
 drift observation as it is. Every new schedule and rule must be DISABLED even
 if the source said otherwise.
 
+AWS provider 6.62.0 plans a few Optional+Computed settings it is not given as
+unknown. Only the exact addresses and attributes of PROVIDER_COMPUTED_UNKNOWN
+may be unknown, and only when the attribute is unknown as a whole, has no
+planned value and is absent from the configuration; their final values are
+read back after the apply.
+
 The plan JSON must be `terraform show -json` of the saved plan it is given
 with, and the Demo root must be committed; the result records both digests,
 the approved account digest and the source commit. Right before the separately
@@ -37,6 +43,7 @@ ADDRESSES = json.loads((HERE / "cold-standby-plan-addresses.json").read_text())
 NEW = set(ADDRESSES["P3A_ADDRESSES"])
 EXISTING = set(ADDRESSES["EXISTING_ADDRESSES"])
 DRIFT = ADDRESSES["DRIFT_ALLOWLIST"]
+COMPUTED_UNKNOWN = ADDRESSES["PROVIDER_COMPUTED_UNKNOWN"]
 # P3-a creates the control plane inert whatever the source says: a schedule or
 # rule that the reviewed source itself switched on still fails the gate.
 INERT_TYPES = ("aws_scheduler_schedule", "aws_cloudwatch_event_rule")
@@ -222,6 +229,23 @@ def changed_leaves(before, after, path=""):
     return [] if type(before) is type(after) and before == after else [(path, before, after)]
 
 
+def computed_unknown(base_address, change, configuration_resource, key):
+    """True when `key` of a new resource is planned unknown as a provider-computed
+    setting the reviewed source leaves unset: the exact address and attribute
+    are listed, the whole attribute is unknown, it has no planned value, and the
+    configuration does not set it. Any other unknown of a checked attribute is
+    rejected; False when it is not unknown at all."""
+    unknown = change.get("after_unknown", {}).get(key, False)
+    if not unknown:
+        return False
+    label = base_address + "/" + key
+    check(key in COMPUTED_UNKNOWN.get(base_address, ()), "PG5 unexpected unknown " + label)
+    check(unknown is True, "PG5 partially unknown computed setting " + label)
+    check(change.get("after", {}).get(key) in (None, []), "PG5 computed setting with a planned value " + label)
+    check(key not in (configuration_resource.get("expressions") or {}), "PG5 computed setting configured " + label)
+    return True
+
+
 def drift_check(plan):
     prior = indexed(resources(plan.get("prior_state", {}).get("values", {}).get("root_module", {})), "PG4 prior")
     changes = indexed(plan.get("resource_changes", []), "PG4 changes")
@@ -338,7 +362,10 @@ def validate(plan, rendered):
             managed_unknown = change.get("after_unknown", {}).get("managed_policy_arns", False)
             computed_observation = managed_policies is None and managed_unknown is True
             no_managed_grant = (managed_policies is None or managed_policies == []) and (not managed_unknown or computed_observation)
-            check(no_managed_grant and not any(actual.get(k) or change.get("after_unknown", {}).get(k) for k in ("inline_policy", "permissions_boundary", "force_detach_policies")), "PG5 role extra permissions")
+            # inline_policy is Optional+Computed too; it may be unknown only as
+            # computed_unknown allows, and never carry a planned policy.
+            check(no_managed_grant and not any(actual.get(k) or (change.get("after_unknown", {}).get(k) and not computed_unknown(base_address, change, configuration_resource, k))
+                                               for k in ("inline_policy", "permissions_boundary", "force_detach_policies")), "PG5 role extra permissions")
         if base_address == "aws_sfn_state_machine.runtime":
             logging = actual.get("logging_configuration") or []
             tracing = actual.get("tracing_configuration") or []
@@ -346,11 +373,15 @@ def validate(plan, rendered):
             tracing_off = tracing == [] or (isinstance(tracing, list) and len(tracing) == 1 and tracing[0] == {"enabled": False})
             encryption = actual.get("encryption_configuration") or []
             encryption_default = encryption == [] or (isinstance(encryption, list) and len(encryption) == 1 and encryption[0].get("type") == "AWS_OWNED_KEY" and not encryption[0].get("kms_key_id") and not encryption[0].get("kms_data_key_reuse_period_seconds") and set(encryption[0]) <= {"type", "kms_key_id", "kms_data_key_reuse_period_seconds"})
-            check(not actual.get("publish") and not actual.get("version_description") and logging_off and tracing_off and encryption_default and not any(change.get("after_unknown", {}).get(k) for k in ("publish", "version_description", "logging_configuration", "tracing_configuration", "encryption_configuration")), "PG5 SM logging/tracing/version")
+            check(not actual.get("publish") and not actual.get("version_description") and logging_off and tracing_off and encryption_default and
+                  not any(change.get("after_unknown", {}).get(k) and not computed_unknown(base_address, change, configuration_resource, k)
+                          for k in ("publish", "version_description", "logging_configuration", "tracing_configuration", "encryption_configuration")), "PG5 SM logging/tracing/version")
         if base_address == "aws_dynamodb_table.runtime_control":
             pitr = actual.get("point_in_time_recovery") or []
             pitr_off = pitr == [] or (isinstance(pitr, list) and len(pitr) == 1 and pitr[0].get("enabled") is False and pitr[0].get("recovery_period_in_days", 35) == 35 and set(pitr[0]) <= {"enabled", "recovery_period_in_days"})
-            check(pitr_off and not any(actual.get(key) or change.get("after_unknown", {}).get(key) for key in ("stream_enabled", "replica", "global_secondary_index", "local_secondary_index")) and not change.get("after_unknown", {}).get("point_in_time_recovery"), "PG5 table extras")
+            check(pitr_off and not any(actual.get(key) or (change.get("after_unknown", {}).get(key) and not computed_unknown(base_address, change, configuration_resource, key))
+                                       for key in ("stream_enabled", "replica", "global_secondary_index", "local_secondary_index")) and
+                  not (change.get("after_unknown", {}).get("point_in_time_recovery") and not computed_unknown(base_address, change, configuration_resource, "point_in_time_recovery")), "PG5 table extras")
         if base_address.startswith("aws_ssm_document."):
             check(not actual.get("permissions") and not change.get("after_unknown", {}).get("permissions"), "PG5 shared SSM document")
         if base_address.startswith("aws_cloudwatch_event_target."):
