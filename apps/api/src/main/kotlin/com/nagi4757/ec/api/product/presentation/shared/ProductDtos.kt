@@ -19,7 +19,13 @@ object ProductRequest {
     data class Update(
         val name: String? = null,
         @field:Min(0) val price: Long? = null,
+        @field:Schema(description = "New stock. Must be sent together with expectedStockQuantity.")
         @field:Min(0) val stockQuantity: Int? = null,
+        @field:Schema(
+            description = "The stock the edit was loaded with. A change is refused with " +
+                "PRODUCT_STOCK_CONFLICT if the stock no longer matches."
+        )
+        @field:Min(0) val expectedStockQuantity: Int? = null,
         val imageUrl: String? = null,
         val description: String? = null,
         val active: Boolean? = null

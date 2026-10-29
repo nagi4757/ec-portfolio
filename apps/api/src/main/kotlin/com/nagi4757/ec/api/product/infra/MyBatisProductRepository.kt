@@ -1,8 +1,10 @@
 package com.nagi4757.ec.api.product.infra
 
 import com.nagi4757.ec.api.product.infra.mapper.ProductMapper
+import com.nagi4757.ec.api.product.infra.mapper.ProductRecord
 import com.nagi4757.ec.api.product.domain.factory.ProductFactory
 import com.nagi4757.ec.api.product.domain.model.Product
+import com.nagi4757.ec.api.product.domain.repository.ProductFieldChanges
 import com.nagi4757.ec.api.product.domain.repository.ProductRepository
 import com.nagi4757.ec.api.product.domain.repository.ProductSearchCondition
 import com.nagi4757.ec.api.product.domain.repository.ProductSearchResult
@@ -72,10 +74,25 @@ class MyBatisProductRepository(
     }
 
     @Transactional
-    override fun update(product: Product): Boolean {
-        requireNotNull(product.id) { "id is required for update" }
-        val row = factory.toRecord(product)
-        return mapper.update(row) > 0
+    override fun updateFields(id: Long, changes: ProductFieldChanges): Boolean {
+        // An UPDATE with nothing to SET is not valid SQL, and there is nothing to write.
+        if (changes.isEmpty) return false
+        val row = ProductRecord(
+            id = id,
+            name = changes.name,
+            price = changes.price,
+            imageUrl = changes.imageUrl,
+            description = changes.description,
+            active = changes.active
+        )
+        return mapper.updateFields(row) > 0
+    }
+
+    @Transactional
+    override fun compareAndSetStock(productId: Long, expectedQuantity: Int, quantity: Int): Boolean {
+        require(expectedQuantity >= 0) { "expectedQuantity must be greater than or equal to 0" }
+        require(quantity >= 0) { "quantity must be greater than or equal to 0" }
+        return mapper.compareAndSetStock(productId, expectedQuantity, quantity) > 0
     }
 
     @Transactional

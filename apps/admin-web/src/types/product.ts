@@ -9,4 +9,9 @@ export type Product = {
 }
 
 export type CreateProduct = Omit<Product, 'id' | 'active'>;
-export type UpdateProduct = Partial<Omit<Product, 'id'>>;
+/**
+ * stockQuantity and expectedStockQuantity travel together or not at all. The server
+ * refuses the pair with PRODUCT_STOCK_CONFLICT once the stock is no longer the
+ * expected one.
+ */
+export type UpdateProduct = Partial<Omit<Product, 'id'>> & { expectedStockQuantity?: number };

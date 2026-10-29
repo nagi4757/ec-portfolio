@@ -69,7 +69,8 @@ class ProductAdminController(
     @ApiErrorCodes(
         ApiErrorCode.VALIDATION_FAILED,
         ApiErrorCode.MALFORMED_REQUEST,
-        ApiErrorCode.PRODUCT_NOT_FOUND
+        ApiErrorCode.PRODUCT_NOT_FOUND,
+        ApiErrorCode.PRODUCT_STOCK_CONFLICT
     )
     fun update(
         @PathVariable id: Long,
@@ -81,6 +82,7 @@ class ProductAdminController(
                 name = req.name,
                 price = req.price,
                 stockQuantity = req.stockQuantity,
+                expectedStockQuantity = req.expectedStockQuantity,
                 imageUrl = req.imageUrl,
                 description = req.description,
                 active = req.active
