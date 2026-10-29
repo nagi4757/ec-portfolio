@@ -1,0 +1,4897 @@
+{
+  "Comment": "P3-a real disabled-runtime definition; control table is empty until a separate approved arming session. Failures never broaden targets or authorization.",
+  "QueryLanguage": "JSONata",
+  "TimeoutSeconds": ${timeout_seconds},
+  "StartAt": "ReadMode",
+  "States": {
+    "ReadMode": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:getItem",
+      "Arguments": {
+        "TableName": "${table_name}",
+        "Key": {
+          "pk": {
+            "S": "mode"
+          }
+        },
+        "ConsistentRead": true
+      },
+      "Assign": {
+        "request": "{% $states.input %}",
+        "mode": "{% $exists($states.result.Item) ? $states.result.Item : {} %}"
+      },
+      "Next": "ReadMaintenance",
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failed"
+        }
+      ]
+    },
+    "ReadMaintenance": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:getItem",
+      "Arguments": {
+        "TableName": "${table_name}",
+        "Key": {
+          "pk": {
+            "S": "maintenance"
+          }
+        },
+        "ConsistentRead": true
+      },
+      "Assign": {
+        "maintenance": "{% $exists($states.result.Item.pk.S) %}"
+      },
+      "Next": "ArmGate",
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failed"
+        }
+      ]
+    },
+    "ArmGate": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Condition": "{% $exists($mode.pk.S) and $mode.enabled.BOOL = true and $mode.scope.S in ['production','rehearsal'] and $type($mode.approvalRef.S) = 'string' and $length($trim($mode.approvalRef.S)) > 0 and $maintenance = false and (($mode.scope.S = 'production' and $request.trigger in ['scheduler','event','manual'] and $not($exists($mode.armedUntil))) or ($mode.scope.S = 'rehearsal' and $request.trigger = 'manual' and $type($mode.armedUntil.S) = 'string' and $contains($mode.armedUntil.S, /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$/) and $toMillis($mode.armedUntil.S) > $millis() and $toMillis($mode.armedUntil.S) - $millis() <= ${rehearsal_arming_max_ms})) %}",
+          "Next": "Init"
+        }
+      ],
+      "Default": "NotArmed"
+    },
+    "Init": {
+      "Type": "Pass",
+      "Assign": {
+        "token": "{% $uuid() %}",
+        "runKey": "{% $request.trigger='event' and $type($request.event.id)='string' ? $request.event.id : $request.scheduledTime %}",
+        "startedAt": "{% $millis() %}",
+        "writeUntil": "{% $toMillis($states.context.Execution.StartTime) + ${write_window_ms} %}",
+        "redrive": "{% $exists($states.context.Execution.RedriveCount) ? $states.context.Execution.RedriveCount : 0 %}",
+        "polls": 0,
+        "attempts": 0,
+        "rdsWaitUntil": 0,
+        "odBootAt": 0,
+        "outcome": "ok",
+        "failure": "Runtime.Failed",
+        "target": "",
+        "holder": "",
+        "liveSha": "",
+        "tdArn": "",
+        "commandId": "",
+        "event": "{% $exists($request.event) ? $request.event : {} %}",
+        "nowJst": "{% $fromMillis($millis(), '[Y0001]-[M01]-[D01]T[H01]:[m01]:[s01]', '+0900') %}",
+        "dayKey": "{% 'day#' & $fromMillis($millis(), '[Y0001]-[M01]-[D01]', '+0900') %}"
+      },
+      "Next": "ValidateInput"
+    },
+    "ValidateInput": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Condition": "{% $request.trigger in ['scheduler','event','manual'] and $type($request.scheduledTime) = 'string' and $length($request.scheduledTime) > 0 and $length($request.scheduledTime) < 512 and $redrive = 0 and $millis() < $writeUntil and ($request.trigger = 'manual' or ($contains($request.scheduledTime, /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,9})?Z$/) and $toMillis($states.context.Execution.StartTime) - $toMillis($request.scheduledTime) >= -60000 and $toMillis($states.context.Execution.StartTime) - $toMillis($request.scheduledTime) <= 1200000)) and ($request.trigger!='event' or ($type($request.event.id)='string' and $length($request.event.id)>0 and $length($request.event.id)<=128)) %}",
+          "Next": "ReadLegacyRdsStart"
+        }
+      ],
+      "Default": "BadInput"
+    },
+    "ReadLegacyRdsStart": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:scheduler:getSchedule",
+      "Arguments": {
+        "GroupName": "${scheduler_group_name}",
+        "Name": "${name_prefix}-rds-start"
+      },
+      "Next": "ReadLegacyEc2Start",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "legacyRdsStart": "{% $states.result %}"
+      },
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failure"
+        }
+      ]
+    },
+    "ReadLegacyEc2Start": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:scheduler:getSchedule",
+      "Arguments": {
+        "GroupName": "${scheduler_group_name}",
+        "Name": "${name_prefix}-ec2-start"
+      },
+      "Next": "ReadLegacyEc2Stop",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "legacyEc2Start": "{% $states.result %}"
+      },
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failure"
+        }
+      ]
+    },
+    "ReadLegacyEc2Stop": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:scheduler:getSchedule",
+      "Arguments": {
+        "GroupName": "${scheduler_group_name}",
+        "Name": "${name_prefix}-ec2-stop"
+      },
+      "Next": "ReadLegacyRdsStop",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "legacyEc2Stop": "{% $states.result %}"
+      },
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failure"
+        }
+      ]
+    },
+    "ReadLegacyRdsStop": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:scheduler:getSchedule",
+      "Arguments": {
+        "GroupName": "${scheduler_group_name}",
+        "Name": "${name_prefix}-rds-stop"
+      },
+      "Next": "LegacyInterlock",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "legacyRdsStop": "{% $states.result %}"
+      },
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failure"
+        }
+      ]
+    },
+    "LegacyInterlock": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Condition": "{% (($mode.scope.S = 'production' ? ($legacyRdsStart.State = 'DISABLED' and $legacyRdsStart.ScheduleExpression = 'cron(50 9 ? * MON-FRI *)') : ($legacyRdsStart.State = 'ENABLED' and $legacyRdsStart.ScheduleExpression = 'cron(50 9 ? * MON-FRI *)')) and $legacyRdsStart.ScheduleExpressionTimezone = 'Asia/Tokyo' and $legacyRdsStart.FlexibleTimeWindow.Mode = 'OFF') and (($mode.scope.S = 'production' ? ($legacyEc2Start.State = 'DISABLED' and $legacyEc2Start.ScheduleExpression = 'cron(0 10 ? * MON-FRI *)') : ($legacyEc2Start.State = 'ENABLED' and $legacyEc2Start.ScheduleExpression = 'cron(0 10 ? * MON-FRI *)')) and $legacyEc2Start.ScheduleExpressionTimezone = 'Asia/Tokyo' and $legacyEc2Start.FlexibleTimeWindow.Mode = 'OFF') and (($mode.scope.S = 'production' ? ($legacyEc2Stop.State = 'ENABLED' and $legacyEc2Stop.ScheduleExpression = 'cron(15 0-6,22-23 * * ? *)') : ($legacyEc2Stop.State = 'ENABLED' and $legacyEc2Stop.ScheduleExpression = 'cron(0 17 ? * MON-FRI *)')) and $legacyEc2Stop.ScheduleExpressionTimezone = 'Asia/Tokyo' and $legacyEc2Stop.FlexibleTimeWindow.Mode = 'OFF') and (($mode.scope.S = 'production' ? ($legacyRdsStop.State = 'ENABLED' and $legacyRdsStop.ScheduleExpression = 'cron(30 22 ? * MON-FRI *)') : ($legacyRdsStop.State = 'ENABLED' and $legacyRdsStop.ScheduleExpression = 'cron(10 17 ? * MON-FRI *)')) and $legacyRdsStop.ScheduleExpressionTimezone = 'Asia/Tokyo' and $legacyRdsStop.FlexibleTimeWindow.Mode = 'OFF') and ($mode.scope.S='production' or ($request.trigger='manual' and $fromMillis($millis(),'[H01]:[m01]','+0900')>='17:40' and $fromMillis($millis(),'[H01]:[m01]','+0900')<'21:30')) %}",
+          "Next": "Begin"
+        }
+      ],
+      "Default": "InterlockFailed"
+    },
+    "NotArmed": {
+      "Type": "Fail",
+      "Error": "NotArmed",
+      "Cause": "Arming, approval, expiry, trigger or maintenance check failed; no write occurred."
+    },
+    "BadInput": {
+      "Type": "Fail",
+      "Error": "BadInput",
+      "Cause": "Invalid, redriven or stale input; no write occurred."
+    },
+    "InterlockFailed": {
+      "Type": "Fail",
+      "Error": "Legacy.Interlock",
+      "Cause": "Legacy schedule contract differs; no runtime write permitted."
+    },
+    "Failed": {
+      "Type": "Fail",
+      "Error": "Runtime.Failed",
+      "Cause": "A task, invariant, lease, readiness or timeout failed. Inspect execution history; independent backstops remain required."
+    },
+    "Done": {
+      "Type": "Succeed"
+    },
+    "Failure": {
+      "Type": "Pass",
+      "Assign": {
+        "outcome": "failed"
+      },
+      "Next": "ReadFailureMode"
+    },
+    "Release": {
+      "Type": "Task",
+      "Comment": "Atomic arming/mode/maintenance and lease fence; TTL is never authorization.",
+      "Resource": "arn:aws:states:::aws-sdk:dynamodb:transactWriteItems",
+      "Arguments": {
+        "TransactItems": [
+          {
+            "ConditionCheck": {
+              "TableName": "${table_name}",
+              "Key": {
+                "pk": {
+                  "S": "maintenance"
+                }
+              },
+              "ConditionExpression": "attribute_not_exists(pk)"
+            }
+          },
+          {
+            "ConditionCheck": {
+              "TableName": "${table_name}",
+              "Key": {
+                "pk": {
+                  "S": "mode"
+                }
+              },
+              "ConditionExpression": "attribute_exists(enabled) AND enabled = :yes AND #scope = :scope AND approvalRef = :approval AND (#scope = :production OR (#scope = :rehearsal AND armedUntil = :armedUntil AND armedUntil > :nowUtc)) AND #state IN (:s0, :s1, :s2, :s3, :s4, :s5, :s6) AND :currentRedrive = :zero AND :writeUntil > :nowMs",
+              "ExpressionAttributeNames": {
+                "#scope": "scope",
+                "#state": "state"
+              },
+              "ExpressionAttributeValues": {
+                ":yes": {
+                  "Bool": true
+                },
+                ":scope": {
+                  "S": "{% $mode.scope.S %}"
+                },
+                ":approval": {
+                  "S": "{% $mode.approvalRef.S %}"
+                },
+                ":production": {
+                  "S": "production"
+                },
+                ":rehearsal": {
+                  "S": "rehearsal"
+                },
+                ":armedUntil": {
+                  "S": "{% $exists($mode.armedUntil.S) ? $mode.armedUntil.S : '' %}"
+                },
+                ":nowUtc": {
+                  "S": "{% $fromMillis($millis()) %}"
+                },
+                ":currentRedrive": {
+                  "N": "{% $string($exists($states.context.Execution.RedriveCount) ? $states.context.Execution.RedriveCount : 0) %}"
+                },
+                ":zero": {
+                  "N": "0"
+                },
+                ":writeUntil": {
+                  "N": "{% $string($writeUntil) %}"
+                },
+                ":nowMs": {
+                  "N": "{% $string($millis()) %}"
+                },
+                ":s0": {
+                  "S": "off"
+                },
+                ":s1": {
+                  "S": "spot-active"
+                },
+                ":s2": {
+                  "S": "failover-prep"
+                },
+                ":s3": {
+                  "S": "od-active"
+                },
+                ":s4": {
+                  "S": "failback"
+                },
+                ":s5": {
+                  "S": "day-close"
+                },
+                ":s6": {
+                  "S": "degraded"
+                }
+              }
+            }
+          },
+          {
+            "Delete": {
+              "TableName": "${table_name}",
+              "Key": {
+                "pk": {
+                  "S": "lock#runtime"
+                }
+              },
+              "ConditionExpression": "#owner = :owner AND lockToken = :token AND expiresAt > :minExpiry AND writeUntil = :writeUntil AND writeUntil > :now AND redriveCount = :zero AND :currentRedrive = :zero",
+              "ExpressionAttributeNames": {
+                "#owner": "owner"
+              },
+              "ExpressionAttributeValues": {
+                ":owner": {
+                  "S": "{% $states.context.Execution.Id %}"
+                },
+                ":token": {
+                  "S": "{% $token %}"
+                },
+                ":minExpiry": {
+                  "N": "{% $string($millis() + ${write_margin_ms}) %}"
+                },
+                ":writeUntil": {
+                  "N": "{% $string($writeUntil) %}"
+                },
+                ":now": {
+                  "N": "{% $string($millis()) %}"
+                },
+                ":zero": {
+                  "N": "0"
+                },
+                ":currentRedrive": {
+                  "N": "{% $string($exists($states.context.Execution.RedriveCount) ? $states.context.Execution.RedriveCount : 0) %}"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failed"
+        }
+      ],
+      "Next": "EndChoice",
+      "TimeoutSeconds": 60
+    },
+    "EndChoice": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Condition": "{% $outcome = 'ok' %}",
+          "Next": "Done"
+        }
+      ],
+      "Default": "Failed"
+    },
+    "Begin": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:autoscaling:describeAutoScalingGroups",
+      "Arguments": {
+        "AutoScalingGroupNames": [
+          "${asg_name}"
+        ]
+      },
+      "Next": "ReadInstances",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "group": "{% $states.result.AutoScalingGroups[0] %}"
+      },
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failure"
+        }
+      ]
+    },
+    "ReadInstances": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:ec2:describeInstances",
+      "Arguments": {
+        "InstanceIds": "{% $append(['${od_instance_id}'], $exists($group.Instances) ? $group.Instances.InstanceId : []) %}"
+      },
+      "Next": "ReadAddress",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "instances": "{% $append([], $states.result.Reservations.Instances) %}"
+      },
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failure"
+        }
+      ]
+    },
+    "ReadAddress": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:ec2:describeAddresses",
+      "Arguments": {
+        "AllocationIds": [
+          "${eip_allocation_id}"
+        ]
+      },
+      "Next": "ReadAssociationInstance",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "addresses": "{% $states.result.Addresses %}",
+        "holder": "{% $exists($states.result.Addresses[0].InstanceId) ? $states.result.Addresses[0].InstanceId : '' %}"
+      },
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failure"
+        }
+      ]
+    },
+    "ReadAssociationInstance": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:ec2:describeInstances",
+      "Arguments": {
+        "InstanceIds": "{% $distinct($append($append(['${od_instance_id}'], $exists($group.Instances) ? $group.Instances.InstanceId : []), $holder!='' ? [$holder] : [])) %}"
+      },
+      "Next": "ReadAssociationRecord",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "instances": "{% $append([], $states.result.Reservations.Instances) %}"
+      },
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failure"
+        }
+      ]
+    },
+    "ReadAssociationRecord": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:getItem",
+      "Arguments": {
+        "TableName": "${table_name}",
+        "Key": {
+          "pk": {
+            "S": "{% 'instance#' & $holder %}"
+          }
+        },
+        "ConsistentRead": true
+      },
+      "Next": "ReadOdAttribute",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "holderRecord": "{% $exists($states.result.Item) ? $states.result.Item : {} %}"
+      },
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failure"
+        }
+      ]
+    },
+    "ReadOdAttribute": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:ec2:describeNetworkInterfaceAttribute",
+      "Arguments": {
+        "NetworkInterfaceId": "${od_eni_id}",
+        "Attribute": "associatePublicIpAddress"
+      },
+      "Next": "ReadRds",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "odPublic": "{% $states.result.AssociatePublicIpAddress %}"
+      },
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failure"
+        }
+      ]
+    },
+    "ReadRds": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:rds:describeDBInstances",
+      "Arguments": {
+        "DbInstanceIdentifier": "${db_instance_identifier}"
+      },
+      "Next": "ReadService",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "db": "{% $states.result.DbInstances[0] %}"
+      },
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failure"
+        }
+      ]
+    },
+    "ReadService": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:ecs:describeServices",
+      "Arguments": {
+        "Cluster": "${ecs_cluster_arn}",
+        "Services": [
+          "${ecs_service_name}"
+        ]
+      },
+      "Next": "ReadTaskDefinition",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "service": "{% $states.result.Services[0] %}",
+        "tdArn": "{% $states.result.Services[0].TaskDefinition %}"
+      },
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failure"
+        }
+      ]
+    },
+    "ReadTaskDefinition": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:ecs:describeTaskDefinition",
+      "Arguments": {
+        "TaskDefinition": "{% $tdArn %}"
+      },
+      "Next": "SnapshotGate",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "liveSha": "{% ($images := $states.result.TaskDefinition.ContainerDefinitions[Name='api'].Image; $count($images)=1 and $substringBefore($images[0], ':') = '${expected_image_repository}' ? $substringAfter($images[0], ':') : '') %}"
+      },
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failure"
+        }
+      ]
+    },
+    "SnapshotGate": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Condition": "{% $group.AutoScalingGroupName = '${asg_name}' and $group.MinSize = 0 and $group.MaxSize = 2 and $group.CapacityRebalance = false and $count($group.Instances) <= 2 and $count($addresses) = 1 and $addresses[0].AllocationId = '${eip_allocation_id}' and ($holder = '' or $holder = '${od_instance_id}' or $holder in $group.Instances.InstanceId or ($holderRecord.asg.S='${asg_name}' and $instances[InstanceId=$holder][0].IamInstanceProfile.Arn='${spot_instance_profile_arn}' and $instances[InstanceId=$holder][0].InstanceLifecycle='spot' and $instances[InstanceId=$holder][0].State.Name in ['terminated','shutting-down','stopped'])) and $count($instances[InstanceId='${od_instance_id}' and IamInstanceProfile.Arn='${od_instance_profile_arn}'])=1 and $db.DbInstanceIdentifier = '${db_instance_identifier}' and $service.ServiceName = '${ecs_service_name}' and $contains($liveSha, /^[a-f0-9]{40}$/) %}",
+          "Next": "NightGate"
+        }
+      ],
+      "Default": "Failed"
+    },
+    "NightGate": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Condition": "{% $instances[InstanceId='${od_instance_id}'][0].State.Name = 'stopped' and $odPublic = false and $count($group.Instances)=0 and $group.DesiredCapacity=0 and $holder in ['', '${od_instance_id}'] and $db.DbInstanceStatus in ['available','stopped'] %}",
+          "Next": "BootstrapGate"
+        }
+      ],
+      "Default": "Failed"
+    },
+    "BootstrapGate": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Condition": "{% ($exists($states.context.Execution.RedriveCount) ? $states.context.Execution.RedriveCount : 0) = 0 and $redrive = 0 and $millis() < $writeUntil %}",
+          "Next": "Bootstrap"
+        }
+      ],
+      "Default": "Failed"
+    },
+    "Bootstrap": {
+      "Type": "Task",
+      "Comment": "Atomic arming/mode/maintenance and lease fence; TTL is never authorization.",
+      "Resource": "arn:aws:states:::aws-sdk:dynamodb:transactWriteItems",
+      "Arguments": {
+        "TransactItems": [
+          {
+            "ConditionCheck": {
+              "TableName": "${table_name}",
+              "Key": {
+                "pk": {
+                  "S": "maintenance"
+                }
+              },
+              "ConditionExpression": "attribute_not_exists(pk)"
+            }
+          },
+          {
+            "ConditionCheck": {
+              "TableName": "${table_name}",
+              "Key": {
+                "pk": {
+                  "S": "mode"
+                }
+              },
+              "ConditionExpression": "attribute_exists(enabled) AND enabled = :yes AND #scope = :scope AND approvalRef = :approval AND (#scope = :production OR (#scope = :rehearsal AND armedUntil = :armedUntil AND armedUntil > :nowUtc)) AND #state IN (:s0, :s1) AND :currentRedrive = :zero AND :writeUntil > :nowMs",
+              "ExpressionAttributeNames": {
+                "#scope": "scope",
+                "#state": "state"
+              },
+              "ExpressionAttributeValues": {
+                ":yes": {
+                  "Bool": true
+                },
+                ":scope": {
+                  "S": "{% $mode.scope.S %}"
+                },
+                ":approval": {
+                  "S": "{% $mode.approvalRef.S %}"
+                },
+                ":production": {
+                  "S": "production"
+                },
+                ":rehearsal": {
+                  "S": "rehearsal"
+                },
+                ":armedUntil": {
+                  "S": "{% $exists($mode.armedUntil.S) ? $mode.armedUntil.S : '' %}"
+                },
+                ":nowUtc": {
+                  "S": "{% $fromMillis($millis()) %}"
+                },
+                ":currentRedrive": {
+                  "N": "{% $string($exists($states.context.Execution.RedriveCount) ? $states.context.Execution.RedriveCount : 0) %}"
+                },
+                ":zero": {
+                  "N": "0"
+                },
+                ":writeUntil": {
+                  "N": "{% $string($writeUntil) %}"
+                },
+                ":nowMs": {
+                  "N": "{% $string($millis()) %}"
+                },
+                ":s0": {
+                  "S": "off"
+                },
+                ":s1": {
+                  "S": "degraded"
+                }
+              }
+            }
+          },
+          {
+            "Put": {
+              "TableName": "${table_name}",
+              "Item": {
+                "pk": {
+                  "S": "{% 'run#day-open#' & $runKey %}"
+                },
+                "owner": {
+                  "S": "{% $states.context.Execution.Id %}"
+                },
+                "startedAt": {
+                  "N": "{% $string($startedAt) %}"
+                },
+                "writeUntil": {
+                  "N": "{% $string($writeUntil) %}"
+                },
+                "redriveCount": {
+                  "N": "0"
+                },
+                "ttl": {
+                  "N": "{% $string($floor($millis()/1000)+3024000) %}"
+                }
+              },
+              "ConditionExpression": "attribute_not_exists(pk)"
+            }
+          },
+          {
+            "Put": {
+              "TableName": "${table_name}",
+              "Item": {
+                "pk": {
+                  "S": "lock#runtime"
+                },
+                "owner": {
+                  "S": "{% $states.context.Execution.Id %}"
+                },
+                "lockToken": {
+                  "S": "{% $token %}"
+                },
+                "expiresAt": {
+                  "N": "{% $string($millis()+${lease_ms}) %}"
+                },
+                "writeUntil": {
+                  "N": "{% $string($writeUntil) %}"
+                },
+                "redriveCount": {
+                  "N": "0"
+                },
+                "ttl": {
+                  "N": "{% $string($floor(($millis()+${lease_ms})/1000)+604800) %}"
+                }
+              },
+              "ConditionExpression": "attribute_not_exists(pk) OR expiresAt < :now",
+              "ExpressionAttributeValues": {
+                ":now": {
+                  "N": "{% $string($millis()) %}"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "BootstrapBusy"
+        }
+      ],
+      "Next": "RdsChoice",
+      "TimeoutSeconds": 60
+    },
+    "BootstrapBusy": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Condition": "{% $millis() < $startedAt + 120000 %}",
+          "Next": "WaitLease"
+        }
+      ],
+      "Default": "Failed"
+    },
+    "WaitLease": {
+      "Type": "Wait",
+      "Seconds": 20,
+      "Next": "BootstrapGate"
+    },
+    "RdsChoice": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Condition": "{% $db.DbInstanceStatus='available' %}",
+          "Next": "OpenMode"
+        },
+        {
+          "Condition": "{% $db.DbInstanceStatus='stopped' %}",
+          "Next": "FenceStartRds"
+        }
+      ],
+      "Default": "Failure"
+    },
+    "FenceStartRds": {
+      "Type": "Task",
+      "Comment": "Atomic arming/mode/maintenance and lease fence; TTL is never authorization.",
+      "Resource": "arn:aws:states:::aws-sdk:dynamodb:transactWriteItems",
+      "Arguments": {
+        "TransactItems": [
+          {
+            "ConditionCheck": {
+              "TableName": "${table_name}",
+              "Key": {
+                "pk": {
+                  "S": "maintenance"
+                }
+              },
+              "ConditionExpression": "attribute_not_exists(pk)"
+            }
+          },
+          {
+            "ConditionCheck": {
+              "TableName": "${table_name}",
+              "Key": {
+                "pk": {
+                  "S": "mode"
+                }
+              },
+              "ConditionExpression": "attribute_exists(enabled) AND enabled = :yes AND #scope = :scope AND approvalRef = :approval AND (#scope = :production OR (#scope = :rehearsal AND armedUntil = :armedUntil AND armedUntil > :nowUtc)) AND #state IN (:s0, :s1) AND :currentRedrive = :zero AND :writeUntil > :nowMs",
+              "ExpressionAttributeNames": {
+                "#scope": "scope",
+                "#state": "state"
+              },
+              "ExpressionAttributeValues": {
+                ":yes": {
+                  "Bool": true
+                },
+                ":scope": {
+                  "S": "{% $mode.scope.S %}"
+                },
+                ":approval": {
+                  "S": "{% $mode.approvalRef.S %}"
+                },
+                ":production": {
+                  "S": "production"
+                },
+                ":rehearsal": {
+                  "S": "rehearsal"
+                },
+                ":armedUntil": {
+                  "S": "{% $exists($mode.armedUntil.S) ? $mode.armedUntil.S : '' %}"
+                },
+                ":nowUtc": {
+                  "S": "{% $fromMillis($millis()) %}"
+                },
+                ":currentRedrive": {
+                  "N": "{% $string($exists($states.context.Execution.RedriveCount) ? $states.context.Execution.RedriveCount : 0) %}"
+                },
+                ":zero": {
+                  "N": "0"
+                },
+                ":writeUntil": {
+                  "N": "{% $string($writeUntil) %}"
+                },
+                ":nowMs": {
+                  "N": "{% $string($millis()) %}"
+                },
+                ":s0": {
+                  "S": "off"
+                },
+                ":s1": {
+                  "S": "degraded"
+                }
+              }
+            }
+          },
+          {
+            "Update": {
+              "TableName": "${table_name}",
+              "Key": {
+                "pk": {
+                  "S": "lock#runtime"
+                }
+              },
+              "UpdateExpression": "SET lastWrite = :label, lastWriteAt = :now",
+              "ConditionExpression": "#owner = :owner AND lockToken = :token AND expiresAt > :minExpiry AND writeUntil = :writeUntil AND writeUntil > :now AND redriveCount = :zero AND :currentRedrive = :zero",
+              "ExpressionAttributeNames": {
+                "#owner": "owner"
+              },
+              "ExpressionAttributeValues": {
+                ":owner": {
+                  "S": "{% $states.context.Execution.Id %}"
+                },
+                ":token": {
+                  "S": "{% $token %}"
+                },
+                ":minExpiry": {
+                  "N": "{% $string($millis() + ${write_margin_ms}) %}"
+                },
+                ":writeUntil": {
+                  "N": "{% $string($writeUntil) %}"
+                },
+                ":now": {
+                  "N": "{% $string($millis()) %}"
+                },
+                ":zero": {
+                  "N": "0"
+                },
+                ":label": {
+                  "S": "FenceStartRds"
+                },
+                ":currentRedrive": {
+                  "N": "{% $string($exists($states.context.Execution.RedriveCount) ? $states.context.Execution.RedriveCount : 0) %}"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failure"
+        }
+      ],
+      "Next": "StartRds",
+      "TimeoutSeconds": 60
+    },
+    "StartRds": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:rds:startDBInstance",
+      "Arguments": {
+        "DbInstanceIdentifier": "{% ($assert(($exists($states.context.Execution.RedriveCount) ? $states.context.Execution.RedriveCount : 0)=0 and $millis()<$writeUntil,'Redriven or expired write Task'); \"${db_instance_identifier}\") %}"
+      },
+      "Next": "WaitRds",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failure"
+        }
+      ],
+      "TimeoutSeconds": 60,
+      "Assign": {
+        "rdsWaitUntil": "{% $millis()+1200000 %}"
+      }
+    },
+    "WaitRds": {
+      "Type": "Wait",
+      "Seconds": 30,
+      "Next": "PollRds"
+    },
+    "PollRds": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:rds:describeDBInstances",
+      "Arguments": {
+        "DbInstanceIdentifier": "${db_instance_identifier}"
+      },
+      "Next": "RdsAvailable",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "dbStatus": "{% $states.result.DbInstances[0].DbInstanceStatus %}",
+        "polls": "{% $polls+1 %}"
+      },
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failure"
+        }
+      ]
+    },
+    "RdsAvailable": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Condition": "{% $dbStatus='available' and $millis()<=$rdsWaitUntil %}",
+          "Next": "OpenMode"
+        },
+        {
+          "Condition": "{% $dbStatus in ['starting','stopped'] and $polls<40 and $millis()<$rdsWaitUntil %}",
+          "Next": "WaitRds"
+        }
+      ],
+      "Default": "Failure"
+    },
+    "OpenMode": {
+      "Type": "Task",
+      "Comment": "Atomic arming/mode/maintenance and lease fence; TTL is never authorization.",
+      "Resource": "arn:aws:states:::aws-sdk:dynamodb:transactWriteItems",
+      "Arguments": {
+        "TransactItems": [
+          {
+            "ConditionCheck": {
+              "TableName": "${table_name}",
+              "Key": {
+                "pk": {
+                  "S": "maintenance"
+                }
+              },
+              "ConditionExpression": "attribute_not_exists(pk)"
+            }
+          },
+          {
+            "Update": {
+              "TableName": "${table_name}",
+              "Key": {
+                "pk": {
+                  "S": "mode"
+                }
+              },
+              "UpdateExpression": "SET #state = :newState, updatedAt = :updated",
+              "ExpressionAttributeValues": {
+                ":yes": {
+                  "Bool": true
+                },
+                ":scope": {
+                  "S": "{% $mode.scope.S %}"
+                },
+                ":approval": {
+                  "S": "{% $mode.approvalRef.S %}"
+                },
+                ":production": {
+                  "S": "production"
+                },
+                ":rehearsal": {
+                  "S": "rehearsal"
+                },
+                ":armedUntil": {
+                  "S": "{% $exists($mode.armedUntil.S) ? $mode.armedUntil.S : '' %}"
+                },
+                ":nowUtc": {
+                  "S": "{% $fromMillis($millis()) %}"
+                },
+                ":currentRedrive": {
+                  "N": "{% $string($exists($states.context.Execution.RedriveCount) ? $states.context.Execution.RedriveCount : 0) %}"
+                },
+                ":zero": {
+                  "N": "0"
+                },
+                ":writeUntil": {
+                  "N": "{% $string($writeUntil) %}"
+                },
+                ":nowMs": {
+                  "N": "{% $string($millis()) %}"
+                },
+                ":s0": {
+                  "S": "off"
+                },
+                ":s1": {
+                  "S": "degraded"
+                },
+                ":newState": {
+                  "S": "spot-active"
+                },
+                ":updated": {
+                  "N": "{% $string($millis()) %}"
+                }
+              },
+              "ConditionExpression": "attribute_exists(enabled) AND enabled = :yes AND #scope = :scope AND approvalRef = :approval AND (#scope = :production OR (#scope = :rehearsal AND armedUntil = :armedUntil AND armedUntil > :nowUtc)) AND #state IN (:s0, :s1) AND :currentRedrive = :zero AND :writeUntil > :nowMs",
+              "ExpressionAttributeNames": {
+                "#scope": "scope",
+                "#state": "state"
+              }
+            }
+          },
+          {
+            "Update": {
+              "TableName": "${table_name}",
+              "Key": {
+                "pk": {
+                  "S": "lock#runtime"
+                }
+              },
+              "UpdateExpression": "SET lastWrite = :label, lastWriteAt = :now",
+              "ConditionExpression": "#owner = :owner AND lockToken = :token AND expiresAt > :minExpiry AND writeUntil = :writeUntil AND writeUntil > :now AND redriveCount = :zero AND :currentRedrive = :zero",
+              "ExpressionAttributeNames": {
+                "#owner": "owner"
+              },
+              "ExpressionAttributeValues": {
+                ":owner": {
+                  "S": "{% $states.context.Execution.Id %}"
+                },
+                ":token": {
+                  "S": "{% $token %}"
+                },
+                ":minExpiry": {
+                  "N": "{% $string($millis() + ${write_margin_ms}) %}"
+                },
+                ":writeUntil": {
+                  "N": "{% $string($writeUntil) %}"
+                },
+                ":now": {
+                  "N": "{% $string($millis()) %}"
+                },
+                ":zero": {
+                  "N": "0"
+                },
+                ":label": {
+                  "S": "OpenMode"
+                },
+                ":currentRedrive": {
+                  "N": "{% $string($exists($states.context.Execution.RedriveCount) ? $states.context.Execution.RedriveCount : 0) %}"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failure"
+        }
+      ],
+      "Next": "FenceSetDesired",
+      "TimeoutSeconds": 60
+    },
+    "FenceSetDesired": {
+      "Type": "Task",
+      "Comment": "Atomic arming/mode/maintenance and lease fence; TTL is never authorization.",
+      "Resource": "arn:aws:states:::aws-sdk:dynamodb:transactWriteItems",
+      "Arguments": {
+        "TransactItems": [
+          {
+            "ConditionCheck": {
+              "TableName": "${table_name}",
+              "Key": {
+                "pk": {
+                  "S": "maintenance"
+                }
+              },
+              "ConditionExpression": "attribute_not_exists(pk)"
+            }
+          },
+          {
+            "ConditionCheck": {
+              "TableName": "${table_name}",
+              "Key": {
+                "pk": {
+                  "S": "mode"
+                }
+              },
+              "ConditionExpression": "attribute_exists(enabled) AND enabled = :yes AND #scope = :scope AND approvalRef = :approval AND (#scope = :production OR (#scope = :rehearsal AND armedUntil = :armedUntil AND armedUntil > :nowUtc)) AND #state IN (:s0) AND :currentRedrive = :zero AND :writeUntil > :nowMs",
+              "ExpressionAttributeNames": {
+                "#scope": "scope",
+                "#state": "state"
+              },
+              "ExpressionAttributeValues": {
+                ":yes": {
+                  "Bool": true
+                },
+                ":scope": {
+                  "S": "{% $mode.scope.S %}"
+                },
+                ":approval": {
+                  "S": "{% $mode.approvalRef.S %}"
+                },
+                ":production": {
+                  "S": "production"
+                },
+                ":rehearsal": {
+                  "S": "rehearsal"
+                },
+                ":armedUntil": {
+                  "S": "{% $exists($mode.armedUntil.S) ? $mode.armedUntil.S : '' %}"
+                },
+                ":nowUtc": {
+                  "S": "{% $fromMillis($millis()) %}"
+                },
+                ":currentRedrive": {
+                  "N": "{% $string($exists($states.context.Execution.RedriveCount) ? $states.context.Execution.RedriveCount : 0) %}"
+                },
+                ":zero": {
+                  "N": "0"
+                },
+                ":writeUntil": {
+                  "N": "{% $string($writeUntil) %}"
+                },
+                ":nowMs": {
+                  "N": "{% $string($millis()) %}"
+                },
+                ":s0": {
+                  "S": "spot-active"
+                }
+              }
+            }
+          },
+          {
+            "Update": {
+              "TableName": "${table_name}",
+              "Key": {
+                "pk": {
+                  "S": "lock#runtime"
+                }
+              },
+              "UpdateExpression": "SET lastWrite = :label, lastWriteAt = :now",
+              "ConditionExpression": "#owner = :owner AND lockToken = :token AND expiresAt > :minExpiry AND writeUntil = :writeUntil AND writeUntil > :now AND redriveCount = :zero AND :currentRedrive = :zero",
+              "ExpressionAttributeNames": {
+                "#owner": "owner"
+              },
+              "ExpressionAttributeValues": {
+                ":owner": {
+                  "S": "{% $states.context.Execution.Id %}"
+                },
+                ":token": {
+                  "S": "{% $token %}"
+                },
+                ":minExpiry": {
+                  "N": "{% $string($millis() + ${write_margin_ms}) %}"
+                },
+                ":writeUntil": {
+                  "N": "{% $string($writeUntil) %}"
+                },
+                ":now": {
+                  "N": "{% $string($millis()) %}"
+                },
+                ":zero": {
+                  "N": "0"
+                },
+                ":label": {
+                  "S": "FenceSetDesired"
+                },
+                ":currentRedrive": {
+                  "N": "{% $string($exists($states.context.Execution.RedriveCount) ? $states.context.Execution.RedriveCount : 0) %}"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failure"
+        }
+      ],
+      "Next": "SetDesired",
+      "TimeoutSeconds": 60
+    },
+    "SetDesired": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:autoscaling:setDesiredCapacity",
+      "Arguments": {
+        "AutoScalingGroupName": "{% ($assert(($exists($states.context.Execution.RedriveCount) ? $states.context.Execution.RedriveCount : 0)=0 and $millis()<$writeUntil,'Redriven or expired write Task'); \"${asg_name}\") %}",
+        "DesiredCapacity": 1,
+        "HonorCooldown": false
+      },
+      "Next": "WaitSpot",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failure"
+        }
+      ],
+      "TimeoutSeconds": 60
+    },
+    "WaitSpot": {
+      "Type": "Wait",
+      "Seconds": 20,
+      "Next": "ReadSpot"
+    },
+    "ReadSpot": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:autoscaling:describeAutoScalingGroups",
+      "Arguments": {
+        "AutoScalingGroupNames": [
+          "${asg_name}"
+        ]
+      },
+      "Next": "SpotChoice",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "group": "{% $states.result.AutoScalingGroups[0] %}",
+        "polls": "{% $polls+1 %}"
+      },
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failure"
+        }
+      ]
+    },
+    "SpotChoice": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Condition": "{% $count($group.Instances[LifecycleState='InService' and HealthStatus='Healthy'])=1 %}",
+          "Next": "PickSpot"
+        },
+        {
+          "Condition": "{% $polls<90 and ($mode.scope.S='rehearsal' or $substring($fromMillis($millis(), '[H01]:[m01]', '+0900'),0,5) < '07:50') %}",
+          "Next": "WaitSpot"
+        }
+      ],
+      "Default": "FenceOpenMissed"
+    },
+    "PickSpot": {
+      "Type": "Pass",
+      "Assign": {
+        "target": "{% $group.Instances[LifecycleState='InService' and HealthStatus='Healthy'][0].InstanceId %}"
+      },
+      "Next": "ReadSpotInstance"
+    },
+    "ReadSpotInstance": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:ec2:describeInstances",
+      "Arguments": {
+        "InstanceIds": [
+          "{% $target %}"
+        ]
+      },
+      "Next": "SpotIdentity",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "spot": "{% $states.result.Reservations[0].Instances[0] %}"
+      },
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failure"
+        }
+      ]
+    },
+    "SpotIdentity": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Condition": "{% $spot.InstanceId=$target and $spot.State.Name='running' and $spot.InstanceLifecycle='spot' and $spot.IamInstanceProfile.Arn='${spot_instance_profile_arn}' %}",
+          "Next": "RecordSpotInService"
+        }
+      ],
+      "Default": "Failure"
+    },
+    "FenceSpotSmoke": {
+      "Type": "Task",
+      "Comment": "Atomic arming/mode/maintenance and lease fence; TTL is never authorization.",
+      "Resource": "arn:aws:states:::aws-sdk:dynamodb:transactWriteItems",
+      "Arguments": {
+        "TransactItems": [
+          {
+            "ConditionCheck": {
+              "TableName": "${table_name}",
+              "Key": {
+                "pk": {
+                  "S": "maintenance"
+                }
+              },
+              "ConditionExpression": "attribute_not_exists(pk)"
+            }
+          },
+          {
+            "ConditionCheck": {
+              "TableName": "${table_name}",
+              "Key": {
+                "pk": {
+                  "S": "mode"
+                }
+              },
+              "ConditionExpression": "attribute_exists(enabled) AND enabled = :yes AND #scope = :scope AND approvalRef = :approval AND (#scope = :production OR (#scope = :rehearsal AND armedUntil = :armedUntil AND armedUntil > :nowUtc)) AND #state IN (:s0, :s1, :s2, :s3, :s4, :s5, :s6) AND :currentRedrive = :zero AND :writeUntil > :nowMs",
+              "ExpressionAttributeNames": {
+                "#scope": "scope",
+                "#state": "state"
+              },
+              "ExpressionAttributeValues": {
+                ":yes": {
+                  "Bool": true
+                },
+                ":scope": {
+                  "S": "{% $mode.scope.S %}"
+                },
+                ":approval": {
+                  "S": "{% $mode.approvalRef.S %}"
+                },
+                ":production": {
+                  "S": "production"
+                },
+                ":rehearsal": {
+                  "S": "rehearsal"
+                },
+                ":armedUntil": {
+                  "S": "{% $exists($mode.armedUntil.S) ? $mode.armedUntil.S : '' %}"
+                },
+                ":nowUtc": {
+                  "S": "{% $fromMillis($millis()) %}"
+                },
+                ":currentRedrive": {
+                  "N": "{% $string($exists($states.context.Execution.RedriveCount) ? $states.context.Execution.RedriveCount : 0) %}"
+                },
+                ":zero": {
+                  "N": "0"
+                },
+                ":writeUntil": {
+                  "N": "{% $string($writeUntil) %}"
+                },
+                ":nowMs": {
+                  "N": "{% $string($millis()) %}"
+                },
+                ":s0": {
+                  "S": "off"
+                },
+                ":s1": {
+                  "S": "spot-active"
+                },
+                ":s2": {
+                  "S": "failover-prep"
+                },
+                ":s3": {
+                  "S": "od-active"
+                },
+                ":s4": {
+                  "S": "failback"
+                },
+                ":s5": {
+                  "S": "day-close"
+                },
+                ":s6": {
+                  "S": "degraded"
+                }
+              }
+            }
+          },
+          {
+            "Update": {
+              "TableName": "${table_name}",
+              "Key": {
+                "pk": {
+                  "S": "lock#runtime"
+                }
+              },
+              "UpdateExpression": "SET lastWrite = :label, lastWriteAt = :now",
+              "ConditionExpression": "#owner = :owner AND lockToken = :token AND expiresAt > :minExpiry AND writeUntil = :writeUntil AND writeUntil > :now AND redriveCount = :zero AND :currentRedrive = :zero",
+              "ExpressionAttributeNames": {
+                "#owner": "owner"
+              },
+              "ExpressionAttributeValues": {
+                ":owner": {
+                  "S": "{% $states.context.Execution.Id %}"
+                },
+                ":token": {
+                  "S": "{% $token %}"
+                },
+                ":minExpiry": {
+                  "N": "{% $string($millis() + ${write_margin_ms}) %}"
+                },
+                ":writeUntil": {
+                  "N": "{% $string($writeUntil) %}"
+                },
+                ":now": {
+                  "N": "{% $string($millis()) %}"
+                },
+                ":zero": {
+                  "N": "0"
+                },
+                ":label": {
+                  "S": "FenceSpotSmoke"
+                },
+                ":currentRedrive": {
+                  "N": "{% $string($exists($states.context.Execution.RedriveCount) ? $states.context.Execution.RedriveCount : 0) %}"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failure"
+        }
+      ],
+      "Next": "SpotSmoke",
+      "TimeoutSeconds": 60
+    },
+    "SpotSmoke": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:ssm:sendCommand",
+      "Arguments": {
+        "DocumentName": "{% ($assert(($exists($states.context.Execution.RedriveCount) ? $states.context.Execution.RedriveCount : 0)=0 and $millis()<$writeUntil,'Redriven or expired write Task'); \"${spot_smoke_document_name}\") %}",
+        "DocumentVersion": "1",
+        "InstanceIds": [
+          "{% $target %}"
+        ],
+        "TimeoutSeconds": 300,
+        "Parameters": {
+          "expectedImageSha": [
+            "{% $liveSha %}"
+          ],
+          "expectedImageRepository": [
+            "${expected_image_repository}"
+          ],
+          "expectedTaskDefinitionArn": [
+            "{% $tdArn %}"
+          ],
+          "checkMode": [
+            "local"
+          ],
+          "cloudFrontDomain": [
+            "${cloudfront_domain}"
+          ]
+        }
+      },
+      "Next": "SpotSmokeWait",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failure"
+        }
+      ],
+      "Assign": {
+        "commandId": "{% $states.result.Command.CommandId %}",
+        "polls": 0
+      },
+      "TimeoutSeconds": 60
+    },
+    "SpotSmokeWait": {
+      "Type": "Wait",
+      "Seconds": 10,
+      "Next": "SpotSmokeRead"
+    },
+    "SpotSmokeRead": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:ssm:getCommandInvocation",
+      "Arguments": {
+        "CommandId": "{% $commandId %}",
+        "InstanceId": "{% $target %}"
+      },
+      "Next": "SpotSmokeChoice",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "commandStatus": "{% $states.result.Status %}",
+        "commandCode": "{% $states.result.ResponseCode %}",
+        "polls": "{% $polls+1 %}"
+      },
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failure"
+        }
+      ]
+    },
+    "SpotSmokeChoice": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Condition": "{% $commandStatus = 'Success' and $commandCode = 0 %}",
+          "Next": "OpeningDeadline"
+        },
+        {
+          "Condition": "{% $commandStatus in ['Pending','InProgress','Delayed'] and $polls < 36 %}",
+          "Next": "SpotSmokeWait"
+        }
+      ],
+      "Default": "Failure"
+    },
+    "AttestSpot": {
+      "Type": "Task",
+      "Comment": "Atomic arming/mode/maintenance and lease fence; TTL is never authorization.",
+      "Resource": "arn:aws:states:::aws-sdk:dynamodb:transactWriteItems",
+      "Arguments": {
+        "TransactItems": [
+          {
+            "ConditionCheck": {
+              "TableName": "${table_name}",
+              "Key": {
+                "pk": {
+                  "S": "maintenance"
+                }
+              },
+              "ConditionExpression": "attribute_not_exists(pk)"
+            }
+          },
+          {
+            "ConditionCheck": {
+              "TableName": "${table_name}",
+              "Key": {
+                "pk": {
+                  "S": "mode"
+                }
+              },
+              "ConditionExpression": "attribute_exists(enabled) AND enabled = :yes AND #scope = :scope AND approvalRef = :approval AND (#scope = :production OR (#scope = :rehearsal AND armedUntil = :armedUntil AND armedUntil > :nowUtc)) AND #state IN (:s0, :s1, :s2, :s3, :s4, :s5, :s6) AND :currentRedrive = :zero AND :writeUntil > :nowMs",
+              "ExpressionAttributeNames": {
+                "#scope": "scope",
+                "#state": "state"
+              },
+              "ExpressionAttributeValues": {
+                ":yes": {
+                  "Bool": true
+                },
+                ":scope": {
+                  "S": "{% $mode.scope.S %}"
+                },
+                ":approval": {
+                  "S": "{% $mode.approvalRef.S %}"
+                },
+                ":production": {
+                  "S": "production"
+                },
+                ":rehearsal": {
+                  "S": "rehearsal"
+                },
+                ":armedUntil": {
+                  "S": "{% $exists($mode.armedUntil.S) ? $mode.armedUntil.S : '' %}"
+                },
+                ":nowUtc": {
+                  "S": "{% $fromMillis($millis()) %}"
+                },
+                ":currentRedrive": {
+                  "N": "{% $string($exists($states.context.Execution.RedriveCount) ? $states.context.Execution.RedriveCount : 0) %}"
+                },
+                ":zero": {
+                  "N": "0"
+                },
+                ":writeUntil": {
+                  "N": "{% $string($writeUntil) %}"
+                },
+                ":nowMs": {
+                  "N": "{% $string($millis()) %}"
+                },
+                ":s0": {
+                  "S": "off"
+                },
+                ":s1": {
+                  "S": "spot-active"
+                },
+                ":s2": {
+                  "S": "failover-prep"
+                },
+                ":s3": {
+                  "S": "od-active"
+                },
+                ":s4": {
+                  "S": "failback"
+                },
+                ":s5": {
+                  "S": "day-close"
+                },
+                ":s6": {
+                  "S": "degraded"
+                }
+              }
+            }
+          },
+          {
+            "Update": {
+              "TableName": "${table_name}",
+              "Key": {
+                "pk": {
+                  "S": "lock#runtime"
+                }
+              },
+              "UpdateExpression": "SET lastWrite = :label, lastWriteAt = :now",
+              "ConditionExpression": "#owner = :owner AND lockToken = :token AND expiresAt > :minExpiry AND writeUntil = :writeUntil AND writeUntil > :now AND redriveCount = :zero AND :currentRedrive = :zero",
+              "ExpressionAttributeNames": {
+                "#owner": "owner"
+              },
+              "ExpressionAttributeValues": {
+                ":owner": {
+                  "S": "{% $states.context.Execution.Id %}"
+                },
+                ":token": {
+                  "S": "{% $token %}"
+                },
+                ":minExpiry": {
+                  "N": "{% $string($millis() + ${write_margin_ms}) %}"
+                },
+                ":writeUntil": {
+                  "N": "{% $string($writeUntil) %}"
+                },
+                ":now": {
+                  "N": "{% $string($millis()) %}"
+                },
+                ":zero": {
+                  "N": "0"
+                },
+                ":label": {
+                  "S": "AttestSpot"
+                },
+                ":currentRedrive": {
+                  "N": "{% $string($exists($states.context.Execution.RedriveCount) ? $states.context.Execution.RedriveCount : 0) %}"
+                }
+              }
+            }
+          },
+          {
+            "Put": {
+              "TableName": "${table_name}",
+              "Item": {
+                "pk": {
+                  "S": "{% 'ready#' & $target %}"
+                },
+                "instanceId": {
+                  "S": "{% $target %}"
+                },
+                "sha": {
+                  "S": "{% $liveSha %}"
+                },
+                "taskDefinition": {
+                  "S": "{% $tdArn %}"
+                },
+                "readyAt": {
+                  "N": "{% $string($millis()) %}"
+                },
+                "validUntil": {
+                  "N": "{% $string($millis()+600000) %}"
+                },
+                "ttl": {
+                  "N": "{% $string($floor($millis()/1000)+86400) %}"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failure"
+        }
+      ],
+      "Next": "FencePromoteSpot",
+      "TimeoutSeconds": 60
+    },
+    "FencePromoteSpot": {
+      "Type": "Task",
+      "Comment": "Atomic arming/mode/maintenance and lease fence; TTL is never authorization.",
+      "Resource": "arn:aws:states:::aws-sdk:dynamodb:transactWriteItems",
+      "Arguments": {
+        "TransactItems": [
+          {
+            "ConditionCheck": {
+              "TableName": "${table_name}",
+              "Key": {
+                "pk": {
+                  "S": "maintenance"
+                }
+              },
+              "ConditionExpression": "attribute_not_exists(pk)"
+            }
+          },
+          {
+            "ConditionCheck": {
+              "TableName": "${table_name}",
+              "Key": {
+                "pk": {
+                  "S": "mode"
+                }
+              },
+              "ConditionExpression": "attribute_exists(enabled) AND enabled = :yes AND #scope = :scope AND approvalRef = :approval AND (#scope = :production OR (#scope = :rehearsal AND armedUntil = :armedUntil AND armedUntil > :nowUtc)) AND #state IN (:s0) AND :currentRedrive = :zero AND :writeUntil > :nowMs",
+              "ExpressionAttributeNames": {
+                "#scope": "scope",
+                "#state": "state"
+              },
+              "ExpressionAttributeValues": {
+                ":yes": {
+                  "Bool": true
+                },
+                ":scope": {
+                  "S": "{% $mode.scope.S %}"
+                },
+                ":approval": {
+                  "S": "{% $mode.approvalRef.S %}"
+                },
+                ":production": {
+                  "S": "production"
+                },
+                ":rehearsal": {
+                  "S": "rehearsal"
+                },
+                ":armedUntil": {
+                  "S": "{% $exists($mode.armedUntil.S) ? $mode.armedUntil.S : '' %}"
+                },
+                ":nowUtc": {
+                  "S": "{% $fromMillis($millis()) %}"
+                },
+                ":currentRedrive": {
+                  "N": "{% $string($exists($states.context.Execution.RedriveCount) ? $states.context.Execution.RedriveCount : 0) %}"
+                },
+                ":zero": {
+                  "N": "0"
+                },
+                ":writeUntil": {
+                  "N": "{% $string($writeUntil) %}"
+                },
+                ":nowMs": {
+                  "N": "{% $string($millis()) %}"
+                },
+                ":s0": {
+                  "S": "spot-active"
+                }
+              }
+            }
+          },
+          {
+            "Update": {
+              "TableName": "${table_name}",
+              "Key": {
+                "pk": {
+                  "S": "lock#runtime"
+                }
+              },
+              "UpdateExpression": "SET lastWrite = :label, lastWriteAt = :now",
+              "ConditionExpression": "#owner = :owner AND lockToken = :token AND expiresAt > :minExpiry AND writeUntil = :writeUntil AND writeUntil > :now AND redriveCount = :zero AND :currentRedrive = :zero",
+              "ExpressionAttributeNames": {
+                "#owner": "owner"
+              },
+              "ExpressionAttributeValues": {
+                ":owner": {
+                  "S": "{% $states.context.Execution.Id %}"
+                },
+                ":token": {
+                  "S": "{% $token %}"
+                },
+                ":minExpiry": {
+                  "N": "{% $string($millis() + ${write_margin_ms}) %}"
+                },
+                ":writeUntil": {
+                  "N": "{% $string($writeUntil) %}"
+                },
+                ":now": {
+                  "N": "{% $string($millis()) %}"
+                },
+                ":zero": {
+                  "N": "0"
+                },
+                ":label": {
+                  "S": "FencePromoteSpot"
+                },
+                ":currentRedrive": {
+                  "N": "{% $string($exists($states.context.Execution.RedriveCount) ? $states.context.Execution.RedriveCount : 0) %}"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failure"
+        }
+      ],
+      "Next": "PromoteSpot",
+      "TimeoutSeconds": 60
+    },
+    "PromoteSpot": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:sfn:startExecution",
+      "Arguments": {
+        "StateMachineArn": "{% ($assert(($exists($states.context.Execution.RedriveCount) ? $states.context.Execution.RedriveCount : 0)=0 and $millis()<$writeUntil,'Redriven or expired write Task'); \"${origin_guard_arn}\") %}",
+        "Input": "{% $string({\"trigger\":\"manual\",\"scheduledTime\":'manual-' & $states.context.Execution.Id & '-PromoteSpot',\"intent\":\"promote-spot\",\"target\":$target}) %}"
+      },
+      "Next": "ReleasePromotion",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failure"
+        }
+      ],
+      "TimeoutSeconds": 60
+    },
+    "ReleasePromotion": {
+      "Type": "Task",
+      "Comment": "Atomic arming/mode/maintenance and lease fence; TTL is never authorization.",
+      "Resource": "arn:aws:states:::aws-sdk:dynamodb:transactWriteItems",
+      "Arguments": {
+        "TransactItems": [
+          {
+            "ConditionCheck": {
+              "TableName": "${table_name}",
+              "Key": {
+                "pk": {
+                  "S": "maintenance"
+                }
+              },
+              "ConditionExpression": "attribute_not_exists(pk)"
+            }
+          },
+          {
+            "ConditionCheck": {
+              "TableName": "${table_name}",
+              "Key": {
+                "pk": {
+                  "S": "mode"
+                }
+              },
+              "ConditionExpression": "attribute_exists(enabled) AND enabled = :yes AND #scope = :scope AND approvalRef = :approval AND (#scope = :production OR (#scope = :rehearsal AND armedUntil = :armedUntil AND armedUntil > :nowUtc)) AND #state IN (:s0, :s1, :s2, :s3, :s4, :s5, :s6) AND :currentRedrive = :zero AND :writeUntil > :nowMs",
+              "ExpressionAttributeNames": {
+                "#scope": "scope",
+                "#state": "state"
+              },
+              "ExpressionAttributeValues": {
+                ":yes": {
+                  "Bool": true
+                },
+                ":scope": {
+                  "S": "{% $mode.scope.S %}"
+                },
+                ":approval": {
+                  "S": "{% $mode.approvalRef.S %}"
+                },
+                ":production": {
+                  "S": "production"
+                },
+                ":rehearsal": {
+                  "S": "rehearsal"
+                },
+                ":armedUntil": {
+                  "S": "{% $exists($mode.armedUntil.S) ? $mode.armedUntil.S : '' %}"
+                },
+                ":nowUtc": {
+                  "S": "{% $fromMillis($millis()) %}"
+                },
+                ":currentRedrive": {
+                  "N": "{% $string($exists($states.context.Execution.RedriveCount) ? $states.context.Execution.RedriveCount : 0) %}"
+                },
+                ":zero": {
+                  "N": "0"
+                },
+                ":writeUntil": {
+                  "N": "{% $string($writeUntil) %}"
+                },
+                ":nowMs": {
+                  "N": "{% $string($millis()) %}"
+                },
+                ":s0": {
+                  "S": "off"
+                },
+                ":s1": {
+                  "S": "spot-active"
+                },
+                ":s2": {
+                  "S": "failover-prep"
+                },
+                ":s3": {
+                  "S": "od-active"
+                },
+                ":s4": {
+                  "S": "failback"
+                },
+                ":s5": {
+                  "S": "day-close"
+                },
+                ":s6": {
+                  "S": "degraded"
+                }
+              }
+            }
+          },
+          {
+            "Delete": {
+              "TableName": "${table_name}",
+              "Key": {
+                "pk": {
+                  "S": "lock#runtime"
+                }
+              },
+              "ConditionExpression": "#owner = :owner AND lockToken = :token AND expiresAt > :minExpiry AND writeUntil = :writeUntil AND writeUntil > :now AND redriveCount = :zero AND :currentRedrive = :zero",
+              "ExpressionAttributeNames": {
+                "#owner": "owner"
+              },
+              "ExpressionAttributeValues": {
+                ":owner": {
+                  "S": "{% $states.context.Execution.Id %}"
+                },
+                ":token": {
+                  "S": "{% $token %}"
+                },
+                ":minExpiry": {
+                  "N": "{% $string($millis() + ${write_margin_ms}) %}"
+                },
+                ":writeUntil": {
+                  "N": "{% $string($writeUntil) %}"
+                },
+                ":now": {
+                  "N": "{% $string($millis()) %}"
+                },
+                ":zero": {
+                  "N": "0"
+                },
+                ":currentRedrive": {
+                  "N": "{% $string($exists($states.context.Execution.RedriveCount) ? $states.context.Execution.RedriveCount : 0) %}"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failed"
+        }
+      ],
+      "Next": "WaitPromotion",
+      "TimeoutSeconds": 60
+    },
+    "WaitPromotion": {
+      "Type": "Wait",
+      "Seconds": 15,
+      "Next": "PollPromotion"
+    },
+    "PollPromotion": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:ec2:describeAddresses",
+      "Arguments": {
+        "AllocationIds": [
+          "${eip_allocation_id}"
+        ]
+      },
+      "Next": "Promoted",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "newHolder": "{% $states.result.Addresses[0].InstanceId %}",
+        "attempts": "{% $attempts+1 %}"
+      },
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failure"
+        }
+      ]
+    },
+    "Promoted": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Condition": "{% $newHolder=$target %}",
+          "Next": "ReacquireSmoke"
+        },
+        {
+          "Condition": "{% $attempts<8 %}",
+          "Next": "WaitPromotion"
+        }
+      ],
+      "Default": "Failed"
+    },
+    "ReacquireSmoke": {
+      "Type": "Task",
+      "Comment": "Atomic arming/mode/maintenance and lease fence; TTL is never authorization.",
+      "Resource": "arn:aws:states:::aws-sdk:dynamodb:transactWriteItems",
+      "Arguments": {
+        "TransactItems": [
+          {
+            "ConditionCheck": {
+              "TableName": "${table_name}",
+              "Key": {
+                "pk": {
+                  "S": "maintenance"
+                }
+              },
+              "ConditionExpression": "attribute_not_exists(pk)"
+            }
+          },
+          {
+            "ConditionCheck": {
+              "TableName": "${table_name}",
+              "Key": {
+                "pk": {
+                  "S": "mode"
+                }
+              },
+              "ConditionExpression": "attribute_exists(enabled) AND enabled = :yes AND #scope = :scope AND approvalRef = :approval AND (#scope = :production OR (#scope = :rehearsal AND armedUntil = :armedUntil AND armedUntil > :nowUtc)) AND #state IN (:s0) AND :currentRedrive = :zero AND :writeUntil > :nowMs",
+              "ExpressionAttributeNames": {
+                "#scope": "scope",
+                "#state": "state"
+              },
+              "ExpressionAttributeValues": {
+                ":yes": {
+                  "Bool": true
+                },
+                ":scope": {
+                  "S": "{% $mode.scope.S %}"
+                },
+                ":approval": {
+                  "S": "{% $mode.approvalRef.S %}"
+                },
+                ":production": {
+                  "S": "production"
+                },
+                ":rehearsal": {
+                  "S": "rehearsal"
+                },
+                ":armedUntil": {
+                  "S": "{% $exists($mode.armedUntil.S) ? $mode.armedUntil.S : '' %}"
+                },
+                ":nowUtc": {
+                  "S": "{% $fromMillis($millis()) %}"
+                },
+                ":currentRedrive": {
+                  "N": "{% $string($exists($states.context.Execution.RedriveCount) ? $states.context.Execution.RedriveCount : 0) %}"
+                },
+                ":zero": {
+                  "N": "0"
+                },
+                ":writeUntil": {
+                  "N": "{% $string($writeUntil) %}"
+                },
+                ":nowMs": {
+                  "N": "{% $string($millis()) %}"
+                },
+                ":s0": {
+                  "S": "spot-active"
+                }
+              }
+            }
+          },
+          {
+            "Put": {
+              "TableName": "${table_name}",
+              "Item": {
+                "pk": {
+                  "S": "lock#runtime"
+                },
+                "owner": {
+                  "S": "{% $states.context.Execution.Id %}"
+                },
+                "lockToken": {
+                  "S": "{% $token %}"
+                },
+                "expiresAt": {
+                  "N": "{% $string($millis()+${lease_ms}) %}"
+                },
+                "writeUntil": {
+                  "N": "{% $string($writeUntil) %}"
+                },
+                "redriveCount": {
+                  "N": "0"
+                },
+                "ttl": {
+                  "N": "{% $string($floor(($millis()+${lease_ms})/1000)+604800) %}"
+                }
+              },
+              "ConditionExpression": "attribute_not_exists(pk) OR expiresAt < :now",
+              "ExpressionAttributeValues": {
+                ":now": {
+                  "N": "{% $string($millis()) %}"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failed"
+        }
+      ],
+      "Next": "FenceSpotEndToEnd",
+      "TimeoutSeconds": 60
+    },
+    "FenceSpotEndToEnd": {
+      "Type": "Task",
+      "Comment": "Atomic arming/mode/maintenance and lease fence; TTL is never authorization.",
+      "Resource": "arn:aws:states:::aws-sdk:dynamodb:transactWriteItems",
+      "Arguments": {
+        "TransactItems": [
+          {
+            "ConditionCheck": {
+              "TableName": "${table_name}",
+              "Key": {
+                "pk": {
+                  "S": "maintenance"
+                }
+              },
+              "ConditionExpression": "attribute_not_exists(pk)"
+            }
+          },
+          {
+            "ConditionCheck": {
+              "TableName": "${table_name}",
+              "Key": {
+                "pk": {
+                  "S": "mode"
+                }
+              },
+              "ConditionExpression": "attribute_exists(enabled) AND enabled = :yes AND #scope = :scope AND approvalRef = :approval AND (#scope = :production OR (#scope = :rehearsal AND armedUntil = :armedUntil AND armedUntil > :nowUtc)) AND #state IN (:s0, :s1, :s2, :s3, :s4, :s5, :s6) AND :currentRedrive = :zero AND :writeUntil > :nowMs",
+              "ExpressionAttributeNames": {
+                "#scope": "scope",
+                "#state": "state"
+              },
+              "ExpressionAttributeValues": {
+                ":yes": {
+                  "Bool": true
+                },
+                ":scope": {
+                  "S": "{% $mode.scope.S %}"
+                },
+                ":approval": {
+                  "S": "{% $mode.approvalRef.S %}"
+                },
+                ":production": {
+                  "S": "production"
+                },
+                ":rehearsal": {
+                  "S": "rehearsal"
+                },
+                ":armedUntil": {
+                  "S": "{% $exists($mode.armedUntil.S) ? $mode.armedUntil.S : '' %}"
+                },
+                ":nowUtc": {
+                  "S": "{% $fromMillis($millis()) %}"
+                },
+                ":currentRedrive": {
+                  "N": "{% $string($exists($states.context.Execution.RedriveCount) ? $states.context.Execution.RedriveCount : 0) %}"
+                },
+                ":zero": {
+                  "N": "0"
+                },
+                ":writeUntil": {
+                  "N": "{% $string($writeUntil) %}"
+                },
+                ":nowMs": {
+                  "N": "{% $string($millis()) %}"
+                },
+                ":s0": {
+                  "S": "off"
+                },
+                ":s1": {
+                  "S": "spot-active"
+                },
+                ":s2": {
+                  "S": "failover-prep"
+                },
+                ":s3": {
+                  "S": "od-active"
+                },
+                ":s4": {
+                  "S": "failback"
+                },
+                ":s5": {
+                  "S": "day-close"
+                },
+                ":s6": {
+                  "S": "degraded"
+                }
+              }
+            }
+          },
+          {
+            "Update": {
+              "TableName": "${table_name}",
+              "Key": {
+                "pk": {
+                  "S": "lock#runtime"
+                }
+              },
+              "UpdateExpression": "SET lastWrite = :label, lastWriteAt = :now",
+              "ConditionExpression": "#owner = :owner AND lockToken = :token AND expiresAt > :minExpiry AND writeUntil = :writeUntil AND writeUntil > :now AND redriveCount = :zero AND :currentRedrive = :zero",
+              "ExpressionAttributeNames": {
+                "#owner": "owner"
+              },
+              "ExpressionAttributeValues": {
+                ":owner": {
+                  "S": "{% $states.context.Execution.Id %}"
+                },
+                ":token": {
+                  "S": "{% $token %}"
+                },
+                ":minExpiry": {
+                  "N": "{% $string($millis() + ${write_margin_ms}) %}"
+                },
+                ":writeUntil": {
+                  "N": "{% $string($writeUntil) %}"
+                },
+                ":now": {
+                  "N": "{% $string($millis()) %}"
+                },
+                ":zero": {
+                  "N": "0"
+                },
+                ":label": {
+                  "S": "FenceSpotEndToEnd"
+                },
+                ":currentRedrive": {
+                  "N": "{% $string($exists($states.context.Execution.RedriveCount) ? $states.context.Execution.RedriveCount : 0) %}"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failure"
+        }
+      ],
+      "Next": "SpotEndToEnd",
+      "TimeoutSeconds": 60
+    },
+    "SpotEndToEnd": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:ssm:sendCommand",
+      "Arguments": {
+        "DocumentName": "{% ($assert(($exists($states.context.Execution.RedriveCount) ? $states.context.Execution.RedriveCount : 0)=0 and $millis()<$writeUntil,'Redriven or expired write Task'); \"${spot_smoke_document_name}\") %}",
+        "DocumentVersion": "1",
+        "InstanceIds": [
+          "{% $target %}"
+        ],
+        "TimeoutSeconds": 300,
+        "Parameters": {
+          "expectedImageSha": [
+            "{% $liveSha %}"
+          ],
+          "expectedImageRepository": [
+            "${expected_image_repository}"
+          ],
+          "expectedTaskDefinitionArn": [
+            "{% $tdArn %}"
+          ],
+          "checkMode": [
+            "endToEnd"
+          ],
+          "cloudFrontDomain": [
+            "${cloudfront_domain}"
+          ]
+        }
+      },
+      "Next": "SpotEndToEndWait",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failure"
+        }
+      ],
+      "Assign": {
+        "commandId": "{% $states.result.Command.CommandId %}",
+        "polls": 0
+      },
+      "TimeoutSeconds": 60
+    },
+    "SpotEndToEndWait": {
+      "Type": "Wait",
+      "Seconds": 10,
+      "Next": "SpotEndToEndRead"
+    },
+    "SpotEndToEndRead": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:ssm:getCommandInvocation",
+      "Arguments": {
+        "CommandId": "{% $commandId %}",
+        "InstanceId": "{% $target %}"
+      },
+      "Next": "SpotEndToEndChoice",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "commandStatus": "{% $states.result.Status %}",
+        "commandCode": "{% $states.result.ResponseCode %}",
+        "polls": "{% $polls+1 %}"
+      },
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failure"
+        }
+      ]
+    },
+    "SpotEndToEndChoice": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Condition": "{% $commandStatus = 'Success' and $commandCode = 0 %}",
+          "Next": "ReleaseRefreshWait"
+        },
+        {
+          "Condition": "{% $commandStatus in ['Pending','InProgress','Delayed'] and $polls < 36 %}",
+          "Next": "SpotEndToEndWait"
+        }
+      ],
+      "Default": "Failure"
+    },
+    "FenceOpenMissed": {
+      "Type": "Task",
+      "Comment": "Atomic arming/mode/maintenance and lease fence; TTL is never authorization.",
+      "Resource": "arn:aws:states:::aws-sdk:dynamodb:transactWriteItems",
+      "Arguments": {
+        "TransactItems": [
+          {
+            "ConditionCheck": {
+              "TableName": "${table_name}",
+              "Key": {
+                "pk": {
+                  "S": "maintenance"
+                }
+              },
+              "ConditionExpression": "attribute_not_exists(pk)"
+            }
+          },
+          {
+            "ConditionCheck": {
+              "TableName": "${table_name}",
+              "Key": {
+                "pk": {
+                  "S": "mode"
+                }
+              },
+              "ConditionExpression": "attribute_exists(enabled) AND enabled = :yes AND #scope = :scope AND approvalRef = :approval AND (#scope = :production OR (#scope = :rehearsal AND armedUntil = :armedUntil AND armedUntil > :nowUtc)) AND #state IN (:s0) AND :currentRedrive = :zero AND :writeUntil > :nowMs",
+              "ExpressionAttributeNames": {
+                "#scope": "scope",
+                "#state": "state"
+              },
+              "ExpressionAttributeValues": {
+                ":yes": {
+                  "Bool": true
+                },
+                ":scope": {
+                  "S": "{% $mode.scope.S %}"
+                },
+                ":approval": {
+                  "S": "{% $mode.approvalRef.S %}"
+                },
+                ":production": {
+                  "S": "production"
+                },
+                ":rehearsal": {
+                  "S": "rehearsal"
+                },
+                ":armedUntil": {
+                  "S": "{% $exists($mode.armedUntil.S) ? $mode.armedUntil.S : '' %}"
+                },
+                ":nowUtc": {
+                  "S": "{% $fromMillis($millis()) %}"
+                },
+                ":currentRedrive": {
+                  "N": "{% $string($exists($states.context.Execution.RedriveCount) ? $states.context.Execution.RedriveCount : 0) %}"
+                },
+                ":zero": {
+                  "N": "0"
+                },
+                ":writeUntil": {
+                  "N": "{% $string($writeUntil) %}"
+                },
+                ":nowMs": {
+                  "N": "{% $string($millis()) %}"
+                },
+                ":s0": {
+                  "S": "spot-active"
+                }
+              }
+            }
+          },
+          {
+            "Update": {
+              "TableName": "${table_name}",
+              "Key": {
+                "pk": {
+                  "S": "lock#runtime"
+                }
+              },
+              "UpdateExpression": "SET lastWrite = :label, lastWriteAt = :now",
+              "ConditionExpression": "#owner = :owner AND lockToken = :token AND expiresAt > :minExpiry AND writeUntil = :writeUntil AND writeUntil > :now AND redriveCount = :zero AND :currentRedrive = :zero",
+              "ExpressionAttributeNames": {
+                "#owner": "owner"
+              },
+              "ExpressionAttributeValues": {
+                ":owner": {
+                  "S": "{% $states.context.Execution.Id %}"
+                },
+                ":token": {
+                  "S": "{% $token %}"
+                },
+                ":minExpiry": {
+                  "N": "{% $string($millis() + ${write_margin_ms}) %}"
+                },
+                ":writeUntil": {
+                  "N": "{% $string($writeUntil) %}"
+                },
+                ":now": {
+                  "N": "{% $string($millis()) %}"
+                },
+                ":zero": {
+                  "N": "0"
+                },
+                ":label": {
+                  "S": "FenceOpenMissed"
+                },
+                ":currentRedrive": {
+                  "N": "{% $string($exists($states.context.Execution.RedriveCount) ? $states.context.Execution.RedriveCount : 0) %}"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failure"
+        }
+      ],
+      "Next": "OpenMissed",
+      "TimeoutSeconds": 60
+    },
+    "OpenMissed": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:sfn:startExecution",
+      "Arguments": {
+        "StateMachineArn": "{% ($assert(($exists($states.context.Execution.RedriveCount) ? $states.context.Execution.RedriveCount : 0)=0 and $millis()<$writeUntil,'Redriven or expired write Task'); \"${od_standby_arn}\") %}",
+        "Input": "{% $string({\"trigger\":\"manual\",\"scheduledTime\":'manual-' & $states.context.Execution.Id & '-OpenMissed',\"action\":\"prepare\",\"reason\":\"open-missed\"}) %}"
+      },
+      "Next": "ReleaseOpenMissed",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failure"
+        }
+      ],
+      "TimeoutSeconds": 60,
+      "Assign": {
+        "outcome": "failed"
+      }
+    },
+    "RecordSpotInService": {
+      "Type": "Task",
+      "Comment": "Atomic arming/mode/maintenance and lease fence; TTL is never authorization.",
+      "Resource": "arn:aws:states:::aws-sdk:dynamodb:transactWriteItems",
+      "Arguments": {
+        "TransactItems": [
+          {
+            "ConditionCheck": {
+              "TableName": "${table_name}",
+              "Key": {
+                "pk": {
+                  "S": "maintenance"
+                }
+              },
+              "ConditionExpression": "attribute_not_exists(pk)"
+            }
+          },
+          {
+            "ConditionCheck": {
+              "TableName": "${table_name}",
+              "Key": {
+                "pk": {
+                  "S": "mode"
+                }
+              },
+              "ConditionExpression": "attribute_exists(enabled) AND enabled = :yes AND #scope = :scope AND approvalRef = :approval AND (#scope = :production OR (#scope = :rehearsal AND armedUntil = :armedUntil AND armedUntil > :nowUtc)) AND #state IN (:s0) AND :currentRedrive = :zero AND :writeUntil > :nowMs",
+              "ExpressionAttributeNames": {
+                "#scope": "scope",
+                "#state": "state"
+              },
+              "ExpressionAttributeValues": {
+                ":yes": {
+                  "Bool": true
+                },
+                ":scope": {
+                  "S": "{% $mode.scope.S %}"
+                },
+                ":approval": {
+                  "S": "{% $mode.approvalRef.S %}"
+                },
+                ":production": {
+                  "S": "production"
+                },
+                ":rehearsal": {
+                  "S": "rehearsal"
+                },
+                ":armedUntil": {
+                  "S": "{% $exists($mode.armedUntil.S) ? $mode.armedUntil.S : '' %}"
+                },
+                ":nowUtc": {
+                  "S": "{% $fromMillis($millis()) %}"
+                },
+                ":currentRedrive": {
+                  "N": "{% $string($exists($states.context.Execution.RedriveCount) ? $states.context.Execution.RedriveCount : 0) %}"
+                },
+                ":zero": {
+                  "N": "0"
+                },
+                ":writeUntil": {
+                  "N": "{% $string($writeUntil) %}"
+                },
+                ":nowMs": {
+                  "N": "{% $string($millis()) %}"
+                },
+                ":s0": {
+                  "S": "spot-active"
+                }
+              }
+            }
+          },
+          {
+            "Update": {
+              "TableName": "${table_name}",
+              "Key": {
+                "pk": {
+                  "S": "lock#runtime"
+                }
+              },
+              "UpdateExpression": "SET lastWrite = :label, lastWriteAt = :now",
+              "ConditionExpression": "#owner = :owner AND lockToken = :token AND expiresAt > :minExpiry AND writeUntil = :writeUntil AND writeUntil > :now AND redriveCount = :zero AND :currentRedrive = :zero",
+              "ExpressionAttributeNames": {
+                "#owner": "owner"
+              },
+              "ExpressionAttributeValues": {
+                ":owner": {
+                  "S": "{% $states.context.Execution.Id %}"
+                },
+                ":token": {
+                  "S": "{% $token %}"
+                },
+                ":minExpiry": {
+                  "N": "{% $string($millis() + ${write_margin_ms}) %}"
+                },
+                ":writeUntil": {
+                  "N": "{% $string($writeUntil) %}"
+                },
+                ":now": {
+                  "N": "{% $string($millis()) %}"
+                },
+                ":zero": {
+                  "N": "0"
+                },
+                ":label": {
+                  "S": "RecordSpotInService"
+                },
+                ":currentRedrive": {
+                  "N": "{% $string($exists($states.context.Execution.RedriveCount) ? $states.context.Execution.RedriveCount : 0) %}"
+                }
+              }
+            }
+          },
+          {
+            "Update": {
+              "TableName": "${table_name}",
+              "Key": {
+                "pk": {
+                  "S": "{% 'instance#' & $target %}"
+                }
+              },
+              "UpdateExpression": "SET firstInServiceAt = if_not_exists(firstInServiceAt, :now), asg = :asg",
+              "ExpressionAttributeValues": {
+                ":now": {
+                  "N": "{% $string($millis()) %}"
+                },
+                ":asg": {
+                  "S": "${asg_name}"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failure"
+        }
+      ],
+      "Next": "FenceSpotSmoke",
+      "TimeoutSeconds": 60
+    },
+    "ReleaseRefreshWait": {
+      "Type": "Task",
+      "Comment": "Atomic arming/mode/maintenance and lease fence; TTL is never authorization.",
+      "Resource": "arn:aws:states:::aws-sdk:dynamodb:transactWriteItems",
+      "Arguments": {
+        "TransactItems": [
+          {
+            "ConditionCheck": {
+              "TableName": "${table_name}",
+              "Key": {
+                "pk": {
+                  "S": "maintenance"
+                }
+              },
+              "ConditionExpression": "attribute_not_exists(pk)"
+            }
+          },
+          {
+            "ConditionCheck": {
+              "TableName": "${table_name}",
+              "Key": {
+                "pk": {
+                  "S": "mode"
+                }
+              },
+              "ConditionExpression": "attribute_exists(enabled) AND enabled = :yes AND #scope = :scope AND approvalRef = :approval AND (#scope = :production OR (#scope = :rehearsal AND armedUntil = :armedUntil AND armedUntil > :nowUtc)) AND #state IN (:s0, :s1, :s2, :s3, :s4, :s5, :s6) AND :currentRedrive = :zero AND :writeUntil > :nowMs",
+              "ExpressionAttributeNames": {
+                "#scope": "scope",
+                "#state": "state"
+              },
+              "ExpressionAttributeValues": {
+                ":yes": {
+                  "Bool": true
+                },
+                ":scope": {
+                  "S": "{% $mode.scope.S %}"
+                },
+                ":approval": {
+                  "S": "{% $mode.approvalRef.S %}"
+                },
+                ":production": {
+                  "S": "production"
+                },
+                ":rehearsal": {
+                  "S": "rehearsal"
+                },
+                ":armedUntil": {
+                  "S": "{% $exists($mode.armedUntil.S) ? $mode.armedUntil.S : '' %}"
+                },
+                ":nowUtc": {
+                  "S": "{% $fromMillis($millis()) %}"
+                },
+                ":currentRedrive": {
+                  "N": "{% $string($exists($states.context.Execution.RedriveCount) ? $states.context.Execution.RedriveCount : 0) %}"
+                },
+                ":zero": {
+                  "N": "0"
+                },
+                ":writeUntil": {
+                  "N": "{% $string($writeUntil) %}"
+                },
+                ":nowMs": {
+                  "N": "{% $string($millis()) %}"
+                },
+                ":s0": {
+                  "S": "off"
+                },
+                ":s1": {
+                  "S": "spot-active"
+                },
+                ":s2": {
+                  "S": "failover-prep"
+                },
+                ":s3": {
+                  "S": "od-active"
+                },
+                ":s4": {
+                  "S": "failback"
+                },
+                ":s5": {
+                  "S": "day-close"
+                },
+                ":s6": {
+                  "S": "degraded"
+                }
+              }
+            }
+          },
+          {
+            "Delete": {
+              "TableName": "${table_name}",
+              "Key": {
+                "pk": {
+                  "S": "lock#runtime"
+                }
+              },
+              "ConditionExpression": "#owner = :owner AND lockToken = :token AND expiresAt > :minExpiry AND writeUntil = :writeUntil AND writeUntil > :now AND redriveCount = :zero AND :currentRedrive = :zero",
+              "ExpressionAttributeNames": {
+                "#owner": "owner"
+              },
+              "ExpressionAttributeValues": {
+                ":owner": {
+                  "S": "{% $states.context.Execution.Id %}"
+                },
+                ":token": {
+                  "S": "{% $token %}"
+                },
+                ":minExpiry": {
+                  "N": "{% $string($millis() + ${write_margin_ms}) %}"
+                },
+                ":writeUntil": {
+                  "N": "{% $string($writeUntil) %}"
+                },
+                ":now": {
+                  "N": "{% $string($millis()) %}"
+                },
+                ":zero": {
+                  "N": "0"
+                },
+                ":currentRedrive": {
+                  "N": "{% $string($exists($states.context.Execution.RedriveCount) ? $states.context.Execution.RedriveCount : 0) %}"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failed"
+        }
+      ],
+      "Next": "RefreshTimeChoice",
+      "TimeoutSeconds": 60
+    },
+    "RefreshTimeChoice": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Condition": "{% $mode.scope.S='production' and $fromMillis($millis(),'[H01]:[m01]','+0900')<'07:55' %}",
+          "Next": "WaitReadyRefresh"
+        }
+      ],
+      "Default": "Done"
+    },
+    "WaitReadyRefresh": {
+      "Type": "Wait",
+      "Timestamp": "{% $fromMillis($toMillis($fromMillis($millis(),'[Y0001]-[M01]-[D01]','+0900') & 'T07:55:00+09:00')) %}",
+      "Next": "RefreshSnapshot"
+    },
+    "RefreshSnapshot": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:autoscaling:describeAutoScalingGroups",
+      "Arguments": {
+        "AutoScalingGroupNames": [
+          "${asg_name}"
+        ]
+      },
+      "Next": "RefreshReadInstances",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "group": "{% $states.result.AutoScalingGroups[0] %}"
+      },
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failure"
+        }
+      ]
+    },
+    "RefreshReadInstances": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:ec2:describeInstances",
+      "Arguments": {
+        "InstanceIds": "{% $append(['${od_instance_id}'], $exists($group.Instances) ? $group.Instances.InstanceId : []) %}"
+      },
+      "Next": "RefreshReadAddress",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "instances": "{% $append([], $states.result.Reservations.Instances) %}"
+      },
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failure"
+        }
+      ]
+    },
+    "RefreshReadAddress": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:ec2:describeAddresses",
+      "Arguments": {
+        "AllocationIds": [
+          "${eip_allocation_id}"
+        ]
+      },
+      "Next": "RefreshReadAssociationInstance",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "addresses": "{% $states.result.Addresses %}",
+        "holder": "{% $exists($states.result.Addresses[0].InstanceId) ? $states.result.Addresses[0].InstanceId : '' %}"
+      },
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failure"
+        }
+      ]
+    },
+    "RefreshReadAssociationInstance": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:ec2:describeInstances",
+      "Arguments": {
+        "InstanceIds": "{% $distinct($append($append(['${od_instance_id}'], $exists($group.Instances) ? $group.Instances.InstanceId : []), $holder!='' ? [$holder] : [])) %}"
+      },
+      "Next": "RefreshReadAssociationRecord",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "instances": "{% $append([], $states.result.Reservations.Instances) %}"
+      },
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failure"
+        }
+      ]
+    },
+    "RefreshReadAssociationRecord": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:getItem",
+      "Arguments": {
+        "TableName": "${table_name}",
+        "Key": {
+          "pk": {
+            "S": "{% 'instance#' & $holder %}"
+          }
+        },
+        "ConsistentRead": true
+      },
+      "Next": "RefreshReadOdAttribute",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "holderRecord": "{% $exists($states.result.Item) ? $states.result.Item : {} %}"
+      },
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failure"
+        }
+      ]
+    },
+    "RefreshReadOdAttribute": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:ec2:describeNetworkInterfaceAttribute",
+      "Arguments": {
+        "NetworkInterfaceId": "${od_eni_id}",
+        "Attribute": "associatePublicIpAddress"
+      },
+      "Next": "RefreshReadRds",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "odPublic": "{% $states.result.AssociatePublicIpAddress %}"
+      },
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failure"
+        }
+      ]
+    },
+    "RefreshReadRds": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:rds:describeDBInstances",
+      "Arguments": {
+        "DbInstanceIdentifier": "${db_instance_identifier}"
+      },
+      "Next": "RefreshReadService",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "db": "{% $states.result.DbInstances[0] %}"
+      },
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failure"
+        }
+      ]
+    },
+    "RefreshReadService": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:ecs:describeServices",
+      "Arguments": {
+        "Cluster": "${ecs_cluster_arn}",
+        "Services": [
+          "${ecs_service_name}"
+        ]
+      },
+      "Next": "RefreshReadTaskDefinition",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "service": "{% $states.result.Services[0] %}",
+        "tdArn": "{% $states.result.Services[0].TaskDefinition %}"
+      },
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failure"
+        }
+      ]
+    },
+    "RefreshReadTaskDefinition": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:ecs:describeTaskDefinition",
+      "Arguments": {
+        "TaskDefinition": "{% $tdArn %}"
+      },
+      "Next": "RefreshSnapshotGate",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "liveSha": "{% ($images := $states.result.TaskDefinition.ContainerDefinitions[Name='api'].Image; $count($images)=1 and $substringBefore($images[0], ':') = '${expected_image_repository}' ? $substringAfter($images[0], ':') : '') %}"
+      },
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failure"
+        }
+      ]
+    },
+    "RefreshSnapshotGate": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Condition": "{% $group.AutoScalingGroupName = '${asg_name}' and $group.MinSize = 0 and $group.MaxSize = 2 and $group.CapacityRebalance = false and $count($group.Instances) <= 2 and $count($addresses) = 1 and $addresses[0].AllocationId = '${eip_allocation_id}' and ($holder = '' or $holder = '${od_instance_id}' or $holder in $group.Instances.InstanceId or ($holderRecord.asg.S='${asg_name}' and $instances[InstanceId=$holder][0].IamInstanceProfile.Arn='${spot_instance_profile_arn}' and $instances[InstanceId=$holder][0].InstanceLifecycle='spot' and $instances[InstanceId=$holder][0].State.Name in ['terminated','shutting-down','stopped'])) and $count($instances[InstanceId='${od_instance_id}' and IamInstanceProfile.Arn='${od_instance_profile_arn}'])=1 and $db.DbInstanceIdentifier = '${db_instance_identifier}' and $service.ServiceName = '${ecs_service_name}' and $contains($liveSha, /^[a-f0-9]{40}$/) %}",
+          "Next": "RefreshHolderGate"
+        }
+      ],
+      "Default": "Failed"
+    },
+    "RefreshHolderGate": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Condition": "{% $holder='${od_instance_id}' and $instances[InstanceId='${od_instance_id}'][0].State.Name='running' %}",
+          "Next": "SelectMorningOd"
+        },
+        {
+          "Condition": "{% $holder=$target and $holder in $group.Instances[LifecycleState='InService' and HealthStatus='Healthy'].InstanceId %}",
+          "Next": "ReacquireRefresh"
+        }
+      ],
+      "Default": "Failed"
+    },
+    "ReacquireRefresh": {
+      "Type": "Task",
+      "Comment": "Atomic arming/mode/maintenance and lease fence; TTL is never authorization.",
+      "Resource": "arn:aws:states:::aws-sdk:dynamodb:transactWriteItems",
+      "Arguments": {
+        "TransactItems": [
+          {
+            "ConditionCheck": {
+              "TableName": "${table_name}",
+              "Key": {
+                "pk": {
+                  "S": "maintenance"
+                }
+              },
+              "ConditionExpression": "attribute_not_exists(pk)"
+            }
+          },
+          {
+            "ConditionCheck": {
+              "TableName": "${table_name}",
+              "Key": {
+                "pk": {
+                  "S": "mode"
+                }
+              },
+              "ConditionExpression": "attribute_exists(enabled) AND enabled = :yes AND #scope = :scope AND approvalRef = :approval AND (#scope = :production OR (#scope = :rehearsal AND armedUntil = :armedUntil AND armedUntil > :nowUtc)) AND #state IN (:s0) AND :currentRedrive = :zero AND :writeUntil > :nowMs",
+              "ExpressionAttributeNames": {
+                "#scope": "scope",
+                "#state": "state"
+              },
+              "ExpressionAttributeValues": {
+                ":yes": {
+                  "Bool": true
+                },
+                ":scope": {
+                  "S": "{% $mode.scope.S %}"
+                },
+                ":approval": {
+                  "S": "{% $mode.approvalRef.S %}"
+                },
+                ":production": {
+                  "S": "production"
+                },
+                ":rehearsal": {
+                  "S": "rehearsal"
+                },
+                ":armedUntil": {
+                  "S": "{% $exists($mode.armedUntil.S) ? $mode.armedUntil.S : '' %}"
+                },
+                ":nowUtc": {
+                  "S": "{% $fromMillis($millis()) %}"
+                },
+                ":currentRedrive": {
+                  "N": "{% $string($exists($states.context.Execution.RedriveCount) ? $states.context.Execution.RedriveCount : 0) %}"
+                },
+                ":zero": {
+                  "N": "0"
+                },
+                ":writeUntil": {
+                  "N": "{% $string($writeUntil) %}"
+                },
+                ":nowMs": {
+                  "N": "{% $string($millis()) %}"
+                },
+                ":s0": {
+                  "S": "spot-active"
+                }
+              }
+            }
+          },
+          {
+            "Put": {
+              "TableName": "${table_name}",
+              "Item": {
+                "pk": {
+                  "S": "lock#runtime"
+                },
+                "owner": {
+                  "S": "{% $states.context.Execution.Id %}"
+                },
+                "lockToken": {
+                  "S": "{% $token %}"
+                },
+                "expiresAt": {
+                  "N": "{% $string($millis()+${lease_ms}) %}"
+                },
+                "writeUntil": {
+                  "N": "{% $string($writeUntil) %}"
+                },
+                "redriveCount": {
+                  "N": "0"
+                },
+                "ttl": {
+                  "N": "{% $string($floor(($millis()+${lease_ms})/1000)+604800) %}"
+                }
+              },
+              "ConditionExpression": "attribute_not_exists(pk) OR expiresAt < :now",
+              "ExpressionAttributeValues": {
+                ":now": {
+                  "N": "{% $string($millis()) %}"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failed"
+        }
+      ],
+      "Next": "FenceRefreshReadySmoke",
+      "TimeoutSeconds": 60
+    },
+    "FenceRefreshReadySmoke": {
+      "Type": "Task",
+      "Comment": "Atomic arming/mode/maintenance and lease fence; TTL is never authorization.",
+      "Resource": "arn:aws:states:::aws-sdk:dynamodb:transactWriteItems",
+      "Arguments": {
+        "TransactItems": [
+          {
+            "ConditionCheck": {
+              "TableName": "${table_name}",
+              "Key": {
+                "pk": {
+                  "S": "maintenance"
+                }
+              },
+              "ConditionExpression": "attribute_not_exists(pk)"
+            }
+          },
+          {
+            "ConditionCheck": {
+              "TableName": "${table_name}",
+              "Key": {
+                "pk": {
+                  "S": "mode"
+                }
+              },
+              "ConditionExpression": "attribute_exists(enabled) AND enabled = :yes AND #scope = :scope AND approvalRef = :approval AND (#scope = :production OR (#scope = :rehearsal AND armedUntil = :armedUntil AND armedUntil > :nowUtc)) AND #state IN (:s0, :s1, :s2, :s3, :s4, :s5, :s6) AND :currentRedrive = :zero AND :writeUntil > :nowMs",
+              "ExpressionAttributeNames": {
+                "#scope": "scope",
+                "#state": "state"
+              },
+              "ExpressionAttributeValues": {
+                ":yes": {
+                  "Bool": true
+                },
+                ":scope": {
+                  "S": "{% $mode.scope.S %}"
+                },
+                ":approval": {
+                  "S": "{% $mode.approvalRef.S %}"
+                },
+                ":production": {
+                  "S": "production"
+                },
+                ":rehearsal": {
+                  "S": "rehearsal"
+                },
+                ":armedUntil": {
+                  "S": "{% $exists($mode.armedUntil.S) ? $mode.armedUntil.S : '' %}"
+                },
+                ":nowUtc": {
+                  "S": "{% $fromMillis($millis()) %}"
+                },
+                ":currentRedrive": {
+                  "N": "{% $string($exists($states.context.Execution.RedriveCount) ? $states.context.Execution.RedriveCount : 0) %}"
+                },
+                ":zero": {
+                  "N": "0"
+                },
+                ":writeUntil": {
+                  "N": "{% $string($writeUntil) %}"
+                },
+                ":nowMs": {
+                  "N": "{% $string($millis()) %}"
+                },
+                ":s0": {
+                  "S": "off"
+                },
+                ":s1": {
+                  "S": "spot-active"
+                },
+                ":s2": {
+                  "S": "failover-prep"
+                },
+                ":s3": {
+                  "S": "od-active"
+                },
+                ":s4": {
+                  "S": "failback"
+                },
+                ":s5": {
+                  "S": "day-close"
+                },
+                ":s6": {
+                  "S": "degraded"
+                }
+              }
+            }
+          },
+          {
+            "Update": {
+              "TableName": "${table_name}",
+              "Key": {
+                "pk": {
+                  "S": "lock#runtime"
+                }
+              },
+              "UpdateExpression": "SET lastWrite = :label, lastWriteAt = :now",
+              "ConditionExpression": "#owner = :owner AND lockToken = :token AND expiresAt > :minExpiry AND writeUntil = :writeUntil AND writeUntil > :now AND redriveCount = :zero AND :currentRedrive = :zero",
+              "ExpressionAttributeNames": {
+                "#owner": "owner"
+              },
+              "ExpressionAttributeValues": {
+                ":owner": {
+                  "S": "{% $states.context.Execution.Id %}"
+                },
+                ":token": {
+                  "S": "{% $token %}"
+                },
+                ":minExpiry": {
+                  "N": "{% $string($millis() + ${write_margin_ms}) %}"
+                },
+                ":writeUntil": {
+                  "N": "{% $string($writeUntil) %}"
+                },
+                ":now": {
+                  "N": "{% $string($millis()) %}"
+                },
+                ":zero": {
+                  "N": "0"
+                },
+                ":label": {
+                  "S": "FenceRefreshReadySmoke"
+                },
+                ":currentRedrive": {
+                  "N": "{% $string($exists($states.context.Execution.RedriveCount) ? $states.context.Execution.RedriveCount : 0) %}"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failure"
+        }
+      ],
+      "Next": "RefreshReadySmoke",
+      "TimeoutSeconds": 60
+    },
+    "RefreshReadySmoke": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:ssm:sendCommand",
+      "Arguments": {
+        "DocumentName": "{% ($assert(($exists($states.context.Execution.RedriveCount) ? $states.context.Execution.RedriveCount : 0)=0 and $millis()<$writeUntil,'Redriven or expired write Task'); \"${spot_smoke_document_name}\") %}",
+        "DocumentVersion": "1",
+        "InstanceIds": [
+          "{% $target %}"
+        ],
+        "TimeoutSeconds": 300,
+        "Parameters": {
+          "expectedImageSha": [
+            "{% $liveSha %}"
+          ],
+          "expectedImageRepository": [
+            "${expected_image_repository}"
+          ],
+          "expectedTaskDefinitionArn": [
+            "{% $tdArn %}"
+          ],
+          "checkMode": [
+            "local"
+          ],
+          "cloudFrontDomain": [
+            "${cloudfront_domain}"
+          ]
+        }
+      },
+      "Next": "RefreshReadySmokeWait",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failure"
+        }
+      ],
+      "Assign": {
+        "commandId": "{% $states.result.Command.CommandId %}",
+        "polls": 0
+      },
+      "TimeoutSeconds": 60
+    },
+    "RefreshReadySmokeWait": {
+      "Type": "Wait",
+      "Seconds": 10,
+      "Next": "RefreshReadySmokeRead"
+    },
+    "RefreshReadySmokeRead": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:ssm:getCommandInvocation",
+      "Arguments": {
+        "CommandId": "{% $commandId %}",
+        "InstanceId": "{% $target %}"
+      },
+      "Next": "RefreshReadySmokeChoice",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "commandStatus": "{% $states.result.Status %}",
+        "commandCode": "{% $states.result.ResponseCode %}",
+        "polls": "{% $polls+1 %}"
+      },
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failure"
+        }
+      ]
+    },
+    "RefreshReadySmokeChoice": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Condition": "{% $commandStatus = 'Success' and $commandCode = 0 %}",
+          "Next": "RefreshReadyAttest"
+        },
+        {
+          "Condition": "{% $commandStatus in ['Pending','InProgress','Delayed'] and $polls < 36 %}",
+          "Next": "RefreshReadySmokeWait"
+        }
+      ],
+      "Default": "Failure"
+    },
+    "RefreshReadyAttest": {
+      "Type": "Task",
+      "Comment": "Atomic arming/mode/maintenance and lease fence; TTL is never authorization.",
+      "Resource": "arn:aws:states:::aws-sdk:dynamodb:transactWriteItems",
+      "Arguments": {
+        "TransactItems": [
+          {
+            "ConditionCheck": {
+              "TableName": "${table_name}",
+              "Key": {
+                "pk": {
+                  "S": "maintenance"
+                }
+              },
+              "ConditionExpression": "attribute_not_exists(pk)"
+            }
+          },
+          {
+            "ConditionCheck": {
+              "TableName": "${table_name}",
+              "Key": {
+                "pk": {
+                  "S": "mode"
+                }
+              },
+              "ConditionExpression": "attribute_exists(enabled) AND enabled = :yes AND #scope = :scope AND approvalRef = :approval AND (#scope = :production OR (#scope = :rehearsal AND armedUntil = :armedUntil AND armedUntil > :nowUtc)) AND #state IN (:s0, :s1, :s2, :s3, :s4, :s5, :s6) AND :currentRedrive = :zero AND :writeUntil > :nowMs",
+              "ExpressionAttributeNames": {
+                "#scope": "scope",
+                "#state": "state"
+              },
+              "ExpressionAttributeValues": {
+                ":yes": {
+                  "Bool": true
+                },
+                ":scope": {
+                  "S": "{% $mode.scope.S %}"
+                },
+                ":approval": {
+                  "S": "{% $mode.approvalRef.S %}"
+                },
+                ":production": {
+                  "S": "production"
+                },
+                ":rehearsal": {
+                  "S": "rehearsal"
+                },
+                ":armedUntil": {
+                  "S": "{% $exists($mode.armedUntil.S) ? $mode.armedUntil.S : '' %}"
+                },
+                ":nowUtc": {
+                  "S": "{% $fromMillis($millis()) %}"
+                },
+                ":currentRedrive": {
+                  "N": "{% $string($exists($states.context.Execution.RedriveCount) ? $states.context.Execution.RedriveCount : 0) %}"
+                },
+                ":zero": {
+                  "N": "0"
+                },
+                ":writeUntil": {
+                  "N": "{% $string($writeUntil) %}"
+                },
+                ":nowMs": {
+                  "N": "{% $string($millis()) %}"
+                },
+                ":s0": {
+                  "S": "off"
+                },
+                ":s1": {
+                  "S": "spot-active"
+                },
+                ":s2": {
+                  "S": "failover-prep"
+                },
+                ":s3": {
+                  "S": "od-active"
+                },
+                ":s4": {
+                  "S": "failback"
+                },
+                ":s5": {
+                  "S": "day-close"
+                },
+                ":s6": {
+                  "S": "degraded"
+                }
+              }
+            }
+          },
+          {
+            "Update": {
+              "TableName": "${table_name}",
+              "Key": {
+                "pk": {
+                  "S": "lock#runtime"
+                }
+              },
+              "UpdateExpression": "SET lastWrite = :label, lastWriteAt = :now",
+              "ConditionExpression": "#owner = :owner AND lockToken = :token AND expiresAt > :minExpiry AND writeUntil = :writeUntil AND writeUntil > :now AND redriveCount = :zero AND :currentRedrive = :zero",
+              "ExpressionAttributeNames": {
+                "#owner": "owner"
+              },
+              "ExpressionAttributeValues": {
+                ":owner": {
+                  "S": "{% $states.context.Execution.Id %}"
+                },
+                ":token": {
+                  "S": "{% $token %}"
+                },
+                ":minExpiry": {
+                  "N": "{% $string($millis() + ${write_margin_ms}) %}"
+                },
+                ":writeUntil": {
+                  "N": "{% $string($writeUntil) %}"
+                },
+                ":now": {
+                  "N": "{% $string($millis()) %}"
+                },
+                ":zero": {
+                  "N": "0"
+                },
+                ":label": {
+                  "S": "RefreshReadyAttest"
+                },
+                ":currentRedrive": {
+                  "N": "{% $string($exists($states.context.Execution.RedriveCount) ? $states.context.Execution.RedriveCount : 0) %}"
+                }
+              }
+            }
+          },
+          {
+            "Put": {
+              "TableName": "${table_name}",
+              "Item": {
+                "pk": {
+                  "S": "{% 'ready#' & $target %}"
+                },
+                "instanceId": {
+                  "S": "{% $target %}"
+                },
+                "sha": {
+                  "S": "{% $liveSha %}"
+                },
+                "taskDefinition": {
+                  "S": "{% $tdArn %}"
+                },
+                "readyAt": {
+                  "N": "{% $string($millis()) %}"
+                },
+                "validUntil": {
+                  "N": "{% $string($millis()+600000) %}"
+                },
+                "ttl": {
+                  "N": "{% $string($floor($millis()/1000)+86400) %}"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failure"
+        }
+      ],
+      "Next": "Release",
+      "TimeoutSeconds": 60
+    },
+    "OpeningDeadline": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Condition": "{% $mode.scope.S='rehearsal' or $fromMillis($millis(),'[H01]:[m01]','+0900')<'07:50' %}",
+          "Next": "AttestSpot"
+        }
+      ],
+      "Default": "FenceOpenMissed"
+    },
+    "ReadFailureMode": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:getItem",
+      "Arguments": {
+        "TableName": "${table_name}",
+        "Key": {
+          "pk": {
+            "S": "mode"
+          }
+        },
+        "ConsistentRead": true
+      },
+      "Next": "FailureModeChoice",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "failedMode": "{% $exists($states.result.Item) ? $states.result.Item : {} %}"
+      },
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failed"
+        }
+      ]
+    },
+    "FailureModeChoice": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Condition": "{% $failedMode.state.S in ['failover-prep','failback','day-close'] %}",
+          "Next": "ReadFailureLease"
+        }
+      ],
+      "Default": "Release"
+    },
+    "MarkDegraded": {
+      "Type": "Task",
+      "Comment": "Atomic arming/mode/maintenance and lease fence; TTL is never authorization.",
+      "Resource": "arn:aws:states:::aws-sdk:dynamodb:transactWriteItems",
+      "Arguments": {
+        "TransactItems": [
+          {
+            "ConditionCheck": {
+              "TableName": "${table_name}",
+              "Key": {
+                "pk": {
+                  "S": "maintenance"
+                }
+              },
+              "ConditionExpression": "attribute_not_exists(pk)"
+            }
+          },
+          {
+            "Update": {
+              "TableName": "${table_name}",
+              "Key": {
+                "pk": {
+                  "S": "mode"
+                }
+              },
+              "UpdateExpression": "SET #state = :newState, updatedAt = :updated",
+              "ExpressionAttributeValues": {
+                ":yes": {
+                  "Bool": true
+                },
+                ":scope": {
+                  "S": "{% $mode.scope.S %}"
+                },
+                ":approval": {
+                  "S": "{% $mode.approvalRef.S %}"
+                },
+                ":production": {
+                  "S": "production"
+                },
+                ":rehearsal": {
+                  "S": "rehearsal"
+                },
+                ":armedUntil": {
+                  "S": "{% $exists($mode.armedUntil.S) ? $mode.armedUntil.S : '' %}"
+                },
+                ":nowUtc": {
+                  "S": "{% $fromMillis($millis()) %}"
+                },
+                ":currentRedrive": {
+                  "N": "{% $string($exists($states.context.Execution.RedriveCount) ? $states.context.Execution.RedriveCount : 0) %}"
+                },
+                ":zero": {
+                  "N": "0"
+                },
+                ":writeUntil": {
+                  "N": "{% $string($writeUntil) %}"
+                },
+                ":nowMs": {
+                  "N": "{% $string($millis()) %}"
+                },
+                ":s0": {
+                  "S": "failover-prep"
+                },
+                ":s1": {
+                  "S": "failback"
+                },
+                ":newState": {
+                  "S": "degraded"
+                },
+                ":updated": {
+                  "N": "{% $string($millis()) %}"
+                },
+                ":s2": {
+                  "S": "day-close"
+                }
+              },
+              "ConditionExpression": "attribute_exists(enabled) AND enabled = :yes AND #scope = :scope AND approvalRef = :approval AND (#scope = :production OR (#scope = :rehearsal AND armedUntil = :armedUntil AND armedUntil > :nowUtc)) AND #state IN (:s0, :s1, :s2) AND :currentRedrive = :zero AND :writeUntil > :nowMs",
+              "ExpressionAttributeNames": {
+                "#scope": "scope",
+                "#state": "state"
+              }
+            }
+          },
+          {
+            "Update": {
+              "TableName": "${table_name}",
+              "Key": {
+                "pk": {
+                  "S": "lock#runtime"
+                }
+              },
+              "UpdateExpression": "SET lastWrite = :label, lastWriteAt = :now",
+              "ConditionExpression": "#owner = :owner AND lockToken = :token AND expiresAt > :minExpiry AND writeUntil = :writeUntil AND writeUntil > :now AND redriveCount = :zero AND :currentRedrive = :zero",
+              "ExpressionAttributeNames": {
+                "#owner": "owner"
+              },
+              "ExpressionAttributeValues": {
+                ":owner": {
+                  "S": "{% $states.context.Execution.Id %}"
+                },
+                ":token": {
+                  "S": "{% $token %}"
+                },
+                ":minExpiry": {
+                  "N": "{% $string($millis() + ${write_margin_ms}) %}"
+                },
+                ":writeUntil": {
+                  "N": "{% $string($writeUntil) %}"
+                },
+                ":now": {
+                  "N": "{% $string($millis()) %}"
+                },
+                ":zero": {
+                  "N": "0"
+                },
+                ":label": {
+                  "S": "MarkDegraded"
+                },
+                ":currentRedrive": {
+                  "N": "{% $string($exists($states.context.Execution.RedriveCount) ? $states.context.Execution.RedriveCount : 0) %}"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Release"
+        }
+      ],
+      "Next": "Release",
+      "TimeoutSeconds": 60
+    },
+    "SelectMorningOd": {
+      "Type": "Pass",
+      "Assign": {
+        "target": "${od_instance_id}"
+      },
+      "Next": "ReacquireMorningOd"
+    },
+    "ReacquireMorningOd": {
+      "Type": "Task",
+      "Comment": "Atomic arming/mode/maintenance and lease fence; TTL is never authorization.",
+      "Resource": "arn:aws:states:::aws-sdk:dynamodb:transactWriteItems",
+      "Arguments": {
+        "TransactItems": [
+          {
+            "ConditionCheck": {
+              "TableName": "${table_name}",
+              "Key": {
+                "pk": {
+                  "S": "maintenance"
+                }
+              },
+              "ConditionExpression": "attribute_not_exists(pk)"
+            }
+          },
+          {
+            "ConditionCheck": {
+              "TableName": "${table_name}",
+              "Key": {
+                "pk": {
+                  "S": "mode"
+                }
+              },
+              "ConditionExpression": "attribute_exists(enabled) AND enabled = :yes AND #scope = :scope AND approvalRef = :approval AND (#scope = :production OR (#scope = :rehearsal AND armedUntil = :armedUntil AND armedUntil > :nowUtc)) AND #state IN (:s0) AND :currentRedrive = :zero AND :writeUntil > :nowMs",
+              "ExpressionAttributeNames": {
+                "#scope": "scope",
+                "#state": "state"
+              },
+              "ExpressionAttributeValues": {
+                ":yes": {
+                  "Bool": true
+                },
+                ":scope": {
+                  "S": "{% $mode.scope.S %}"
+                },
+                ":approval": {
+                  "S": "{% $mode.approvalRef.S %}"
+                },
+                ":production": {
+                  "S": "production"
+                },
+                ":rehearsal": {
+                  "S": "rehearsal"
+                },
+                ":armedUntil": {
+                  "S": "{% $exists($mode.armedUntil.S) ? $mode.armedUntil.S : '' %}"
+                },
+                ":nowUtc": {
+                  "S": "{% $fromMillis($millis()) %}"
+                },
+                ":currentRedrive": {
+                  "N": "{% $string($exists($states.context.Execution.RedriveCount) ? $states.context.Execution.RedriveCount : 0) %}"
+                },
+                ":zero": {
+                  "N": "0"
+                },
+                ":writeUntil": {
+                  "N": "{% $string($writeUntil) %}"
+                },
+                ":nowMs": {
+                  "N": "{% $string($millis()) %}"
+                },
+                ":s0": {
+                  "S": "od-active"
+                }
+              }
+            }
+          },
+          {
+            "Put": {
+              "TableName": "${table_name}",
+              "Item": {
+                "pk": {
+                  "S": "lock#runtime"
+                },
+                "owner": {
+                  "S": "{% $states.context.Execution.Id %}"
+                },
+                "lockToken": {
+                  "S": "{% $token %}"
+                },
+                "expiresAt": {
+                  "N": "{% $string($millis()+${lease_ms}) %}"
+                },
+                "writeUntil": {
+                  "N": "{% $string($writeUntil) %}"
+                },
+                "redriveCount": {
+                  "N": "0"
+                },
+                "ttl": {
+                  "N": "{% $string($floor(($millis()+${lease_ms})/1000)+604800) %}"
+                }
+              },
+              "ConditionExpression": "attribute_not_exists(pk) OR expiresAt < :now",
+              "ExpressionAttributeValues": {
+                ":now": {
+                  "N": "{% $string($millis()) %}"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failed"
+        }
+      ],
+      "Next": "FenceMorningOdReadiness",
+      "TimeoutSeconds": 60
+    },
+    "FenceMorningOdReadiness": {
+      "Type": "Task",
+      "Comment": "Atomic arming/mode/maintenance and lease fence; TTL is never authorization.",
+      "Resource": "arn:aws:states:::aws-sdk:dynamodb:transactWriteItems",
+      "Arguments": {
+        "TransactItems": [
+          {
+            "ConditionCheck": {
+              "TableName": "${table_name}",
+              "Key": {
+                "pk": {
+                  "S": "maintenance"
+                }
+              },
+              "ConditionExpression": "attribute_not_exists(pk)"
+            }
+          },
+          {
+            "ConditionCheck": {
+              "TableName": "${table_name}",
+              "Key": {
+                "pk": {
+                  "S": "mode"
+                }
+              },
+              "ConditionExpression": "attribute_exists(enabled) AND enabled = :yes AND #scope = :scope AND approvalRef = :approval AND (#scope = :production OR (#scope = :rehearsal AND armedUntil = :armedUntil AND armedUntil > :nowUtc)) AND #state IN (:s0, :s1, :s2, :s3, :s4, :s5, :s6) AND :currentRedrive = :zero AND :writeUntil > :nowMs",
+              "ExpressionAttributeNames": {
+                "#scope": "scope",
+                "#state": "state"
+              },
+              "ExpressionAttributeValues": {
+                ":yes": {
+                  "Bool": true
+                },
+                ":scope": {
+                  "S": "{% $mode.scope.S %}"
+                },
+                ":approval": {
+                  "S": "{% $mode.approvalRef.S %}"
+                },
+                ":production": {
+                  "S": "production"
+                },
+                ":rehearsal": {
+                  "S": "rehearsal"
+                },
+                ":armedUntil": {
+                  "S": "{% $exists($mode.armedUntil.S) ? $mode.armedUntil.S : '' %}"
+                },
+                ":nowUtc": {
+                  "S": "{% $fromMillis($millis()) %}"
+                },
+                ":currentRedrive": {
+                  "N": "{% $string($exists($states.context.Execution.RedriveCount) ? $states.context.Execution.RedriveCount : 0) %}"
+                },
+                ":zero": {
+                  "N": "0"
+                },
+                ":writeUntil": {
+                  "N": "{% $string($writeUntil) %}"
+                },
+                ":nowMs": {
+                  "N": "{% $string($millis()) %}"
+                },
+                ":s0": {
+                  "S": "off"
+                },
+                ":s1": {
+                  "S": "spot-active"
+                },
+                ":s2": {
+                  "S": "failover-prep"
+                },
+                ":s3": {
+                  "S": "od-active"
+                },
+                ":s4": {
+                  "S": "failback"
+                },
+                ":s5": {
+                  "S": "day-close"
+                },
+                ":s6": {
+                  "S": "degraded"
+                }
+              }
+            }
+          },
+          {
+            "Update": {
+              "TableName": "${table_name}",
+              "Key": {
+                "pk": {
+                  "S": "lock#runtime"
+                }
+              },
+              "UpdateExpression": "SET lastWrite = :label, lastWriteAt = :now",
+              "ConditionExpression": "#owner = :owner AND lockToken = :token AND expiresAt > :minExpiry AND writeUntil = :writeUntil AND writeUntil > :now AND redriveCount = :zero AND :currentRedrive = :zero",
+              "ExpressionAttributeNames": {
+                "#owner": "owner"
+              },
+              "ExpressionAttributeValues": {
+                ":owner": {
+                  "S": "{% $states.context.Execution.Id %}"
+                },
+                ":token": {
+                  "S": "{% $token %}"
+                },
+                ":minExpiry": {
+                  "N": "{% $string($millis() + ${write_margin_ms}) %}"
+                },
+                ":writeUntil": {
+                  "N": "{% $string($writeUntil) %}"
+                },
+                ":now": {
+                  "N": "{% $string($millis()) %}"
+                },
+                ":zero": {
+                  "N": "0"
+                },
+                ":label": {
+                  "S": "FenceMorningOdReadiness"
+                },
+                ":currentRedrive": {
+                  "N": "{% $string($exists($states.context.Execution.RedriveCount) ? $states.context.Execution.RedriveCount : 0) %}"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failure"
+        }
+      ],
+      "Next": "MorningOdReadiness",
+      "TimeoutSeconds": 60
+    },
+    "MorningOdReadiness": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:ssm:sendCommand",
+      "Arguments": {
+        "DocumentName": "{% ($assert(($exists($states.context.Execution.RedriveCount) ? $states.context.Execution.RedriveCount : 0)=0 and $millis()<$writeUntil,'Redriven or expired write Task'); \"${od_readiness_document_name}\") %}",
+        "DocumentVersion": "1",
+        "InstanceIds": [
+          "{% '${od_instance_id}' %}"
+        ],
+        "TimeoutSeconds": 300,
+        "Parameters": {
+          "expectedImageSha": [
+            "{% $liveSha %}"
+          ],
+          "expectedImageRepository": [
+            "${expected_image_repository}"
+          ],
+          "expectedTaskDefinitionArn": [
+            "{% $tdArn %}"
+          ],
+          "checkMode": [
+            "local"
+          ],
+          "cloudFrontDomain": [
+            "${cloudfront_domain}"
+          ]
+        }
+      },
+      "Next": "MorningOdReadinessWait",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failure"
+        }
+      ],
+      "Assign": {
+        "commandId": "{% $states.result.Command.CommandId %}",
+        "polls": 0
+      },
+      "TimeoutSeconds": 60
+    },
+    "MorningOdReadinessWait": {
+      "Type": "Wait",
+      "Seconds": 10,
+      "Next": "MorningOdReadinessRead"
+    },
+    "MorningOdReadinessRead": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:ssm:getCommandInvocation",
+      "Arguments": {
+        "CommandId": "{% $commandId %}",
+        "InstanceId": "{% '${od_instance_id}' %}"
+      },
+      "Next": "MorningOdReadinessChoice",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "commandStatus": "{% $states.result.Status %}",
+        "commandCode": "{% $states.result.ResponseCode %}",
+        "polls": "{% $polls+1 %}"
+      },
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failed"
+        }
+      ]
+    },
+    "MorningOdReadinessChoice": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Condition": "{% $commandStatus = 'Success' and $commandCode = 0 %}",
+          "Next": "MorningOdAttestation"
+        },
+        {
+          "Condition": "{% $commandStatus in ['Pending','InProgress','Delayed'] and $polls < 36 %}",
+          "Next": "MorningOdReadinessWait"
+        }
+      ],
+      "Default": "Failure"
+    },
+    "MorningOdAttestation": {
+      "Type": "Task",
+      "Comment": "Atomic arming/mode/maintenance and lease fence; TTL is never authorization.",
+      "Resource": "arn:aws:states:::aws-sdk:dynamodb:transactWriteItems",
+      "Arguments": {
+        "TransactItems": [
+          {
+            "ConditionCheck": {
+              "TableName": "${table_name}",
+              "Key": {
+                "pk": {
+                  "S": "maintenance"
+                }
+              },
+              "ConditionExpression": "attribute_not_exists(pk)"
+            }
+          },
+          {
+            "ConditionCheck": {
+              "TableName": "${table_name}",
+              "Key": {
+                "pk": {
+                  "S": "mode"
+                }
+              },
+              "ConditionExpression": "attribute_exists(enabled) AND enabled = :yes AND #scope = :scope AND approvalRef = :approval AND (#scope = :production OR (#scope = :rehearsal AND armedUntil = :armedUntil AND armedUntil > :nowUtc)) AND #state IN (:s0, :s1, :s2, :s3, :s4, :s5, :s6) AND :currentRedrive = :zero AND :writeUntil > :nowMs",
+              "ExpressionAttributeNames": {
+                "#scope": "scope",
+                "#state": "state"
+              },
+              "ExpressionAttributeValues": {
+                ":yes": {
+                  "Bool": true
+                },
+                ":scope": {
+                  "S": "{% $mode.scope.S %}"
+                },
+                ":approval": {
+                  "S": "{% $mode.approvalRef.S %}"
+                },
+                ":production": {
+                  "S": "production"
+                },
+                ":rehearsal": {
+                  "S": "rehearsal"
+                },
+                ":armedUntil": {
+                  "S": "{% $exists($mode.armedUntil.S) ? $mode.armedUntil.S : '' %}"
+                },
+                ":nowUtc": {
+                  "S": "{% $fromMillis($millis()) %}"
+                },
+                ":currentRedrive": {
+                  "N": "{% $string($exists($states.context.Execution.RedriveCount) ? $states.context.Execution.RedriveCount : 0) %}"
+                },
+                ":zero": {
+                  "N": "0"
+                },
+                ":writeUntil": {
+                  "N": "{% $string($writeUntil) %}"
+                },
+                ":nowMs": {
+                  "N": "{% $string($millis()) %}"
+                },
+                ":s0": {
+                  "S": "off"
+                },
+                ":s1": {
+                  "S": "spot-active"
+                },
+                ":s2": {
+                  "S": "failover-prep"
+                },
+                ":s3": {
+                  "S": "od-active"
+                },
+                ":s4": {
+                  "S": "failback"
+                },
+                ":s5": {
+                  "S": "day-close"
+                },
+                ":s6": {
+                  "S": "degraded"
+                }
+              }
+            }
+          },
+          {
+            "Update": {
+              "TableName": "${table_name}",
+              "Key": {
+                "pk": {
+                  "S": "lock#runtime"
+                }
+              },
+              "UpdateExpression": "SET lastWrite = :label, lastWriteAt = :now",
+              "ConditionExpression": "#owner = :owner AND lockToken = :token AND expiresAt > :minExpiry AND writeUntil = :writeUntil AND writeUntil > :now AND redriveCount = :zero AND :currentRedrive = :zero",
+              "ExpressionAttributeNames": {
+                "#owner": "owner"
+              },
+              "ExpressionAttributeValues": {
+                ":owner": {
+                  "S": "{% $states.context.Execution.Id %}"
+                },
+                ":token": {
+                  "S": "{% $token %}"
+                },
+                ":minExpiry": {
+                  "N": "{% $string($millis() + ${write_margin_ms}) %}"
+                },
+                ":writeUntil": {
+                  "N": "{% $string($writeUntil) %}"
+                },
+                ":now": {
+                  "N": "{% $string($millis()) %}"
+                },
+                ":zero": {
+                  "N": "0"
+                },
+                ":label": {
+                  "S": "MorningOdAttestation"
+                },
+                ":currentRedrive": {
+                  "N": "{% $string($exists($states.context.Execution.RedriveCount) ? $states.context.Execution.RedriveCount : 0) %}"
+                }
+              }
+            }
+          },
+          {
+            "Put": {
+              "TableName": "${table_name}",
+              "Item": {
+                "pk": {
+                  "S": "{% 'ready#' & $target %}"
+                },
+                "instanceId": {
+                  "S": "{% $target %}"
+                },
+                "sha": {
+                  "S": "{% $liveSha %}"
+                },
+                "taskDefinition": {
+                  "S": "{% $tdArn %}"
+                },
+                "readyAt": {
+                  "N": "{% $string($millis()) %}"
+                },
+                "validUntil": {
+                  "N": "{% $string($millis()+600000) %}"
+                },
+                "ttl": {
+                  "N": "{% $string($floor($millis()/1000)+86400) %}"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failure"
+        }
+      ],
+      "Next": "Release",
+      "TimeoutSeconds": 60
+    },
+    "ReleaseOpenMissed": {
+      "Type": "Task",
+      "Comment": "Atomic arming/mode/maintenance and lease fence; TTL is never authorization.",
+      "Resource": "arn:aws:states:::aws-sdk:dynamodb:transactWriteItems",
+      "Arguments": {
+        "TransactItems": [
+          {
+            "ConditionCheck": {
+              "TableName": "${table_name}",
+              "Key": {
+                "pk": {
+                  "S": "maintenance"
+                }
+              },
+              "ConditionExpression": "attribute_not_exists(pk)"
+            }
+          },
+          {
+            "ConditionCheck": {
+              "TableName": "${table_name}",
+              "Key": {
+                "pk": {
+                  "S": "mode"
+                }
+              },
+              "ConditionExpression": "attribute_exists(enabled) AND enabled = :yes AND #scope = :scope AND approvalRef = :approval AND (#scope = :production OR (#scope = :rehearsal AND armedUntil = :armedUntil AND armedUntil > :nowUtc)) AND #state IN (:s0, :s1, :s2, :s3, :s4, :s5, :s6) AND :currentRedrive = :zero AND :writeUntil > :nowMs",
+              "ExpressionAttributeNames": {
+                "#scope": "scope",
+                "#state": "state"
+              },
+              "ExpressionAttributeValues": {
+                ":yes": {
+                  "Bool": true
+                },
+                ":scope": {
+                  "S": "{% $mode.scope.S %}"
+                },
+                ":approval": {
+                  "S": "{% $mode.approvalRef.S %}"
+                },
+                ":production": {
+                  "S": "production"
+                },
+                ":rehearsal": {
+                  "S": "rehearsal"
+                },
+                ":armedUntil": {
+                  "S": "{% $exists($mode.armedUntil.S) ? $mode.armedUntil.S : '' %}"
+                },
+                ":nowUtc": {
+                  "S": "{% $fromMillis($millis()) %}"
+                },
+                ":currentRedrive": {
+                  "N": "{% $string($exists($states.context.Execution.RedriveCount) ? $states.context.Execution.RedriveCount : 0) %}"
+                },
+                ":zero": {
+                  "N": "0"
+                },
+                ":writeUntil": {
+                  "N": "{% $string($writeUntil) %}"
+                },
+                ":nowMs": {
+                  "N": "{% $string($millis()) %}"
+                },
+                ":s0": {
+                  "S": "off"
+                },
+                ":s1": {
+                  "S": "spot-active"
+                },
+                ":s2": {
+                  "S": "failover-prep"
+                },
+                ":s3": {
+                  "S": "od-active"
+                },
+                ":s4": {
+                  "S": "failback"
+                },
+                ":s5": {
+                  "S": "day-close"
+                },
+                ":s6": {
+                  "S": "degraded"
+                }
+              }
+            }
+          },
+          {
+            "Delete": {
+              "TableName": "${table_name}",
+              "Key": {
+                "pk": {
+                  "S": "lock#runtime"
+                }
+              },
+              "ConditionExpression": "#owner = :owner AND lockToken = :token AND expiresAt > :minExpiry AND writeUntil = :writeUntil AND writeUntil > :now AND redriveCount = :zero AND :currentRedrive = :zero",
+              "ExpressionAttributeNames": {
+                "#owner": "owner"
+              },
+              "ExpressionAttributeValues": {
+                ":owner": {
+                  "S": "{% $states.context.Execution.Id %}"
+                },
+                ":token": {
+                  "S": "{% $token %}"
+                },
+                ":minExpiry": {
+                  "N": "{% $string($millis() + ${write_margin_ms}) %}"
+                },
+                ":writeUntil": {
+                  "N": "{% $string($writeUntil) %}"
+                },
+                ":now": {
+                  "N": "{% $string($millis()) %}"
+                },
+                ":zero": {
+                  "N": "0"
+                },
+                ":currentRedrive": {
+                  "N": "{% $string($exists($states.context.Execution.RedriveCount) ? $states.context.Execution.RedriveCount : 0) %}"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failed"
+        }
+      ],
+      "Next": "MissedRefreshTimeChoice",
+      "TimeoutSeconds": 60
+    },
+    "MissedRefreshTimeChoice": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Condition": "{% $mode.scope.S='production' %}",
+          "Next": "WaitReadyRefresh"
+        }
+      ],
+      "Default": "Failed"
+    },
+    "ReadFailureLease": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:getItem",
+      "Arguments": {
+        "TableName": "${table_name}",
+        "Key": {
+          "pk": {
+            "S": "lock#runtime"
+          }
+        },
+        "ConsistentRead": true
+      },
+      "Next": "FailureLeaseChoice",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "failureLease": "{% $exists($states.result.Item) ? $states.result.Item : {} %}"
+      },
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failed"
+        }
+      ]
+    },
+    "FailureLeaseChoice": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Condition": "{% $failureLease.owner.S=$states.context.Execution.Id and $failureLease.lockToken.S=$token %}",
+          "Next": "MarkDegraded"
+        },
+        {
+          "Condition": "{% $not($exists($failureLease.pk)) or $number($failureLease.expiresAt.N)<$millis() %}",
+          "Next": "ReacquireFailure"
+        }
+      ],
+      "Default": "Release"
+    },
+    "ReacquireFailure": {
+      "Type": "Task",
+      "Comment": "Atomic arming/mode/maintenance and lease fence; TTL is never authorization.",
+      "Resource": "arn:aws:states:::aws-sdk:dynamodb:transactWriteItems",
+      "Arguments": {
+        "TransactItems": [
+          {
+            "ConditionCheck": {
+              "TableName": "${table_name}",
+              "Key": {
+                "pk": {
+                  "S": "maintenance"
+                }
+              },
+              "ConditionExpression": "attribute_not_exists(pk)"
+            }
+          },
+          {
+            "ConditionCheck": {
+              "TableName": "${table_name}",
+              "Key": {
+                "pk": {
+                  "S": "mode"
+                }
+              },
+              "ConditionExpression": "attribute_exists(enabled) AND enabled = :yes AND #scope = :scope AND approvalRef = :approval AND (#scope = :production OR (#scope = :rehearsal AND armedUntil = :armedUntil AND armedUntil > :nowUtc)) AND #state IN (:s0, :s1, :s2) AND :currentRedrive = :zero AND :writeUntil > :nowMs",
+              "ExpressionAttributeNames": {
+                "#scope": "scope",
+                "#state": "state"
+              },
+              "ExpressionAttributeValues": {
+                ":yes": {
+                  "Bool": true
+                },
+                ":scope": {
+                  "S": "{% $mode.scope.S %}"
+                },
+                ":approval": {
+                  "S": "{% $mode.approvalRef.S %}"
+                },
+                ":production": {
+                  "S": "production"
+                },
+                ":rehearsal": {
+                  "S": "rehearsal"
+                },
+                ":armedUntil": {
+                  "S": "{% $exists($mode.armedUntil.S) ? $mode.armedUntil.S : '' %}"
+                },
+                ":nowUtc": {
+                  "S": "{% $fromMillis($millis()) %}"
+                },
+                ":currentRedrive": {
+                  "N": "{% $string($exists($states.context.Execution.RedriveCount) ? $states.context.Execution.RedriveCount : 0) %}"
+                },
+                ":zero": {
+                  "N": "0"
+                },
+                ":writeUntil": {
+                  "N": "{% $string($writeUntil) %}"
+                },
+                ":nowMs": {
+                  "N": "{% $string($millis()) %}"
+                },
+                ":s0": {
+                  "S": "failover-prep"
+                },
+                ":s1": {
+                  "S": "failback"
+                },
+                ":s2": {
+                  "S": "day-close"
+                }
+              }
+            }
+          },
+          {
+            "Put": {
+              "TableName": "${table_name}",
+              "Item": {
+                "pk": {
+                  "S": "lock#runtime"
+                },
+                "owner": {
+                  "S": "{% $states.context.Execution.Id %}"
+                },
+                "lockToken": {
+                  "S": "{% $token %}"
+                },
+                "expiresAt": {
+                  "N": "{% $string($millis()+${lease_ms}) %}"
+                },
+                "writeUntil": {
+                  "N": "{% $string($writeUntil) %}"
+                },
+                "redriveCount": {
+                  "N": "0"
+                },
+                "ttl": {
+                  "N": "{% $string($floor(($millis()+${lease_ms})/1000)+604800) %}"
+                }
+              },
+              "ConditionExpression": "attribute_not_exists(pk) OR expiresAt < :now",
+              "ExpressionAttributeValues": {
+                ":now": {
+                  "N": "{% $string($millis()) %}"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failed"
+        }
+      ],
+      "Next": "MarkDegraded",
+      "TimeoutSeconds": 60
+    }
+  }
+}
