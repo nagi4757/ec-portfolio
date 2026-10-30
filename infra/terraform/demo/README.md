@@ -772,7 +772,7 @@ After the apply the convergence plan reports `No changes` again. The `removed` b
 
 ### Drift after a cutover
 
-Once the EIP is associated with a Spot host, a refresh shows the association-derived attributes of `aws_eip.ec2_origin` changing (`instance`, `association_id`, `network_interface`, `private_ip`, `private_dns`). The configuration sets none of them, so they are drift only, never a planned change. The convergence drift rule allows exactly these attributes for this one address; the exact list is confirmed at the first cutover. Any other change to `aws_eip.ec2_origin` (`domain`, `tags`, replacement, destroy) or any change to the Route 53 record is a blocker.
+Once the EIP is associated with a Spot host, a refresh shows the association-derived attributes of `aws_eip.ec2_origin` changing (`instance`, `association_id`, `network_interface`, `private_ip`, `private_dns`). The configuration sets none of them, so they are drift only, never a planned change. For a plan of the measurement stack, `scripts/measurement-plan-gate.sh` (PG4) holds these five attributes of this one address as the only drift it can ever allow, and allows none of them by default: the operator names each attribute the saved plan shows drifting, one `--allow-drift aws_eip.ec2_origin:<attribute>` each. Any other drift, or a drift entry the gate cannot read as an update of known values, fails. The five are expected, not yet seen in a real plan: the first cutover confirms them, and a different list is a reviewed change to the gate, not a wider allowance on the command line. No other plan of this root goes through such a gate yet. Any other change to `aws_eip.ec2_origin` (`domain`, `tags`, replacement, destroy) or any change to the Route 53 record is a blocker.
 
 ### Local validation without AWS credentials
 
@@ -928,7 +928,7 @@ terraform show -json "$PRIVATE_DIR/measurement.tfplan" > "$PRIVATE_DIR/measureme
 scripts/measurement-plan-gate.sh enable "$PRIVATE_DIR/measurement.plan.json" \
   --reviewed-host-policy "$PRIVATE_DIR/measurement-host.json" \
   --reviewed-exec-policy "$PRIVATE_DIR/measurement-task-execution.json" \
-  --allow-drift <address expected to drift, if any>
+  --allow-drift aws_eip.ec2_origin:<attribute seen drifting, one flag each, if any>
 ```
 
 | Change | Mode | Expected plan |
@@ -938,7 +938,7 @@ scripts/measurement-plan-gate.sh enable "$PRIVATE_DIR/measurement.plan.json" \
 | `measurement_instance_type = "t3a.small"` | `switch` | `Plan: 0 to add, 2 to change, 0 to destroy.` (launch template version, group's template version) |
 | `measurement_stack_enabled = false` | `teardown` | `Plan: 0 to add, 0 to change, 13 to destroy.` |
 
-Any other change, any replace, any production change, output change or unlisted drift fails the gate; the plan is then kept as evidence and not applied. After each apply a convergence plan reports `No changes`.
+Any other change, any replace, any production change, output change or drift in anything but an attribute named with `--allow-drift` fails the gate; the plan is then kept as evidence and not applied. Only the five attributes of [Drift after a cutover](#drift-after-a-cutover) can be named, and any other `--allow-drift` value is refused. After each apply a convergence plan reports `No changes`.
 
 ### Teardown
 
@@ -952,7 +952,7 @@ Emergency stop at any time: `aws autoscaling update-auto-scaling-group --auto-sc
 ### Local validation without AWS credentials
 
 - `terraform fmt -check -recursive` and `terraform validate`.
-- `scripts/measurement-plan-gate.test.sh`: the gate on synthetic plans of every mode and on mutants that must each fail.
+- `scripts/measurement-plan-gate.test.sh`: the gate on synthetic plans of every mode, on mutants that must each fail, and on drift allowances it must refuse.
 - `../../runtime/demo/ecs-measurement-load.test.sh` (`--image` in CI) and `ecs-memory-probe.test.sh`.
 - Offline, outside the repository: `terraform test` with a mocked AWS provider plans this root from a synthetic state with the switch as a variable. Off, the plan is the same set of no-op resources as `main`; on, it adds exactly the 13 resources and leaves every production resource a no-op, the gate passes in `enable` mode and both rendered role policies match the reviewed documents canonically; off again, it deletes exactly the 13. This is a synthetic plan, not an AWS plan: it cannot show drift, replacements or provider-side diffs, and a mocked provider does not mark the launch template's `latest_version` unknown, so the `switch` delta is only checked by the real plan.
 

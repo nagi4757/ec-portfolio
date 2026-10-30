@@ -22,15 +22,22 @@
 #   --reviewed-host-policy <file>   required for enable: the measurement-host
 #   --reviewed-exec-policy <file>   and measurement-task-execution documents of
 #                                   the Access IaC README, as written there
-#   --allow-drift <address>         a resource_drift address that is expected,
-#                                   repeatable; any other drift fails
+#   --allow-drift <address>:<attribute>
+#                                   one attribute the operator has read drifting
+#                                   in this saved plan, repeatable, one each;
+#                                   only DRIFT_ALLOWANCE_CEILING can be named,
+#                                   and nothing in it is allowed unless named;
+#                                   a value that is not one attribute name
+#                                   (a-z, 0-9, _) is a usage error (exit 2),
+#                                   one outside the ceiling fails (exit 1)
 #
 # Checks (any failure exits 1 and the plan must not be applied):
 #   PG0  the plan is complete, not errored, applyable unless it is empty
 #   PG1  the managed changes are exactly the mode's set and actions; no replace
 #   PG2  the key production resources are in the plan, as no-ops
 #   PG3  no output changes
-#   PG4  no resource drift outside --allow-drift
+#   PG4  drift only as an update of known values in attributes named with
+#        --allow-drift; any other drift, or drift the gate cannot read, fails
 #   PG5  the content of what is created or changed: the launch template carries
 #        no Elastic IP and names the measurement cluster, group and hook; the
 #        group is 0/0/1 without capacity rebalance or AmazonECSManaged; the
@@ -98,6 +105,15 @@ readonly PRODUCTION_ADDRESSES='[
   "aws_scheduler_schedule.runtime[\"rds_start\"]",
   "aws_scheduler_schedule.runtime[\"rds_stop\"]"
 ]'
+
+# The only drift --allow-drift can ever name: the association-derived attributes
+# of the origin Elastic IP, which a cutover to a Spot host changes outside
+# Terraform (README, "Drift after a cutover"). The README expects these five and
+# the first cutover's plan confirms them; none is allowed unless the operator
+# names it for the saved plan at hand.
+readonly DRIFT_ALLOWANCE_CEILING='{
+  "aws_eip.ec2_origin": ["association_id", "instance", "network_interface", "private_dns", "private_ip"]
+}'
 
 # PG0-PG5 on the plan. Output: one line per violation.
 readonly PLAN_GATE_FILTER='
@@ -199,6 +215,43 @@ def creation_violations:
       then "PG5 \($name) is unknown in the plan and cannot be compared" else empty end),
   task_definition_violations;
 
+# PG4, one entry at a time, so that a second entry for an address cannot hide
+# behind the first: an update of known values of a managed resource, with every
+# attribute it changes named with --allow-drift. Anything else fails.
+def drift_entry_violations:
+  .address as $address
+  | $allowed_drift[$address] as $allowed
+  | ((.change | objects) // {}) as $c
+  | if $allowed == null then "PG4 drift not allowed: \($address)"
+    elif .mode != "managed" then "PG4 drift of \($address) is not a managed resource"
+    elif $c.actions != ["update"] then "PG4 drift of \($address) is not an update: \($c.actions | tojson)"
+    elif ($c.before | type) != "object" or ($c.after | type) != "object" then "PG4 drift of \($address) has no object before and after"
+    elif [$c.after_unknown | .. | select(. == true)] != [] then "PG4 drift of \($address) has unknown values"
+    # Terraform writes true for an unknown value, false for a known list
+    # element, and objects and lists of these: nothing else may be inside.
+    elif ($c.after_unknown | type | IN("null", "object") | not)
+         or ([$c.after_unknown | objects | .. | select(type | IN("boolean", "object", "array") | not)] != [])
+    then "PG4 drift of \($address) has an unreadable after_unknown"
+    else
+      ([$c.before, $c.after | keys[]] | unique) as $attributes
+      | [$attributes[] | select(. as $k | ($c.before | has($k)) != ($c.after | has($k)))] as $added_or_removed
+      | [$attributes[] | select(. as $k | $c.before[$k] != $c.after[$k])] as $changed
+      | if $added_or_removed != [] then $added_or_removed[] | "PG4 drift of \($address) adds or removes \(.)"
+        elif $changed == [] then "PG4 drift of \($address) changes no attribute"
+        else $changed[] | select(IN($allowed[]) | not) | "PG4 drift not allowed: \($address) \(.)"
+        end
+    end;
+
+def drift_violations:
+  .resource_drift as $drift
+  | if $drift == null then empty
+    elif ($drift | type) != "array" then "PG4 resource drift is not a list"
+    else
+      ($drift[] | select(type != "object" or (.address | type) != "string") | "PG4 drift entry without an address"),
+      ([$drift[] | objects | .address | strings] | group_by(.)[] | select(length > 1) | "PG4 drift of \(.[0]) is listed more than once"),
+      ($drift[] | select(type == "object" and (.address | type) == "string") | drift_entry_violations)
+    end;
+
 (if (.format_version // null) == null then "PG0 not the JSON form of a plan" else empty end),
 (if .errored == true then "PG0 the plan is errored" else empty end),
 (if .complete != true then "PG0 the plan is not complete" else empty end),
@@ -218,7 +271,7 @@ def creation_violations:
 
 (.output_changes // {} | to_entries[] | select(.value.actions != ["no-op"]) | "PG3 output change: \(.key)"),
 
-(.resource_drift[]? | select(.address as $a | $allowed_drift | index($a) | not) | "PG4 drift not allowed: \(.address)"),
+drift_violations,
 
 (if $mode == "enable" then launch_template_violations, group_violations, creation_violations
  elif $mode == "switch" then launch_template_violations, group_violations
@@ -231,8 +284,28 @@ fail() {
 }
 
 usage() {
-    printf 'Usage: %s merge|enable|switch|teardown <plan.json> [--reviewed-host-policy FILE] [--reviewed-exec-policy FILE] [--allow-drift ADDRESS]...\n' "$0" >&2
+    printf 'Usage: %s merge|enable|switch|teardown <plan.json> [--reviewed-host-policy FILE] [--reviewed-exec-policy FILE] [--allow-drift ADDRESS:ATTRIBUTE]...\n' "$0" >&2
     exit 2
+}
+
+# allow_drift <allowance> <address>:<attribute>: the allowance, an object of
+# address to attributes, with that one attribute added, before the plan is read.
+# A value that is not ADDRESS:ATTRIBUTE with one top-level attribute name is a
+# usage error (exit 2); a well-formed one outside DRIFT_ALLOWANCE_CEILING fails.
+allow_drift() {
+    local allowance="$1" address="${2%:*}" attribute="${2##*:}"
+    [[ "$2" == *:* && -n "$address" && -n "$attribute" &&
+        "$attribute" != *[!abcdefghijklmnopqrstuvwxyz0123456789_]* ]] || {
+        printf '%s --allow-drift takes ADDRESS:ATTRIBUTE, one attribute name (a-z, 0-9, _) each: %s\n' \
+            "$LOG_PREFIX" "'$2'" >&2
+        usage
+    }
+    jq -e --arg address "$address" --arg attribute "$attribute" 'any(.[$address][]?; . == $attribute)' \
+        <<<"$DRIFT_ALLOWANCE_CEILING" >/dev/null ||
+        fail "--allow-drift $2 is outside the drift that may be allowed: $(jq -r \
+            'to_entries | map("\(.value | join(", ")) of \(.key)") | join("; ")' <<<"$DRIFT_ALLOWANCE_CEILING")"
+    jq -c --arg address "$address" --arg attribute "$attribute" '.[$address] = (.[$address] + [$attribute] | unique)' \
+        <<<"$allowance" || fail "the drift allowance could not be built"
 }
 
 work_directory=""
@@ -276,12 +349,12 @@ main() {
     case "$mode" in merge | enable | switch | teardown) ;; *) usage ;; esac
     [[ -f "$plan" ]] || fail "plan JSON not found: $plan"
 
-    local host_policy="" exec_policy="" allowed_drift="[]"
+    local host_policy="" exec_policy="" allowed_drift="{}"
     while [[ $# -gt 0 ]]; do
         case "$1" in
         --reviewed-host-policy) [[ $# -ge 2 ]] || usage; host_policy="$2"; shift 2 ;;
         --reviewed-exec-policy) [[ $# -ge 2 ]] || usage; exec_policy="$2"; shift 2 ;;
-        --allow-drift) [[ $# -ge 2 ]] || usage; allowed_drift="$(jq -c --arg a "$2" '. + [$a]' <<<"$allowed_drift")"; shift 2 ;;
+        --allow-drift) [[ $# -ge 2 ]] || usage; allowed_drift="$(allow_drift "$allowed_drift" "$2")" || exit $?; shift 2 ;;
         *) usage ;;
         esac
     done
