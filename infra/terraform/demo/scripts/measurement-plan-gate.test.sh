@@ -139,7 +139,7 @@ production_changes="$(jq -cn --arg account "$ACCOUNT" --arg runtime "$RUNTIME_BU
   ["aws_ecs_cluster.demo", "aws_ecs_capacity_provider.ecs_spot", "aws_ecs_cluster_capacity_providers.demo",
    "aws_ecs_service.api", "aws_launch_template.ecs_spot", "aws_autoscaling_group.ecs_spot",
    "aws_autoscaling_lifecycle_hook.ecs_spot_launching", "aws_iam_role.ecs_spot", "aws_iam_instance_profile.ecs_spot",
-   "aws_iam_role_policy.ecs_spot_container_instance", "aws_iam_role_policy.ecs_spot_origin_eip_promotion",
+   "aws_iam_role_policy.ecs_spot_container_instance",
    "aws_iam_role.ecs_task_execution", "aws_iam_role_policy.ecs_task_execution_logs",
    "aws_iam_role_policy.ecs_task_execution_runtime_secrets", "aws_cloudwatch_log_group.ecs_api",
    "aws_s3_object.spot_runtime_bundle", "aws_eip.ec2_origin", "aws_instance.demo", "aws_route53_record.origin_demo",

@@ -21,11 +21,11 @@ locals {
     autoscaling_group_name    = local.ecs_spot_name
     lifecycle_hook_name       = local.ecs_spot_lifecycle_hook_name
 
-    # Phase 6C-5c-2: opts every host launched from this template version into
-    # promoting itself (promote-origin-eip.sh) once Auto Scaling accepted its
-    # CONTINUE. An empty value would leave the host to the operator, as in
-    # Phase 6C-5a and 6C-5b.
-    origin_eip_allocation_id = aws_eip.ec2_origin.allocation_id
+    # Phase 6C-5c P3-a2: empty, so a host never moves the origin Elastic IP to
+    # itself. origin-guard is its single automated writer, behind the arming,
+    # lease and attestation fences a host cannot see. With an empty value
+    # bootstrap-spot-host.sh neither installs nor queues the promotion unit.
+    origin_eip_allocation_id = ""
   }
 
   spot_user_data = templatefile(local.spot_user_data_template, local.spot_user_data_variables)
@@ -164,9 +164,13 @@ resource "aws_autoscaling_group" "ecs_spot" {
   # thing that makes an out-of-band change to it visible in a plan. The
   # ignore_changes comes with the cutover, not before it.
 
-  # Replaces a Spot host that has received a rebalance recommendation before it
-  # is interrupted, rather than waiting for the two-minute notice.
-  capacity_rebalance = true
+  # Off since Phase 6C-5c P3-a2. With one instance type in one Availability Zone
+  # a rebalance replacement comes from the pool that asked to be left, and the
+  # 2026-10-13 rehearsal lost the origin to that loop. It would also put a second
+  # host in the group, and day-open only picks a host when exactly one is
+  # InService. An interrupted host is still replaced, because desired capacity
+  # stays at one, and origin-guard and od-standby act on the two-minute notice.
+  capacity_rebalance = false
 
   # EC2 status checks only. There is no load balancer to ask, and application
   # health is proven by the bootstrap before the launch hook is completed.
