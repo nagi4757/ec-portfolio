@@ -1053,6 +1053,13 @@ scripts/cold-standby-plan-gate.sh verify "$PRIVATE_DIR/p3a2.tfplan" <saved_plan_
 
 The gate accepts exactly those three changes: the loader differs in the allocation line alone and starts from version 4, the deletion is of `origin-eip-promotion` on the Spot role because the source no longer has it, every other resource is a no-op with its refreshed values, and no other output moves. The real provider's unknown shape is first seen in the real plan; a difference is a rejection, not a pass.
 
+The first plan with a saved state after P3-a also reports the refresh of five P3-a resources in `resource_drift`, which a text plan does not show because nothing in the plan depends on them. No apply has stored what a refresh reads for them yet. Only the `p3a2` mode accepts these, through `P3A2_DRIFT_RULES` and only with the exact change below, and the `p3a` mode and every other P3-a resource still reject any drift.
+
+| Address | Refresh | Also required |
+| --- | --- | --- |
+| `aws_iam_role.runtime_orchestrator`, `runtime_eip_writer`, `runtime_events` | `inline_policy`: `[]` to one policy | same name and semantically equal JSON as the separate `aws_iam_role_policy` on that role, which stays no-op; `inline_policy` is not configured |
+| `aws_ssm_document.od_readiness`, `spot_smoke` | `permissions`: `null` to `{}` | the reviewed document name; `permissions` is not configured; any share is a value and fails |
+
 The Apply permission set covers every call through `ECPortfolioTerraformApplySpotFoundation` (`iam:DeleteRolePolicy` on the Spot role, the template version, `autoscaling:UpdateAutoScalingGroup`). No access root change is needed.
 
 ### Rollback

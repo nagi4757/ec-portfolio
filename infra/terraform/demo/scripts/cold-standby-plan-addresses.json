@@ -141,5 +141,30 @@
       "observed_inline_policy": "aws_iam_role_policy.ecs_task_execution_measurement[0]",
       "policy_name": "measurement-task-execution"
     }
+  },
+  "P3A2_DRIFT_RULES": {
+    "aws_iam_role.runtime_orchestrator": {
+      "fields": ["inline_policy"],
+      "observed_inline_policy": "aws_iam_role_policy.runtime_orchestrator",
+      "policy_name": "runtime-orchestration"
+    },
+    "aws_iam_role.runtime_eip_writer": {
+      "fields": ["inline_policy"],
+      "observed_inline_policy": "aws_iam_role_policy.runtime_eip_writer",
+      "policy_name": "origin-eip-writer"
+    },
+    "aws_iam_role.runtime_events": {
+      "fields": ["inline_policy"],
+      "observed_inline_policy": "aws_iam_role_policy.runtime_events",
+      "policy_name": "start-signal-workflows"
+    },
+    "aws_ssm_document.od_readiness": {
+      "fields": ["permissions"],
+      "empty_permissions_document": "ec-portfolio-demo-od-readiness"
+    },
+    "aws_ssm_document.spot_smoke": {
+      "fields": ["permissions"],
+      "empty_permissions_document": "ec-portfolio-demo-spot-smoke"
+    }
   }
 }

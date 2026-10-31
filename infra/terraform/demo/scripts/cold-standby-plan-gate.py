@@ -59,6 +59,10 @@ P3A2_CHANGED = {P3A2_TEMPLATE, P3A2_GROUP, P3A2_POLICY}
 P3A2_OUTPUT = "ecs_spot_launch_template_version"
 P3A2_VERSION = 4
 P3A2_ALLOCATION_LINE = "readonly EIP_ALLOCATION_ID_VALUE="
+# The first refresh of five P3-a resources: no apply has stored what it reads yet.
+# Only validate_p3a2 passes these rules; the P3-a mode still rejects any drift on
+# a resource it creates.
+P3A2_DRIFT_RULES = ADDRESSES["P3A2_DRIFT_RULES"]
 USAGE = ("usage: cold-standby-plan-gate.sh p3a <saved.tfplan> <plan.json> <approved-account-sha256>\n"
          "       cold-standby-plan-gate.sh p3a2 <saved.tfplan> <plan.json> <approved-account-sha256>\n"
          "       cold-standby-plan-gate.sh verify <saved.tfplan> <saved-plan-sha256> <source-commit>")
@@ -258,13 +262,14 @@ def computed_unknown(base_address, change, configuration_resource, key):
     return True
 
 
-def drift_check(plan):
+def drift_check(plan, first_refresh=None):
+    first_refresh = first_refresh or {}
     prior = indexed(resources(plan.get("prior_state", {}).get("values", {}).get("root_module", {})), "PG4 prior")
     changes = indexed(plan.get("resource_changes", []), "PG4 changes")
     drifts = indexed(plan.get("resource_drift", []), "PG4 duplicate drift")
-    rules = ADDRESSES["MEASUREMENT_DRIFT_RULES"]
+    rules = {**ADDRESSES["MEASUREMENT_DRIFT_RULES"], **first_refresh}
     for address, drift in drifts.items():
-        check(address in DRIFT and address not in NEW, "PG4 unexpected drift")
+        check(address in first_refresh or (address in DRIFT and address not in NEW), "PG4 unexpected drift")
         change = drift.get("change", {})
         check(change.get("actions") == ["update"] and not change.get("after_unknown") and
               not change.get("importing") and not drift.get("previous_address"), "PG4 drift action/unknown")
@@ -277,7 +282,8 @@ def drift_check(plan):
         leaves = changed_leaves(before, after)
         check(bool(leaves), "PG4 empty drift")
         changed = {key for key in set(before) | set(after) if before.get(key) != after.get(key)}
-        check(changed <= set(DRIFT[address]), "PG4 unexpected drift fields")
+        allowed = first_refresh[address]["fields"] if address in first_refresh else DRIFT.get(address, ())
+        check(changed <= set(allowed), "PG4 unexpected drift fields")
         rule = rules.get(address)
         if not rule:
             # Preserve the existing OD/RDS/EIP field boundary. New resources
@@ -300,6 +306,12 @@ def drift_check(plan):
             check(strict_json(observation["policy"]) == strict_json(policy["policy"]), "PG4 inline policy content")
             config = indexed(plan.get("configuration", {}).get("root_module", {}).get("resources", []), "PG4 config")
             check("inline_policy" not in config.get(address.split("[")[0], {}).get("expressions", {}), "PG4 configured inline policy")
+        elif "empty_permissions_document" in rule:
+            # Any share, public or to one account, is a value here and fails.
+            check(changed == {"permissions"} and before.get("permissions") is None and
+                  after.get("permissions") == {} and after.get("name") == rule["empty_permissions_document"], "PG4 document permissions")
+            config = indexed(plan.get("configuration", {}).get("root_module", {}).get("resources", []), "PG4 config")
+            check("permissions" not in config.get(address, {}).get("expressions", {}), "PG4 configured document permissions")
         else:
             check(changed == {"start_time"} and all(after.get(k) == rule[k] for k in ("recurrence", "time_zone")) and
                   after.get("min_size") == 0 and after.get("max_size") == 1 and after.get("desired_capacity") == 0 and
@@ -496,7 +508,7 @@ def validate_p3a2(plan):
               for name, value in outputs.items() if name != P3A2_OUTPUT), "P3A2 output changed")
     others = lambda values: {name: value for name, value in values.items() if name != P3A2_OUTPUT}
     check(others(plan.get("planned_values", {}).get("outputs", {})) == others(plan.get("prior_state", {}).get("values", {}).get("outputs", {})), "P3A2 output snapshot changed")
-    drift_check(plan)
+    drift_check(plan, P3A2_DRIFT_RULES)
     return {"result": "PASS", "mode": "p3a2", "creates": 0, "changes": 2, "destroys": 1,
             "scope": "saved-plan gate only; apply still requires separate approval"}
 

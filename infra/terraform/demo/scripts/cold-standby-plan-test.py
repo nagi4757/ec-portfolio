@@ -740,6 +740,259 @@ class P3a2Tests(unittest.TestCase):
         self.assertEqual(G.unknown_leaves(None), set())
 
 
+FIRST_REFRESH = json.loads((HERE / "fixtures/terraform116-provider662-p3a2-first-refresh-drift.json").read_text())
+FIRST_REFRESH_ADDRESSES = {"aws_iam_role.runtime_eip_writer", "aws_iam_role.runtime_events", "aws_iam_role.runtime_orchestrator",
+                           "aws_ssm_document.od_readiness", "aws_ssm_document.spot_smoke"}
+
+
+def add_first_refresh(plan, address):
+    """The first-refresh observation in the shape of the real rejected plan: its
+    attribute names and changed values, with the MOCK values of this plan."""
+    shape = FIRST_REFRESH["resources"][address]
+    current = resource(plan, address)["change"]["after"]
+    values = {name: current.get(name, "MOCK") for name in shape["attributes"]}
+    before, refreshed = dict(values, **shape["before"]), dict(values)
+    if address.startswith("aws_iam_role."):
+        policy = after(plan, ORIGINAL.P3A2_DRIFT_RULES[address]["observed_inline_policy"])
+        refreshed["inline_policy"] = [{"name": name, "policy": policy["policy"]} for name in shape["after_observed_policy_names"]]
+    else:
+        refreshed.update(shape["after"])
+    plan["resource_drift"].append({"address": address, "mode": "managed", "type": shape["type"], "name": shape["name"],
+                                   "change": {"actions": shape["actions"], "before": before, "after": refreshed, "after_unknown": {}}})
+    bind_refreshed(plan, address, refreshed)
+    p3a2_sync(plan)
+
+
+def add_approved_refresh(plan):
+    """The three drifts the rejected plan had that the gate already allowed: the
+    host and the database stopped, and the measurement backstop's next occurrence."""
+    measurement = json.loads((HERE / "fixtures/terraform116-measurement-drift.json").read_text())
+    address = "aws_autoscaling_schedule.ecs_spot_measurement_backstop[0]"
+    row = next(r for r in measurement["resource_drift"] if r["address"] == address)
+    plan["resource_drift"].append(copy.deepcopy(row))
+    plan["timestamp"] = measurement["timestamp"]
+    plan["configuration"]["root_module"]["resources"].append(copy.deepcopy(next(r for r in measurement["configuration"]["root_module"]["resources"] if r["address"] == address.split("[")[0])))
+    bind_refreshed(plan, address, row["change"]["after"])
+    for name, attributes in (("aws_db_instance.demo", {"status": ("available", "stopped"), "latest_restorable_time": ("2026-10-21T08:00:00Z", "2026-10-29T02:10:00Z")}),
+                             ("aws_instance.demo", {"instance_state": ("running", "stopped")})):
+        current = resource(plan, name)["change"]["after"]
+        before, refreshed = dict(current), dict(current)
+        for key, (old, new) in attributes.items():
+            before[key], refreshed[key] = old, new
+        plan["resource_drift"].append({"address": name, "mode": "managed", "type": name.split(".")[0], "change": {"actions": ["update"], "before": before, "after": refreshed, "after_unknown": {}}})
+        bind_refreshed(plan, name, refreshed)
+    p3a2_sync(plan)
+
+
+class P3a2FirstRefreshTests(unittest.TestCase):
+    """The drift of the first plan that refreshes the P3-a resources: exactly five
+    addresses, each with one exact value change, and only in the p3a2 mode."""
+
+    def plan(self, *addresses):
+        plan = p3a2_plan()
+        for address in addresses:
+            add_first_refresh(plan, address)
+        return plan
+
+    def assert_rejected(self, plan, code, direct=False):
+        global FIXTURE_CHECKS
+        FIXTURE_CHECKS += 1
+        with self.assertRaises(G.Rejected) as caught:
+            G.drift_check(plan, G.P3A2_DRIFT_RULES) if direct else G.validate_p3a2(plan)
+        self.assertEqual(str(caught.exception), code)
+
+    def refreshed(self, address, change, code):
+        """Change the observation, keep it bound to the refreshed no-op, and expect `code`."""
+        plan = self.plan(address)
+        row = next(r for r in plan["resource_drift"] if r["address"] == address)
+        change(row["change"])
+        bind_refreshed(plan, address, row["change"]["after"])
+        p3a2_sync(plan)
+        self.assert_rejected(plan, code)
+
+    def test_rules_are_exactly_the_five_addresses_and_separate_from_the_general_allowlist(self):
+        self.assertEqual(set(G.P3A2_DRIFT_RULES), FIRST_REFRESH_ADDRESSES)
+        self.assertEqual(set(FIRST_REFRESH["resources"]), FIRST_REFRESH_ADDRESSES)
+        self.assertLessEqual(FIRST_REFRESH_ADDRESSES, G.NEW)
+        self.assertFalse(FIRST_REFRESH_ADDRESSES & set(G.DRIFT))
+        self.assertFalse(FIRST_REFRESH_ADDRESSES & set(G.ADDRESSES["MEASUREMENT_DRIFT_RULES"]))
+        self.assertEqual(len(G.DRIFT), 8)
+        self.assertEqual(len(G.ADDRESSES["MEASUREMENT_DRIFT_RULES"]), 5)
+        for address, rule in G.P3A2_DRIFT_RULES.items():
+            self.assertEqual(rule["fields"], ["inline_policy" if ".runtime_" in address and "iam_role" in address else "permissions"])
+
+    def test_positive_all_five_alone_and_with_the_approved_three(self):
+        for addresses in [FIRST_REFRESH_ADDRESSES, *[{address} for address in sorted(FIRST_REFRESH_ADDRESSES)]]:
+            result = G.validate_p3a2(self.plan(*sorted(addresses)))
+            self.assertEqual((result["result"], result["creates"], result["changes"], result["destroys"]), ("PASS", 0, 2, 1))
+        plan = self.plan(*sorted(FIRST_REFRESH_ADDRESSES))
+        add_approved_refresh(plan)
+        self.assertEqual({r["address"] for r in plan["resource_drift"]}, set(FIRST_REFRESH["resource_drift_order"]))
+        plan["resource_drift"].sort(key=lambda r: FIRST_REFRESH["resource_drift_order"].index(r["address"]))
+        self.assertEqual(G.validate_p3a2(plan)["result"], "PASS")
+        changed = {r["address"]: r["change"]["actions"] for r in plan["resource_changes"] if r["change"]["actions"] != ["no-op"]}
+        self.assertEqual(changed, {G.P3A2_TEMPLATE: ["update"], G.P3A2_GROUP: ["update"], G.P3A2_POLICY: ["delete"]})
+
+    def test_observed_inline_policy_must_be_the_one_separate_policy(self):
+        role = "aws_iam_role.runtime_eip_writer"
+        policy_address = G.P3A2_DRIFT_RULES[role]["observed_inline_policy"]
+        def name(change):
+            change["after"]["inline_policy"][0]["name"] = "other"
+        self.refreshed(role, name, "PG4 inline separate-policy binding")
+        def grant(change):
+            document = json.loads(change["after"]["inline_policy"][0]["policy"])
+            document["Statement"].append({"Effect": "Allow", "Action": "*", "Resource": "*"})
+            change["after"]["inline_policy"][0]["policy"] = json.dumps(document)
+        self.refreshed(role, grant, "PG4 inline policy content")
+        def second(change):
+            change["after"]["inline_policy"].append(dict(change["after"]["inline_policy"][0], name="second"))
+        self.refreshed(role, second, "PG4 inline observation shape")
+        def no_policy(change):
+            change["after"]["inline_policy"] = []
+        self.refreshed(role, no_policy, "PG4 empty drift")
+        def stored_before(change):
+            change["before"]["inline_policy"] = [{"name": "old", "policy": "{}"}]
+        self.refreshed(role, stored_before, "PG4 inline observation shape")
+        def extra_key(change):
+            change["after"]["inline_policy"][0]["path"] = "/"
+        self.refreshed(role, extra_key, "PG4 inline separate-policy binding")
+        def bind_policy(plan, **values):
+            bind_refreshed(plan, policy_address, dict(after(plan, policy_address), **values))
+            p3a2_sync(plan)
+        plan = self.plan(role)
+        bind_policy(plan, role="ec-portfolio-demo-ecs-spot")
+        self.assert_rejected(plan, "PG4 inline separate-policy binding")
+        # The separate policy and the observation agree, on a name the rule does not know.
+        plan = self.plan(role)
+        bind_policy(plan, name="other")
+        row = next(r for r in plan["resource_drift"] if r["address"] == role)
+        row["change"]["after"]["inline_policy"][0]["name"] = "other"
+        bind_refreshed(plan, role, row["change"]["after"])
+        p3a2_sync(plan)
+        self.assert_rejected(plan, "PG4 inline separate-policy binding")
+        plan = self.plan(role)
+        configuration(plan, role)["expressions"]["inline_policy"] = []
+        self.assert_rejected(plan, "PG4 configured inline policy")
+
+    def test_separate_policy_and_observed_resource_stay_no_op(self):
+        role = "aws_iam_role.runtime_events"
+        plan = self.plan(role)
+        resource(plan, G.P3A2_DRIFT_RULES[role]["observed_inline_policy"])["change"]["actions"] = ["update"]
+        self.assert_rejected(plan, "P3A2 exact 2 updates and 1 delete")
+        plan = self.plan(role)
+        resource(plan, G.P3A2_DRIFT_RULES[role]["observed_inline_policy"])["change"]["actions"] = ["update"]
+        self.assert_rejected(plan, "PG4 inline separate-policy binding", direct=True)
+        for address in FIRST_REFRESH_ADDRESSES:
+            plan = self.plan(address)
+            resource(plan, address)["change"]["actions"] = ["update"]
+            self.assert_rejected(plan, "P3A2 exact 2 updates and 1 delete")
+            plan = self.plan(address)
+            resource(plan, address)["change"]["actions"] = ["update"]
+            self.assert_rejected(plan, "PG4 drift refreshed no-op binding", direct=True)
+            plan = self.plan(address)
+            next(r for r in plan["resource_drift"] if r["address"] == address)["change"]["after_unknown"] = {"name": True}
+            self.assert_rejected(plan, "PG4 drift action/unknown")
+            plan = self.plan(address)
+            next(r for r in plan["resource_drift"] if r["address"] == address)["change"]["actions"] = ["delete"]
+            self.assert_rejected(plan, "PG4 drift action/unknown")
+
+    def test_no_other_field_of_a_role_or_document_may_drift(self):
+        role_fields = {"permissions_boundary": ("", "arn:aws:iam::000000000000:policy/other"), "assume_role_policy": ("{}", "{\"Version\":\"2012-10-17\"}"),
+                       "managed_policy_arns": ([], ["arn:aws:iam::aws:policy/AdministratorAccess"]), "max_session_duration": (3600, 43200), "path": ("/", "/other/")}
+        document_fields = {"content": ("{}", "{\"changed\":true}"), "document_version": ("1", "2"), "default_version": ("1", "2"), "latest_version": ("1", "2"), "hash": ("a", "b"), "status": ("Active", "Failed")}
+        for address in FIRST_REFRESH_ADDRESSES:
+            for name, (old, new) in (role_fields if "iam_role" in address else document_fields).items():
+                def change(row, name=name, old=old, new=new):
+                    row["before"][name], row["after"][name] = old, new
+                self.refreshed(address, change, "PG4 unexpected drift fields")
+
+    def test_document_permissions_are_exactly_null_to_empty(self):
+        for address in ("aws_ssm_document.od_readiness", "aws_ssm_document.spot_smoke"):
+            for value in ({"type": "Share", "account_ids": "all"}, {"type": "Share", "account_ids": "111111111111"}, {"type": "Share"}, [], "", None):
+                def shared(change, value=value):
+                    change["after"]["permissions"] = value
+                self.refreshed(address, shared, "PG4 document permissions" if value is not None else "PG4 empty drift")
+            def stored(change):
+                change["before"]["permissions"] = {"type": "Share", "account_ids": "111111111111"}
+            self.refreshed(address, stored, "PG4 drift object keys")
+            def stored_other_shape(change):
+                change["before"]["permissions"] = "Share"
+            self.refreshed(address, stored_other_shape, "PG4 document permissions")
+            def empty_before(change):
+                change["before"]["permissions"] = {}
+            self.refreshed(address, empty_before, "PG4 empty drift")
+            def missing(change):
+                del change["before"]["permissions"]
+            self.refreshed(address, missing, "PG4 drift object keys")
+            def renamed(change):
+                change["after"]["name"] = change["before"]["name"] = "ec-portfolio-demo-other"
+            self.refreshed(address, renamed, "PG4 document permissions")
+            plan = self.plan(address)
+            configuration(plan, address)["expressions"]["permissions"] = {"constant_value": {}}
+            self.assert_rejected(plan, "PG4 configured document permissions")
+
+    def test_same_drift_on_any_other_role_document_or_new_resource_rejected(self):
+        def foreign(address, source):
+            plan = self.plan(source)
+            row = plan["resource_drift"][0]
+            row["address"] = address
+            if not any(r["address"] == address for r in plan["resource_changes"]):
+                plan["resource_changes"].append({"address": address, "mode": "managed", "type": address.split(".")[0], "change": {"actions": ["no-op"], "before": row["change"]["after"], "after": row["change"]["after"], "after_unknown": {}}})
+                plan["prior_state"]["values"]["root_module"]["resources"].append({"address": address, "mode": "managed", "type": address.split(".")[0], "values": row["change"]["after"]})
+            bind_refreshed(plan, address, row["change"]["after"])
+            p3a2_sync(plan)
+            return plan
+        role, document = "aws_iam_role.runtime_events", "aws_ssm_document.spot_smoke"
+        for address in ("aws_iam_role.ecs_spot", "aws_iam_role.runtime_other", "aws_iam_role.ec2"):
+            self.assert_rejected(foreign(address, role), "PG4 unexpected drift")
+        self.assert_rejected(foreign("aws_ssm_document.other", document), "PG4 unexpected drift")
+        # Every other P3-a resource stays out: this is not a NEW-wide allowance.
+        others = G.NEW - FIRST_REFRESH_ADDRESSES
+        self.assertEqual(len(others), 20)
+        for address in sorted(others):
+            self.assert_rejected(foreign(address, role), "PG4 unexpected drift")
+
+    def test_extra_terraform_change_and_other_refresh_drift_rejected(self):
+        plan = self.plan(*sorted(FIRST_REFRESH_ADDRESSES))
+        add_approved_refresh(plan)
+        plan["resource_changes"].append({"address": "aws_iam_role_policy.extra", "mode": "managed", "type": "aws_iam_role_policy", "change": {"actions": ["create"], "before": None, "after": {}, "after_unknown": {}}})
+        self.assert_rejected(plan, "P3A2 exact 2 updates and 1 delete")
+        plan = self.plan(*sorted(FIRST_REFRESH_ADDRESSES))
+        add_approved_refresh(plan)
+        row = next(r for r in plan["resource_drift"] if r["address"] == "aws_instance.demo")
+        row["change"]["before"]["instance_type"], row["change"]["after"]["instance_type"] = "t3a.medium", "m7i.48xlarge"
+        bind_refreshed(plan, "aws_instance.demo", row["change"]["after"])
+        p3a2_sync(plan)
+        self.assert_rejected(plan, "PG4 unexpected drift fields")
+
+    def test_guards_hold_if_the_contract_file_is_widened(self):
+        role, document = "aws_iam_role.runtime_events", "aws_ssm_document.od_readiness"
+        for address, field, old, new, code in ((role, "path", "/", "/other/", "PG4 inline observation shape"), (document, "content", "{}", "{\"changed\":true}", "PG4 document permissions")):
+            def change(row, field=field, old=old, new=new):
+                row["before"][field], row["after"][field] = old, new
+            with mock.patch.dict(G.P3A2_DRIFT_RULES[address], {"fields": [*G.P3A2_DRIFT_RULES[address]["fields"], field]}):
+                self.refreshed(address, change, code)
+        # A P3-a resource listed in the general allowlist stays rejected there.
+        with mock.patch.dict(G.DRIFT, {role: ["inline_policy"]}):
+            with self.assertRaises(G.Rejected) as caught:
+                G.drift_check(self.plan(role))
+            self.assertEqual(str(caught.exception), "PG4 unexpected drift")
+
+    def test_p3a_mode_cannot_use_the_rules(self):
+        global FIXTURE_CHECKS
+        for address in sorted(FIRST_REFRESH_ADDRESSES):
+            refreshed = self.plan(address)
+            with self.assertRaises(G.Rejected) as caught:
+                G.drift_check(refreshed)
+            self.assertEqual(str(caught.exception), "PG4 unexpected drift")
+            plan = copy.deepcopy(PLAN)
+            plan["resource_drift"] = copy.deepcopy(refreshed["resource_drift"])
+            with self.assertRaises(G.Rejected) as caught:
+                G.validate(plan, RENDERED)
+            self.assertEqual(str(caught.exception), "PG4 unexpected drift")
+            FIXTURE_CHECKS += 2
+
+
 def bind_refreshed_only(plan, address):
     values = resource(plan, address)["change"]["before"]
     for r in plan["prior_state"]["values"]["root_module"]["resources"]:
@@ -869,6 +1122,26 @@ class EntryTests(unittest.TestCase):
             self.assertEqual(code, 1)
             self.assertIn("P3A2 exact 2 updates and 1 delete", err)
 
+    def test_p3a2_first_refresh_passes_only_in_the_p3a2_mode_and_keeps_the_bindings(self):
+        self.show_plan = p3a2_plan()
+        for address in sorted(FIRST_REFRESH_ADDRESSES):
+            add_first_refresh(self.show_plan, address)
+        add_approved_refresh(self.show_plan)
+        with tempfile.TemporaryDirectory(prefix="p3a2-MOCK-plan-") as temporary:
+            saved, path = self.files(temporary, self.show_plan)
+            code, out, err = self.call("p3a2", str(saved), str(path), ACCOUNT_SHA)
+            self.assertEqual((code, err), (0, ""))
+            result = json.loads(out)
+            self.assertEqual((result["creates"], result["changes"], result["destroys"]), (0, 2, 1))
+            self.assertEqual(result["saved_plan_sha256"], hashlib.sha256(saved.read_bytes()).hexdigest())
+            self.assertEqual(result["plan_json_sha256"], hashlib.sha256(path.read_bytes()).hexdigest())
+            self.assertEqual((result["source_commit"], result["approved_account_sha256"]), (self.COMMIT, ACCOUNT_SHA))
+            code, out, err = self.call("p3a", str(saved), str(path), ACCOUNT_SHA)
+            self.assertEqual(code, 1)
+            code, out, err = self.call("p3a2", str(saved), str(path), hashlib.sha256(b"111111111111").hexdigest())
+            self.assertEqual(code, 1)
+        self.show_plan = PLAN
+
     def test_verify_before_apply(self):
         with tempfile.TemporaryDirectory(prefix="p3a-MOCK-plan-") as temporary:
             saved, _ = self.files(temporary, PLAN)
@@ -912,7 +1185,32 @@ def suite():
     return unittest.TestSuite([unittest.defaultTestLoader.loadTestsFromTestCase(FixtureTests),
                                unittest.defaultTestLoader.loadTestsFromTestCase(RevisionTests),
                                unittest.defaultTestLoader.loadTestsFromTestCase(P3a2Tests),
+                               unittest.defaultTestLoader.loadTestsFromTestCase(P3a2FirstRefreshTests),
                                unittest.defaultTestLoader.loadTestsFromTestCase(EntryTests)])
+
+
+SCOPE_MUTATIONS = [
+    ("the p3a2 mode ignores the rules", 'drift_check(plan, P3A2_DRIFT_RULES)', 'drift_check(plan)'),
+    ("the p3a mode uses the rules", '    drift_check(plan)\n', '    drift_check(plan, P3A2_DRIFT_RULES)\n'),
+    ("every NEW resource may drift", 'check(address in first_refresh or (address in DRIFT and address not in NEW)', 'check(address in first_refresh or address in NEW or (address in DRIFT and address not in NEW)'),
+    ("the rules accept any address", 'check(address in first_refresh or (address in DRIFT and address not in NEW)', 'check(first_refresh or (address in DRIFT and address not in NEW)'),
+    ("the general allowlist admits NEW", 'check(address in first_refresh or (address in DRIFT and address not in NEW)', 'check(address in first_refresh or address in DRIFT'),
+    ("a sixth address in the rules", 'P3A2_DRIFT_RULES = ADDRESSES["P3A2_DRIFT_RULES"]', 'P3A2_DRIFT_RULES = {**ADDRESSES["P3A2_DRIFT_RULES"], "aws_iam_role.ecs_spot": {"fields": ["inline_policy"], "observed_inline_policy": "aws_iam_role_policy.ecs_spot_origin_eip_promotion", "policy_name": "origin-eip-promotion"}}'),
+    ("a rule removed", 'P3A2_DRIFT_RULES = ADDRESSES["P3A2_DRIFT_RULES"]', 'P3A2_DRIFT_RULES = {k: v for k, v in ADDRESSES["P3A2_DRIFT_RULES"].items() if k != "aws_ssm_document.spot_smoke"}'),
+    ("the rules allow any field", 'allowed = first_refresh[address]["fields"] if address in first_refresh else DRIFT.get(address, ())', 'allowed = changed if address in first_refresh else DRIFT.get(address, ())'),
+    ("inline: more fields than inline_policy", 'check(changed == {"inline_policy"} and before["inline_policy"] == []', 'check(before["inline_policy"] == []'),
+    ("inline: a stored policy before", 'changed == {"inline_policy"} and before["inline_policy"] == [] and', 'changed == {"inline_policy"} and'),
+    ("inline: more than one policy", 'len(after["inline_policy"]) == 1 and\n', 'len(after["inline_policy"]) >= 1 and\n'),
+    ("inline: observation keys", 'check(set(observation) == {"name", "policy"} and ', 'check('),
+    ("inline: name against the separate policy", 'observation["name"] == policy.get("name") == rule["policy_name"]', 'policy.get("name") == rule["policy_name"]'),
+    ("inline: name against the rule", 'observation["name"] == policy.get("name") == rule["policy_name"]', 'observation["name"] == policy.get("name")'),
+    ("inline: the role of the separate policy", 'policy.get("role") == after.get("name") and\n', '\n'),
+    ("inline: the separate policy changes", 'policy_change.get("actions") == ["no-op"] and policy_change.get("before")', 'policy_change.get("before")'),
+    ("document: more fields than permissions", 'check(changed == {"permissions"} and before.get("permissions") is None and', 'check(before.get("permissions") is None and'),
+    ("document: stored permissions before", 'changed == {"permissions"} and before.get("permissions") is None and', 'changed == {"permissions"} and'),
+    ("document: any value after", 'after.get("permissions") == {} and after.get("name")', 'after.get("name")'),
+    ("document: any name", 'and after.get("name") == rule["empty_permissions_document"], "PG4 document permissions")', ', "PG4 document permissions")'),
+]
 
 
 def mutations():
@@ -933,6 +1231,7 @@ def mutations():
                 "PG0 plan format/version", "PG0 incomplete plan", "PG0 errored plan", "PG0 non-applyable plan",
                 "PG1 replace/delete/update", "PG1 import/move", "PG2 wrong/incomplete root", "PG2 all prior resources represented",
                 "PG2 planned resource coverage", "PG2 planned value inconsistency", "PG3 output changed", "PG3 output snapshot changed",
+                "PG4 unexpected drift", "PG4 document permissions", "PG4 configured document permissions",
                 "PG4 unexpected drift fields", "PG5 configuration provider/mode", "PG5 for_each mapping", "PG5 SM logging/tracing/version",
                 "PG5 table extras", "PG5 shared SSM document", "PG5 target extras", "PG5 role extra permissions", "PG0 instance context", "PG0 ENI context", "PG0 EIP context", "PG0 unapproved account", "PG0 planned caller account mismatch",
                 "PG0 database scope", "PG0 ASG scope", "PG0 CloudFront context", "PG2 unknown leaf has concrete value"}
@@ -952,15 +1251,13 @@ def mutations():
         if code in selected or code in prefixes or (code or "").startswith("P3A2 "):
             chosen.append((call, code))
     revision_codes = {"PG0 refreshed caller account mismatch", "PG0 caller provider binding", "PG0 provider credential override",
+                      "PG4 unexpected drift", "PG4 document permissions", "PG4 configured document permissions",
                       "PG4 drift action/unknown", "PG4 drift refreshed no-op binding", "PG4 exact null-to-empty normalization", "PG4 inline observation shape",
                       "PG4 inline separate-policy binding", "PG4 inline policy content", "PG4 configured inline policy", "PG4 backstop schedule contract", "PG4 backstop unconfigured time", "PG4 backstop next occurrence"}
     killed, survived = [], []
     lines = source.splitlines(keepends=True)
-    for call, code in chosen:
-        condition = call.args[0]
-        start = sum(map(len, lines[:condition.lineno - 1])) + condition.col_offset
-        end = sum(map(len, lines[:condition.end_lineno - 1])) + condition.end_col_offset
-        mutated = source[:start] + "True" + source[end:]
+    def run(mutated, code, collection):
+        global G
         subject = types.ModuleType("p3a_gate_mutant")
         subject.__file__ = str(HERE / "cold-standby-plan-gate.py")
         exec(compile(mutated, "<syntactically-valid-offline-mutant>", "exec"), subject.__dict__)
@@ -968,12 +1265,25 @@ def mutations():
         result = unittest.TextTestRunner(stream=io.StringIO(), verbosity=0).run(suite())
         # A killed guard must allow an invalid fixture through (an assertion
         # failure). A mere malformed-shape exception is not a meaningful kill.
-        (killed if result.failures else survived).append(code)
+        (collection if result.failures else survived).append(code)
+    for call, code in chosen:
+        condition = call.args[0]
+        start = sum(map(len, lines[:condition.lineno - 1])) + condition.col_offset
+        end = sum(map(len, lines[:condition.end_lineno - 1])) + condition.end_col_offset
+        run(source[:start] + "True" + source[end:], code, killed)
+    # The scope of the first-refresh rules and each condition inside their guards,
+    # which replacing a whole guard cannot tell apart.
+    scope_killed = []
+    for label, old, new in SCOPE_MUTATIONS:
+        if source.count(old) != 1:
+            raise AssertionError("scope mutation does not match once: " + label)
+        run(source.replace(old, new), label, scope_killed)
     G = ORIGINAL
     control = unittest.TextTestRunner(stream=io.StringIO(), verbosity=0).run(suite())
     if not control.wasSuccessful():
         raise AssertionError("post-mutation unmodified control failed")
     print("Plan gate mutation: %d/%d killed" % (len(killed), len(chosen)))
+    print("First-refresh scope mutation: %d/%d killed" % (len(scope_killed), len(SCOPE_MUTATIONS)))
     print("Original guards: %d/%d; R1 guards: %d/%d" % (
         sum(c not in revision_codes for c in killed), sum(c not in revision_codes for _, c in chosen),
         sum(c in revision_codes for c in killed), sum(c in revision_codes for _, c in chosen)))

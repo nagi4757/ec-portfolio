@@ -1,0 +1,202 @@
+{
+  "MOCK": "REDACTED PROJECTION OF A REJECTED PLAN: address order, attribute names and the changed values of 5 resources only. It holds no other value of that plan and is not execution evidence.",
+  "provider_version": "6.62.0",
+  "resource_drift_order": [
+    "aws_autoscaling_schedule.ecs_spot_measurement_backstop[0]",
+    "aws_db_instance.demo",
+    "aws_iam_role.runtime_eip_writer",
+    "aws_iam_role.runtime_events",
+    "aws_iam_role.runtime_orchestrator",
+    "aws_instance.demo",
+    "aws_ssm_document.od_readiness",
+    "aws_ssm_document.spot_smoke"
+  ],
+  "resources": {
+    "aws_iam_role.runtime_eip_writer": {
+      "actions": [
+        "update"
+      ],
+      "after_observation_keys": [
+        "name",
+        "policy"
+      ],
+      "after_observed_policy_names": [
+        "origin-eip-writer"
+      ],
+      "attributes": [
+        "arn",
+        "assume_role_policy",
+        "create_date",
+        "description",
+        "force_detach_policies",
+        "id",
+        "inline_policy",
+        "managed_policy_arns",
+        "max_session_duration",
+        "name",
+        "name_prefix",
+        "path",
+        "permissions_boundary",
+        "tags",
+        "tags_all",
+        "unique_id"
+      ],
+      "before": {
+        "inline_policy": []
+      },
+      "name": "runtime_eip_writer",
+      "type": "aws_iam_role"
+    },
+    "aws_iam_role.runtime_events": {
+      "actions": [
+        "update"
+      ],
+      "after_observation_keys": [
+        "name",
+        "policy"
+      ],
+      "after_observed_policy_names": [
+        "start-signal-workflows"
+      ],
+      "attributes": [
+        "arn",
+        "assume_role_policy",
+        "create_date",
+        "description",
+        "force_detach_policies",
+        "id",
+        "inline_policy",
+        "managed_policy_arns",
+        "max_session_duration",
+        "name",
+        "name_prefix",
+        "path",
+        "permissions_boundary",
+        "tags",
+        "tags_all",
+        "unique_id"
+      ],
+      "before": {
+        "inline_policy": []
+      },
+      "name": "runtime_events",
+      "type": "aws_iam_role"
+    },
+    "aws_iam_role.runtime_orchestrator": {
+      "actions": [
+        "update"
+      ],
+      "after_observation_keys": [
+        "name",
+        "policy"
+      ],
+      "after_observed_policy_names": [
+        "runtime-orchestration"
+      ],
+      "attributes": [
+        "arn",
+        "assume_role_policy",
+        "create_date",
+        "description",
+        "force_detach_policies",
+        "id",
+        "inline_policy",
+        "managed_policy_arns",
+        "max_session_duration",
+        "name",
+        "name_prefix",
+        "path",
+        "permissions_boundary",
+        "tags",
+        "tags_all",
+        "unique_id"
+      ],
+      "before": {
+        "inline_policy": []
+      },
+      "name": "runtime_orchestrator",
+      "type": "aws_iam_role"
+    },
+    "aws_ssm_document.od_readiness": {
+      "actions": [
+        "update"
+      ],
+      "after": {
+        "permissions": {}
+      },
+      "attributes": [
+        "arn",
+        "attachments_source",
+        "content",
+        "created_date",
+        "default_version",
+        "description",
+        "document_format",
+        "document_type",
+        "document_version",
+        "hash",
+        "hash_type",
+        "id",
+        "latest_version",
+        "name",
+        "owner",
+        "parameter",
+        "permissions",
+        "platform_types",
+        "region",
+        "schema_version",
+        "status",
+        "tags",
+        "tags_all",
+        "target_type",
+        "version_name"
+      ],
+      "before": {
+        "permissions": null
+      },
+      "name": "od_readiness",
+      "type": "aws_ssm_document"
+    },
+    "aws_ssm_document.spot_smoke": {
+      "actions": [
+        "update"
+      ],
+      "after": {
+        "permissions": {}
+      },
+      "attributes": [
+        "arn",
+        "attachments_source",
+        "content",
+        "created_date",
+        "default_version",
+        "description",
+        "document_format",
+        "document_type",
+        "document_version",
+        "hash",
+        "hash_type",
+        "id",
+        "latest_version",
+        "name",
+        "owner",
+        "parameter",
+        "permissions",
+        "platform_types",
+        "region",
+        "schema_version",
+        "status",
+        "tags",
+        "tags_all",
+        "target_type",
+        "version_name"
+      ],
+      "before": {
+        "permissions": null
+      },
+      "name": "spot_smoke",
+      "type": "aws_ssm_document"
+    }
+  },
+  "terraform_version": "1.16.0"
+}
