@@ -76,7 +76,6 @@ readonly PRODUCTION_ADDRESSES='[
   "aws_iam_role.ecs_spot",
   "aws_iam_instance_profile.ecs_spot",
   "aws_iam_role_policy.ecs_spot_container_instance",
-  "aws_iam_role_policy.ecs_spot_origin_eip_promotion",
   "aws_iam_role.ecs_task_execution",
   "aws_iam_role_policy.ecs_task_execution_logs",
   "aws_iam_role_policy.ecs_task_execution_runtime_secrets",

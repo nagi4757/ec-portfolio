@@ -24,6 +24,7 @@ It makes no AWS call and runs no Terraform plan or apply. Its subprocesses are
 a provider-free `terraform console` render, `terraform show -json` of the given
 saved plan without AWS variables, and read-only `git rev-parse` / `git status`.
 """
+import base64
 import datetime
 import hashlib
 import importlib.util
@@ -48,7 +49,18 @@ COMPUTED_UNKNOWN = ADDRESSES["PROVIDER_COMPUTED_UNKNOWN"]
 # rule that the reviewed source itself switched on still fails the gate.
 INERT_TYPES = ("aws_scheduler_schedule", "aws_cloudwatch_event_rule")
 DEMO_PATH = "infra/terraform/demo"
+# P3-a2: the one change between P3-a and the rehearsals. A host stops moving the
+# origin Elastic IP to itself and the group stops replacing on a rebalance
+# recommendation; every other resource and output stays as it is.
+P3A2_TEMPLATE = "aws_launch_template.ecs_spot"
+P3A2_GROUP = "aws_autoscaling_group.ecs_spot"
+P3A2_POLICY = "aws_iam_role_policy.ecs_spot_origin_eip_promotion"
+P3A2_CHANGED = {P3A2_TEMPLATE, P3A2_GROUP, P3A2_POLICY}
+P3A2_OUTPUT = "ecs_spot_launch_template_version"
+P3A2_VERSION = 4
+P3A2_ALLOCATION_LINE = "readonly EIP_ALLOCATION_ID_VALUE="
 USAGE = ("usage: cold-standby-plan-gate.sh p3a <saved.tfplan> <plan.json> <approved-account-sha256>\n"
+         "       cold-standby-plan-gate.sh p3a2 <saved.tfplan> <plan.json> <approved-account-sha256>\n"
          "       cold-standby-plan-gate.sh verify <saved.tfplan> <saved-plan-sha256> <source-commit>")
 
 
@@ -307,11 +319,15 @@ def drift_check(plan):
                   old_time.microsecond == 0 and (old_time.hour + 9) % 24 in (*range(12), *range(16, 24)), "PG4 backstop next occurrence")
 
 
-def validate(plan, rendered):
+def plan_format_check(plan):
     check(plan.get("format_version") == "1.2" and plan.get("terraform_version") == "1.16.0", "PG0 plan format/version")
     check(plan.get("complete") is True, "PG0 incomplete plan")
     check(plan.get("errored") is False, "PG0 errored plan")
     check(plan.get("applyable") is True, "PG0 non-applyable plan")
+
+
+def validate(plan, rendered):
+    plan_format_check(plan)
     changes = indexed(plan.get("resource_changes", []), "PG1 changes")
     managed = {address: value for address, value in changes.items() if value.get("mode") == "managed"}
     creates = {address for address, value in managed.items() if value.get("change", {}).get("actions") != ["no-op"]}
@@ -390,6 +406,101 @@ def validate(plan, rendered):
             "scope": "saved-plan gate only; apply still requires separate approval"}
 
 
+def unknown_leaves(unknown, path=""):
+    """The paths marked unknown. Terraform also writes empty structures here for
+    nested blocks, and those say nothing about any value."""
+    if unknown is True:
+        return {path}
+    if isinstance(unknown, dict):
+        items = unknown.items()
+    elif isinstance(unknown, list):
+        items = enumerate(unknown)
+    else:
+        return set()
+    return {leaf for key, child in items for leaf in unknown_leaves(child, path + "/" + str(key))}
+
+
+def p3a2_update(managed, prior, address, unknown):
+    resource = managed[address]
+    change = resource["change"]
+    check(change.get("actions") == ["update"], "P3A2 update action " + address)
+    check(not change.get("importing") and not resource.get("previous_address"), "P3A2 update import/move " + address)
+    check(change.get("before") == prior[address].get("values"), "P3A2 update not bound to refreshed state " + address)
+    check(unknown_leaves(change.get("after_unknown")) == unknown, "P3A2 update unknown " + address)
+    return change["before"], change["after"]
+
+
+def p3a2_changed_keys(before, after):
+    return {key for key in set(before) | set(after) if before.get(key) != after.get(key)}
+
+
+def p3a2_user_data(before, after, allocation):
+    """The rendered loader differs in the allocation line and nowhere else, so the
+    pinned bundle version, its digest, the group and the hook cannot move with it."""
+    old, new = [base64.b64decode(value, validate=True).decode().split("\n") for value in (before, after)]
+    check(len(old) == len(new), "P3A2 loader line count")
+    changed = [pair for pair in zip(old, new) if pair[0] != pair[1]]
+    check(changed == [(P3A2_ALLOCATION_LINE + '"' + allocation + '"', P3A2_ALLOCATION_LINE + '""')], "P3A2 loader change")
+
+
+def validate_p3a2(plan):
+    plan_format_check(plan)
+    changes = indexed(plan.get("resource_changes", []), "P3A2 changes")
+    managed = {address: value for address, value in changes.items() if value.get("mode") == "managed"}
+    changed = {address for address, value in managed.items() if value.get("change", {}).get("actions") != ["no-op"]}
+    check(changed == P3A2_CHANGED, "P3A2 exact 2 updates and 1 delete")
+    prior = indexed(resources(plan.get("prior_state", {}).get("values", {}).get("root_module", {})), "P3A2 prior")
+    prior_managed = {address: value for address, value in prior.items() if value.get("mode") == "managed"}
+    check(EXISTING | NEW <= set(prior_managed), "P3A2 wrong/incomplete root")
+    check(set(managed) == set(prior_managed), "P3A2 all prior resources represented")
+    for address, resource in prior_managed.items():
+        if address in P3A2_CHANGED:
+            continue
+        change = managed[address]["change"]
+        check(change.get("before") == change.get("after") == resource.get("values"), "P3A2 existing changed " + address)
+        check(not change.get("after_unknown") and not managed[address].get("previous_address") and not change.get("importing"), "P3A2 existing unknown/moved")
+
+    before, after = p3a2_update(managed, prior, P3A2_TEMPLATE, {"/latest_version"})
+    check(p3a2_changed_keys(before, after) == {"user_data", "latest_version"}, "P3A2 template changed fields")
+    check(before.get("latest_version") == P3A2_VERSION and after.get("latest_version") is None, "P3A2 template version")
+    p3a2_user_data(before["user_data"], after["user_data"], prior["aws_eip.ec2_origin"]["values"]["allocation_id"])
+
+    before, after = p3a2_update(managed, prior, P3A2_GROUP, {"/launch_template/0/version"})
+    check(p3a2_changed_keys(before, after) == {"capacity_rebalance", "launch_template"}, "P3A2 group changed fields")
+    check(before.get("capacity_rebalance") is True and after.get("capacity_rebalance") is False, "P3A2 capacity rebalance")
+    check((after.get("min_size"), after.get("desired_capacity"), after.get("max_size")) == (0, 0, 2), "P3A2 group capacity")
+    old, new = before["launch_template"], after["launch_template"]
+    check(len(old) == len(new) == 1 and old[0].get("version") == str(P3A2_VERSION) and new[0].get("version") is None and
+          {key: value for key, value in old[0].items() if key != "version"} == {key: value for key, value in new[0].items() if key != "version"},
+          "P3A2 group template reference")
+
+    policy = managed[P3A2_POLICY]
+    change = policy["change"]
+    check(change.get("actions") == ["delete"] and change.get("after") is None and policy.get("action_reason") == "delete_because_no_resource_config", "P3A2 policy delete")
+    check(change.get("before") == prior[P3A2_POLICY].get("values") and change["before"].get("name") == "origin-eip-promotion" and
+          change["before"].get("role") == "ec-portfolio-demo-ecs-spot", "P3A2 policy identity")
+    configuration = indexed(plan.get("configuration", {}).get("root_module", {}).get("resources", []), "P3A2 configuration")
+    check(P3A2_POLICY not in configuration, "P3A2 policy still configured")
+
+    planned = indexed(resources(plan.get("planned_values", {}).get("root_module", {})), "P3A2 planned")
+    check({a for a, r in planned.items() if r.get("mode") == "managed"} == set(managed) - {P3A2_POLICY}, "P3A2 planned resource coverage")
+    for address, resource in planned.items():
+        if resource.get("mode") == "managed":
+            unknown = managed[address]["change"].get("after_unknown", {})
+            check(normalize_unknown(resource.get("values"), unknown) == normalize_unknown(managed[address]["change"].get("after"), unknown), "P3A2 planned value inconsistency")
+
+    outputs = plan.get("output_changes")
+    version = outputs.get(P3A2_OUTPUT) if isinstance(outputs, dict) else None
+    check(isinstance(version, dict) and version.get("actions") == ["update"] and version.get("before") == P3A2_VERSION and version.get("after_unknown") is True, "P3A2 version output")
+    check(all(value.get("actions") == ["no-op"] and value.get("before") == value.get("after") and not value.get("after_unknown")
+              for name, value in outputs.items() if name != P3A2_OUTPUT), "P3A2 output changed")
+    others = lambda values: {name: value for name, value in values.items() if name != P3A2_OUTPUT}
+    check(others(plan.get("planned_values", {}).get("outputs", {})) == others(plan.get("prior_state", {}).get("values", {}).get("outputs", {})), "P3A2 output snapshot changed")
+    drift_check(plan)
+    return {"result": "PASS", "mode": "p3a2", "creates": 0, "changes": 2, "destroys": 1,
+            "scope": "saved-plan gate only; apply still requires separate approval"}
+
+
 def regular_file(value, code):
     path = Path(value)
     check(path.is_file() and not path.is_symlink(), code)
@@ -422,7 +533,7 @@ def source_commit():
     return commit
 
 
-def gate(saved_value, plan_value, approved_account_sha):
+def gate(saved_value, plan_value, approved_account_sha, mode="p3a"):
     saved = regular_file(saved_value, "PG0 saved plan is not a regular file")
     path = regular_file(plan_value, "PG0 plan JSON is not a regular file")
     saved_sha, plan_sha = sha(saved), sha(path)
@@ -430,8 +541,7 @@ def gate(saved_value, plan_value, approved_account_sha):
     plan = load(path)
     check(saved_plan_json(saved) == plan, "PG0 plan JSON is not the saved plan")
     context = context_from_plan(plan, approved_account_sha)
-    rendered = exporter.export(context)
-    result = validate(plan, rendered)
+    result = validate_p3a2(plan) if mode == "p3a2" else validate(plan, exporter.export(context))
     check(sha(saved) == saved_sha and sha(path) == plan_sha, "PG0 plan changed during the gate")
     check(source_commit() == commit, "PG0 source changed during the gate")
     result.update(saved_plan_sha256=saved_sha, plan_json_sha256=plan_sha, source_commit=commit,
@@ -450,11 +560,11 @@ def verify(saved_value, saved_sha, commit):
 
 
 def main(argv):
-    if len(argv) != 5 or argv[1] not in ("p3a", "verify"):
+    if len(argv) != 5 or argv[1] not in ("p3a", "p3a2", "verify"):
         print(USAGE, file=sys.stderr)
         return 2
     try:
-        result = gate(*argv[2:]) if argv[1] == "p3a" else verify(*argv[2:])
+        result = verify(*argv[2:]) if argv[1] == "verify" else gate(*argv[2:], mode=argv[1])
         print(json.dumps(result, sort_keys=True))
         return 0
     except (Rejected, ValueError, KeyError, TypeError, OSError, subprocess.SubprocessError) as error:

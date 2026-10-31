@@ -64,7 +64,7 @@ resource "aws_iam_instance_profile" "ecs_spot_measurement" {
 # lifecycle statements (iam_ecs_spot.tf) with the cluster, its container
 # instances and the group replaced. The origin TLS archive is read only, so a
 # measurement host can never write a certificate back. Absent on purpose:
-# origin-eip-promotion, acme-dns-route53 and session-manager-core.
+# acme-dns-route53 and session-manager-core.
 resource "aws_iam_role_policy" "ecs_spot_measurement" {
   count = local.measurement_count
 

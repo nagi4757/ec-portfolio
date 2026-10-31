@@ -5,6 +5,7 @@ Only Terraform console is called, in a provider-free temporary directory. No
 Terraform plan/init/apply, AWS client, backend, credentials or state is used.
 """
 import ast
+import base64
 import copy
 import hashlib
 import importlib.util
@@ -555,6 +556,197 @@ class RevisionTests(unittest.TestCase):
                 self.deny(view, lambda p: resource(p, address)["change"].update(actions=actions))
 
 
+def p3a2_plan():
+    """The P3-a2 plan: the 25 P3-a resources now exist, and only the template, the
+    group and the promotion policy change. Values are MOCK; the shape is the state
+    Terraform 1.16 and AWS provider 6.62 keep for these resources."""
+    plan = copy.deepcopy(PLAN)
+    allocation = ORIGINAL.exporter.fixture_context()["aws_eip"]["ec2_origin"]["allocation_id"]
+    prior = plan["prior_state"]["values"]["root_module"]["resources"]
+    for entry in plan["resource_changes"]:
+        if entry["address"] in ORIGINAL.NEW:
+            values = entry["change"]["after"]
+            entry["change"] = {"actions": ["no-op"], "before": values, "after": values, "after_unknown": {}}
+            prior.append({"address": entry["address"], "mode": "managed", "type": entry["type"], "values": values})
+    loader = lambda value: base64.b64encode(("#!/bin/bash\nreadonly BUNDLE=\"v1\"\nreadonly EIP_ALLOCATION_ID_VALUE=\"" + value + "\"\nexit 0\n").encode()).decode()
+    template = {"name": "ec-portfolio-demo-ecs-spot", "latest_version": 4, "default_version": 1, "user_data": loader(allocation), "block_device_mappings": []}
+    group = {**resource(plan, ORIGINAL.P3A2_GROUP)["change"]["before"], "name": "ec-portfolio-demo-ecs-spot", "capacity_rebalance": True, "min_size": 0, "desired_capacity": 0, "max_size": 2,
+             "launch_template": [{"id": "lt-MOCK", "name": "ec-portfolio-demo-ecs-spot", "version": "4"}], "tag": []}
+    policy = {"name": "origin-eip-promotion", "role": "ec-portfolio-demo-ecs-spot", "policy": "{}"}
+    bind_refreshed(plan, ORIGINAL.P3A2_TEMPLATE, template)
+    bind_refreshed(plan, ORIGINAL.P3A2_GROUP, group)
+    bind_refreshed(plan, ORIGINAL.P3A2_POLICY, policy)
+    change = resource(plan, ORIGINAL.P3A2_TEMPLATE)["change"]
+    change.update(actions=["update"], after={**{k: v for k, v in template.items() if k != "latest_version"}, "user_data": loader("")},
+                  after_unknown={"latest_version": True, "block_device_mappings": []})
+    change = resource(plan, ORIGINAL.P3A2_GROUP)["change"]
+    change.update(actions=["update"], after={**group, "capacity_rebalance": False, "launch_template": [{"id": "lt-MOCK", "name": "ec-portfolio-demo-ecs-spot"}]},
+                  after_unknown={"launch_template": [{"version": True}], "tag": []})
+    entry = resource(plan, ORIGINAL.P3A2_POLICY)
+    entry["action_reason"] = "delete_because_no_resource_config"
+    entry["change"].update(actions=["delete"], after=None, after_unknown={})
+    plan["output_changes"] = {ORIGINAL.P3A2_OUTPUT: {"actions": ["update"], "before": 4, "after_unknown": True},
+                              "ecs_spot_launch_template_id": {"actions": ["no-op"], "before": "lt-MOCK", "after": "lt-MOCK", "after_unknown": False}}
+    plan["prior_state"]["values"]["outputs"] = {ORIGINAL.P3A2_OUTPUT: {"value": 4}, "ecs_spot_launch_template_id": {"value": "lt-MOCK"}}
+    plan["configuration"]["root_module"]["resources"] = [r for r in plan["configuration"]["root_module"]["resources"] if r["address"] != ORIGINAL.P3A2_POLICY]
+    p3a2_sync(plan)
+    return plan
+
+
+def p3a2_sync(plan):
+    data = [r for r in plan["planned_values"]["root_module"]["resources"] if r.get("mode") == "data"]
+    planned = [{"address": r["address"], "mode": r["mode"], "type": r["type"], "values": r["change"].get("after")}
+               for r in plan["resource_changes"] if r["change"]["actions"] != ["delete"]]
+    plan["planned_values"]["root_module"]["resources"] = planned + data
+    plan["planned_values"]["outputs"] = {"ecs_spot_launch_template_id": {"value": "lt-MOCK"}}
+
+
+class P3a2Tests(unittest.TestCase):
+    """validate_p3a2 on the exact 0 / 2 / 1 plan and on one violation at a time."""
+
+    def reject(self, mutate, prefix, sync=True):
+        global FIXTURE_CHECKS
+        FIXTURE_CHECKS += 1
+        plan = p3a2_plan()
+        mutate(plan)
+        if sync:
+            p3a2_sync(plan)
+        with self.assertRaises(G.Rejected) as caught:
+            G.validate_p3a2(plan)
+        self.assertTrue(str(caught.exception).startswith(prefix), str(caught.exception))
+
+    @staticmethod
+    def change(plan, address):
+        return resource(plan, address)["change"]
+
+    def test_positive_exact_plan(self):
+        result = G.validate_p3a2(p3a2_plan())
+        self.assertEqual((result["mode"], result["creates"], result["changes"], result["destroys"]), ("p3a2", 0, 2, 1))
+
+    def test_plan_format_is_shared_with_p3a(self):
+        for key, value, prefix in (("terraform_version", "1.15.0", "PG0 plan format/version"), ("complete", False, "PG0 incomplete plan"),
+                                   ("errored", True, "PG0 errored plan"), ("applyable", False, "PG0 non-applyable plan")):
+            self.reject(lambda plan, k=key, v=value: plan.update({k: v}), prefix)
+
+    def test_exact_changed_set(self):
+        address = "aws_instance.demo"
+        self.reject(lambda p: self.change(p, address).update(actions=["update"]), "P3A2 exact 2 updates and 1 delete")
+        self.reject(lambda p: self.change(p, ORIGINAL.P3A2_POLICY).update(actions=["no-op"]), "P3A2 exact 2 updates and 1 delete")
+        self.reject(lambda p: self.change(p, 'aws_scheduler_schedule.runtime_orchestration["day_open"]').update(actions=["update"]), "P3A2 exact 2 updates and 1 delete")
+        self.reject(lambda p: p["resource_changes"].append({"address": "aws_iam_role_policy.extra", "mode": "managed", "type": "aws_iam_role_policy", "change": {"actions": ["create"], "before": None, "after": {}, "after_unknown": {}}}), "P3A2 exact 2 updates and 1 delete")
+
+    def test_root_and_existing_resources(self):
+        def remove_prior(plan, address):
+            plan["prior_state"]["values"]["root_module"]["resources"] = [r for r in plan["prior_state"]["values"]["root_module"]["resources"] if r["address"] != address]
+        self.reject(lambda p: remove_prior(p, "aws_instance.demo"), "P3A2 wrong/incomplete root")
+        self.reject(lambda p: p["resource_changes"].append({"address": "aws_x.unknown", "mode": "managed", "type": "aws_x", "change": {"actions": ["no-op"], "before": {}, "after": {}, "after_unknown": {}}}), "P3A2 all prior resources represented")
+        self.reject(lambda p: p["resource_changes"].remove(resource(p, "aws_instance.demo")), "P3A2 all prior resources represented")
+        self.reject(lambda p: self.change(p, "aws_instance.demo").update(after={"MOCK": "other"}), "P3A2 existing changed aws_instance.demo", sync=False)
+        self.reject(lambda p: self.change(p, "aws_instance.demo").update(after_unknown={"arn": True}), "P3A2 existing unknown/moved", sync=False)
+        self.reject(lambda p: resource(p, "aws_instance.demo").update(previous_address="aws_instance.old"), "P3A2 existing unknown/moved", sync=False)
+
+    def test_update_is_in_place_bound_and_exactly_unknown(self):
+        for address in (ORIGINAL.P3A2_TEMPLATE, ORIGINAL.P3A2_GROUP):
+            self.reject(lambda p, a=address: self.change(p, a).update(actions=["delete", "create"]), "P3A2 update action " + address)
+            self.reject(lambda p, a=address: resource(p, a).update(previous_address="aws_x.old"), "P3A2 update import/move " + address)
+            self.reject(lambda p, a=address: self.change(p, a).update(importing={"id": "x"}), "P3A2 update import/move " + address)
+            self.reject(lambda p, a=address: self.change(p, a)["before"].update(name="stale"), "P3A2 update not bound to refreshed state " + address)
+            self.reject(lambda p, a=address: self.change(p, a)["after_unknown"].update(name=True), "P3A2 update unknown " + address)
+
+    def test_template_changes_only_the_allocation_line(self):
+        t = ORIGINAL.P3A2_TEMPLATE
+        encode = lambda text: base64.b64encode(text.encode()).decode()
+        allocation = ORIGINAL.exporter.fixture_context()["aws_eip"]["ec2_origin"]["allocation_id"]
+        self.reject(lambda p: self.change(p, t)["after"].update(default_version=5), "P3A2 template changed fields")
+        self.reject(lambda p: self.change(p, t)["after"].update(user_data=self.change(p, t)["before"]["user_data"]), "P3A2 template changed fields")
+        self.reject(lambda p: (self.change(p, t)["before"].update(latest_version=5), bind_refreshed_only(p, t)), "P3A2 template version")
+        self.reject(lambda p: self.change(p, t)["after"].update(latest_version=5), "P3A2 template version", sync=False)
+        extra = "#!/bin/bash\nreadonly BUNDLE=\"v1\"\nreadonly EIP_ALLOCATION_ID_VALUE=\"\"\nexit 0\nmore\n"
+        self.reject(lambda p: self.change(p, t)["after"].update(user_data=encode(extra)), "P3A2 loader line count")
+        bundle = "#!/bin/bash\nreadonly BUNDLE=\"v2\"\nreadonly EIP_ALLOCATION_ID_VALUE=\"\"\nexit 0\n"
+        self.reject(lambda p: self.change(p, t)["after"].update(user_data=encode(bundle)), "P3A2 loader change")
+        other = "#!/bin/bash\nreadonly BUNDLE=\"v1\"\nreadonly EIP_ALLOCATION_ID_VALUE=\"eipalloc-other\"\nexit 0\n"
+        self.reject(lambda p: self.change(p, t)["after"].update(user_data=encode(other)), "P3A2 loader change")
+        self.assertTrue(allocation)
+
+    def test_group_changes_only_rebalance_and_version(self):
+        g = ORIGINAL.P3A2_GROUP
+        self.reject(lambda p: self.change(p, g)["after"].update(capacity_rebalance=True), "P3A2 group changed fields")
+        self.reject(lambda p: self.change(p, g)["after"].update(health_check_type="ELB"), "P3A2 group changed fields")
+        self.reject(lambda p: self.change(p, g)["after"].update(desired_capacity=1), "P3A2 group changed fields")
+        def rebalance_off_before(plan):
+            self.change(plan, g)["before"]["capacity_rebalance"] = False
+            self.change(plan, g)["after"]["capacity_rebalance"] = True
+            bind_refreshed_only(plan, g)
+        self.reject(rebalance_off_before, "P3A2 capacity rebalance")
+        def wrong_capacity(plan):
+            for side in ("before", "after"):
+                self.change(plan, g)[side]["max_size"] = 3
+            bind_refreshed_only(plan, g)
+        self.reject(wrong_capacity, "P3A2 group capacity")
+        self.reject(lambda p: self.change(p, g)["after"]["launch_template"][0].update(id="lt-other"), "P3A2 group template reference")
+        self.reject(lambda p: self.change(p, g)["after"]["launch_template"][0].update(version="5"), "P3A2 group template reference", sync=False)
+        def old_reference(plan):
+            self.change(plan, g)["before"]["launch_template"][0]["version"] = "3"
+            bind_refreshed_only(plan, g)
+        self.reject(old_reference, "P3A2 group template reference")
+
+    def test_only_the_promotion_policy_is_removed_from_the_source(self):
+        a = ORIGINAL.P3A2_POLICY
+        self.reject(lambda p: resource(p, a).update(action_reason="delete_because_count_index"), "P3A2 policy delete")
+        self.reject(lambda p: self.change(p, a).update(after={"name": "x"}), "P3A2 policy delete")
+        self.reject(lambda p: self.change(p, a)["before"].update(name="stale"), "P3A2 policy identity")
+        def other_policy(plan):
+            self.change(plan, a)["before"]["name"] = "session-manager-core"
+            bind_refreshed_only(plan, a)
+        self.reject(other_policy, "P3A2 policy identity")
+        def other_role(plan):
+            self.change(plan, a)["before"]["role"] = "ec-portfolio-demo-ec2"
+            bind_refreshed_only(plan, a)
+        self.reject(other_role, "P3A2 policy identity")
+        self.reject(lambda p: p["configuration"]["root_module"]["resources"].append({"address": a, "mode": "managed"}), "P3A2 policy still configured")
+
+    def test_planned_values_are_consistent(self):
+        def remove_planned(plan):
+            plan["planned_values"]["root_module"]["resources"] = [r for r in plan["planned_values"]["root_module"]["resources"] if r["address"] != "aws_instance.demo"]
+        self.reject(remove_planned, "P3A2 planned resource coverage", sync=False)
+        def keep_policy(plan):
+            plan["planned_values"]["root_module"]["resources"].append({"address": ORIGINAL.P3A2_POLICY, "mode": "managed", "type": "aws_iam_role_policy", "values": {}})
+        self.reject(keep_policy, "P3A2 planned resource coverage", sync=False)
+        def inconsistent(plan):
+            next(r for r in plan["planned_values"]["root_module"]["resources"] if r["address"] == "aws_instance.demo")["values"] = {"MOCK": "other"}
+        self.reject(inconsistent, "P3A2 planned value inconsistency", sync=False)
+
+    def test_outputs(self):
+        o = ORIGINAL.P3A2_OUTPUT
+        self.reject(lambda p: p["output_changes"].pop(o), "P3A2 version output")
+        self.reject(lambda p: p["output_changes"][o].update(actions=["no-op"]), "P3A2 version output")
+        self.reject(lambda p: p["output_changes"][o].update(before=3), "P3A2 version output")
+        self.reject(lambda p: p["output_changes"][o].update(after_unknown=False), "P3A2 version output")
+        self.reject(lambda p: p["output_changes"]["ecs_spot_launch_template_id"].update(actions=["update"]), "P3A2 output changed")
+        self.reject(lambda p: p["output_changes"]["ecs_spot_launch_template_id"].update(after="lt-other"), "P3A2 output changed")
+        self.reject(lambda p: p["output_changes"]["ecs_spot_launch_template_id"].update(after_unknown=True), "P3A2 output changed")
+        def snapshot(plan):
+            plan["planned_values"]["outputs"]["ecs_spot_launch_template_id"] = {"value": "lt-other"}
+        self.reject(snapshot, "P3A2 output snapshot changed", sync=False)
+
+    def test_drift_is_still_checked(self):
+        def drift(plan):
+            plan["resource_drift"] = [{"address": "aws_iam_role.ecs_spot", "change": {"actions": ["update"], "before": {}, "after": {}, "after_unknown": {}}}]
+        self.reject(drift, "PG4 unexpected drift")
+
+    def test_only_true_leaves_count_as_unknown(self):
+        self.assertEqual(G.unknown_leaves({"a": [{"b": True}, {}], "c": False, "d": {}, "e": True}), {"/a/0/b", "/e"})
+        self.assertEqual(G.unknown_leaves(None), set())
+
+
+def bind_refreshed_only(plan, address):
+    values = resource(plan, address)["change"]["before"]
+    for r in plan["prior_state"]["values"]["root_module"]["resources"]:
+        if r["address"] == address:
+            r["values"] = copy.deepcopy(values)
+
+
 class EntryTests(unittest.TestCase):
     """The command-line entry points the saved-plan -> review -> apply flow calls.
 
@@ -658,6 +850,25 @@ class EntryTests(unittest.TestCase):
                 G.validate(plan, rendered)
             self.assertEqual(str(rejected.exception), "PG5 new schedule/rule not DISABLED")
 
+    def test_p3a2_mode_records_the_same_evidence_and_rejects_the_p3a_plan(self):
+        self.show_plan = p3a2_plan()
+        with tempfile.TemporaryDirectory(prefix="p3a2-MOCK-plan-") as temporary:
+            saved, path = self.files(temporary, self.show_plan)
+            code, out, err = self.call("p3a2", str(saved), str(path), ACCOUNT_SHA)
+            self.assertEqual((code, err), (0, ""))
+            result = json.loads(out)
+            self.assertEqual((result["mode"], result["changes"], result["destroys"]), ("p3a2", 2, 1))
+            self.assertEqual(result["saved_plan_sha256"], hashlib.sha256(saved.read_bytes()).hexdigest())
+            self.assertEqual(result["source_commit"], self.COMMIT)
+            code, out, err = self.call("p3a", str(saved), str(path), ACCOUNT_SHA)
+            self.assertEqual(code, 1)
+        self.show_plan = PLAN
+        with tempfile.TemporaryDirectory(prefix="p3a2-MOCK-plan-") as temporary:
+            saved, path = self.files(temporary, PLAN)
+            code, out, err = self.call("p3a2", str(saved), str(path), ACCOUNT_SHA)
+            self.assertEqual(code, 1)
+            self.assertIn("P3A2 exact 2 updates and 1 delete", err)
+
     def test_verify_before_apply(self):
         with tempfile.TemporaryDirectory(prefix="p3a-MOCK-plan-") as temporary:
             saved, _ = self.files(temporary, PLAN)
@@ -700,6 +911,7 @@ class EntryTests(unittest.TestCase):
 def suite():
     return unittest.TestSuite([unittest.defaultTestLoader.loadTestsFromTestCase(FixtureTests),
                                unittest.defaultTestLoader.loadTestsFromTestCase(RevisionTests),
+                               unittest.defaultTestLoader.loadTestsFromTestCase(P3a2Tests),
                                unittest.defaultTestLoader.loadTestsFromTestCase(EntryTests)])
 
 
@@ -737,7 +949,7 @@ def mutations():
             continue
         message = call.args[1]
         code = message.value if isinstance(message, ast.Constant) else message.left.value if isinstance(message, ast.BinOp) and isinstance(message.left, ast.Constant) else None
-        if code in selected or code in prefixes:
+        if code in selected or code in prefixes or (code or "").startswith("P3A2 "):
             chosen.append((call, code))
     revision_codes = {"PG0 refreshed caller account mismatch", "PG0 caller provider binding", "PG0 provider credential override",
                       "PG4 drift action/unknown", "PG4 drift refreshed no-op binding", "PG4 exact null-to-empty normalization", "PG4 inline observation shape",

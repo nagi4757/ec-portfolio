@@ -784,6 +784,8 @@ terraform validate
 
 ## Phase 6C-5c-2 Spot origin EIP promotion
 
+> Superseded by [P3-a2](#phase-6c-5c-p3-a2-single-eip-writer): new launches no longer promote themselves. This section records what that change removes.
+
 A Spot host launched from the new launch template version moves the origin Elastic IP to itself, once, after Auto Scaling has accepted its `CONTINUE`. Until now that move was an operator step (Phase 6C-5b). The bootstrap still never associates the address: the post phase only leaves a `continue-accepted` marker and queues `ec-portfolio-spot-eip-promotion.service`, which runs `promote-origin-eip.sh` from the same runtime bundle (see the runtime README).
 
 | Address | Change |
@@ -1016,9 +1018,46 @@ No state machine is started by hand and no rehearsal runs after this apply. The 
 
 ### Open points
 
-- Later steps each have their own change and approval: removing the Spot self-promotion and `capacity_rebalance` before any rehearsal, the scheduler and alert permissions, the On-Demand public IPv4 check (V2-B) before any rehearsal, rehearsals, and the cutover that disables the two legacy start schedules and enables the new ones.
+- Later steps each have their own change and approval: the scheduler and alert permissions, the On-Demand public IPv4 check (V2-B) before any rehearsal, rehearsals, and the cutover that disables the two legacy start schedules and enables the new ones.
 - The new resources' provider calls were checked against the deployed permission sets (read-only), not traced: a missing permission stops the apply with an AccessDenied, which is a STOP. Everything created before it stays inert.
 - The gate's `terraform show` and Git calls are exercised offline with stand-ins; their first real run is the P3-a plan. A failure there is a rejection, never a pass.
+
+## Phase 6C-5c P3-a2: single EIP writer
+
+Removes the second automated writer of the origin Elastic IP before any rehearsal can launch a Spot host. Until now a host moved the address to itself after `CONTINUE`, with no view of the arming, `maintenance`, lease, `ready#` attestation and daily move limit that fence `origin-guard`. A replacement finishing its bootstrap while the On-Demand host is the origin would take the address back. `capacity_rebalance = true` is the other half: the workflows' `SnapshotGate` refuses a group that has it, so nothing past `ArmGate` runs until it is off, and it is the loop that took the origin down on 2026-10-13.
+
+### Plan delta
+
+```
+Plan: 0 to add, 2 to change, 1 to destroy.
+```
+
+| Address | Change |
+| --- | --- |
+| `aws_launch_template.ecs_spot` | new version: the loader's `EIP_ALLOCATION_ID_VALUE` becomes empty, and no other line of it changes |
+| `aws_autoscaling_group.ecs_spot` | `capacity_rebalance` to `false`, `launch_template[0].version` to the new version; capacity stays 0/0/2 |
+| `aws_iam_role_policy.ecs_spot_origin_eip_promotion` | destroyed: the Spot host role has no `ec2:AssociateAddress` any more |
+
+The only output that changes is `ecs_spot_launch_template_version`. The runtime bundle does not change: `promote-origin-eip.sh` and its unit stay in it unused, because removing them would publish a new bundle and a new measurement launch template for no behaviour. With an empty allocation the bootstrap installs no promotion unit and the script refuses to run, the path every measurement host has already taken. A host still leaves `spot-continue-accepted`, which `spot-smoke` requires.
+
+After this, the origin Elastic IP is written by the operator (`ECPortfolioOriginEipAssociation`) and by `origin-guard`, which still has no execution. An interrupted host is still replaced, because desired capacity stays at one while the workflows run; a rebalance recommendation is only recorded.
+
+### Plans and the gate
+
+Same flow as P3-a, with the mode `p3a2`, while the group is at desired 0 and outside the legacy windows:
+
+```sh
+scripts/cold-standby-plan-gate.sh p3a2 "$PRIVATE_DIR/p3a2.tfplan" "$PRIVATE_DIR/p3a2.plan.json" <sha256 of the 12-digit account id>
+scripts/cold-standby-plan-gate.sh verify "$PRIVATE_DIR/p3a2.tfplan" <saved_plan_sha256> <source_commit>
+```
+
+The gate accepts exactly those three changes: the loader differs in the allocation line alone and starts from version 4, the deletion is of `origin-eip-promotion` on the Spot role because the source no longer has it, every other resource is a no-op with its refreshed values, and no other output moves. The real provider's unknown shape is first seen in the real plan; a difference is a rejection, not a pass.
+
+The Apply permission set covers every call through `ECPortfolioTerraformApplySpotFoundation` (`iam:DeleteRolePolicy` on the Spot role, the template version, `autoscaling:UpdateAutoScalingGroup`). No access root change is needed.
+
+### Rollback
+
+A revert and an apply: a further template version with the allocation, `capacity_rebalance = true` and the policy again. Nothing runs on the group at desired 0, so neither direction touches the service. It is not expected to be needed: it brings back the 2026-10-13 failure and the second writer.
 
 ## Local validation
 

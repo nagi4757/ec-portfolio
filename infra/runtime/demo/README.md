@@ -669,6 +669,8 @@ serving-ready になった host は、まだ production traffic を受けてい�
 
 ### CONTINUE 後の Elastic IP promotion（Phase 6C-5c-2）
 
+> Phase 6C-5c P3-a2 以降、production の Launch Template は `EIP_ALLOCATION_ID` を渡しません。host は自分へ EIP を移さず、自動の writer は `origin-guard` だけです。`promote-origin-eip.sh` と unit は bundle に残りますが使われません。以下は仕組みの記録です。
+
 Phase 6C-5c-2 以降、Launch Template が `EIP_ALLOCATION_ID` を渡した host は、自分自身へ origin EIP を移します。
 ただし bootstrap の中では行いません。bootstrap の契約（`AssociateAddress` を呼ばない）は変わりません。
 
