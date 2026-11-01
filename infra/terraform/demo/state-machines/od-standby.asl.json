@@ -88,7 +88,8 @@
         "commandId": "",
         "event": "{% $exists($request.event) ? $request.event : {} %}",
         "nowJst": "{% $fromMillis($millis(), '[Y0001]-[M01]-[D01]T[H01]:[m01]:[s01]', '+0900') %}",
-        "dayKey": "{% 'day#' & $fromMillis($millis(), '[Y0001]-[M01]-[D01]', '+0900') %}"
+        "dayKey": "{% 'day#' & $fromMillis($millis(), '[Y0001]-[M01]-[D01]', '+0900') %}",
+        "ownsMode": false
       },
       "Next": "ValidateInput"
     },
@@ -1257,7 +1258,10 @@
         }
       ],
       "Next": "RecordStart",
-      "TimeoutSeconds": 60
+      "TimeoutSeconds": 60,
+      "Assign": {
+        "ownsMode": true
+      }
     },
     "RecordStart": {
       "Type": "Task",
@@ -4761,7 +4765,10 @@
         }
       ],
       "Next": "RecordFailback",
-      "TimeoutSeconds": 60
+      "TimeoutSeconds": 60,
+      "Assign": {
+        "ownsMode": true
+      }
     },
     "RecordFailback": {
       "Type": "Task",
@@ -7946,7 +7953,7 @@
           "ErrorEquals": [
             "States.ALL"
           ],
-          "Next": "Failed"
+          "Next": "Failure"
         }
       ]
     },
@@ -7976,7 +7983,7 @@
           "ErrorEquals": [
             "States.ALL"
           ],
-          "Next": "Failed"
+          "Next": "Failure"
         }
       ]
     },
@@ -8009,7 +8016,7 @@
           "ErrorEquals": [
             "States.ALL"
           ],
-          "Next": "Failed"
+          "Next": "Failure"
         }
       ]
     },
@@ -8039,7 +8046,7 @@
           "ErrorEquals": [
             "States.ALL"
           ],
-          "Next": "Failed"
+          "Next": "Failure"
         }
       ]
     },
@@ -8075,7 +8082,7 @@
           "ErrorEquals": [
             "States.ALL"
           ],
-          "Next": "Failed"
+          "Next": "Failure"
         }
       ]
     },
@@ -8106,7 +8113,7 @@
           "ErrorEquals": [
             "States.ALL"
           ],
-          "Next": "Failed"
+          "Next": "Failure"
         }
       ]
     },
@@ -8136,7 +8143,7 @@
           "ErrorEquals": [
             "States.ALL"
           ],
-          "Next": "Failed"
+          "Next": "Failure"
         }
       ]
     },
@@ -8170,7 +8177,7 @@
           "ErrorEquals": [
             "States.ALL"
           ],
-          "Next": "Failed"
+          "Next": "Failure"
         }
       ]
     },
@@ -8200,7 +8207,7 @@
           "ErrorEquals": [
             "States.ALL"
           ],
-          "Next": "Failed"
+          "Next": "Failure"
         }
       ]
     },
@@ -8212,7 +8219,7 @@
           "Next": "A1Check"
         }
       ],
-      "Default": "Failed"
+      "Default": "Failure"
     },
     "ReleaseRestore": {
       "Type": "Task",
@@ -8386,7 +8393,7 @@
           "ErrorEquals": [
             "States.ALL"
           ],
-          "Next": "Failed"
+          "Next": "Failure"
         }
       ]
     },
@@ -8740,7 +8747,7 @@
           "ErrorEquals": [
             "States.ALL"
           ],
-          "Next": "Failed"
+          "Next": "Failure"
         }
       ]
     },
@@ -8938,7 +8945,7 @@
       "Type": "Choice",
       "Choices": [
         {
-          "Condition": "{% $failedMode.state.S in ['failover-prep','failback'] %}",
+          "Condition": "{% $ownsMode and $failedMode.state.S in ['failover-prep','failback'] %}",
           "Next": "ReadFailureLease"
         }
       ],
@@ -9305,7 +9312,7 @@
           "ErrorEquals": [
             "States.ALL"
           ],
-          "Next": "Failed"
+          "Next": "Failure"
         }
       ]
     },
@@ -9524,7 +9531,7 @@
           "ErrorEquals": [
             "States.ALL"
           ],
-          "Next": "Failed"
+          "Next": "Failure"
         }
       ]
     },
@@ -9561,7 +9568,7 @@
           "ErrorEquals": [
             "States.ALL"
           ],
-          "Next": "Failed"
+          "Next": "Failure"
         }
       ]
     },

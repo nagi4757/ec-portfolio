@@ -25,11 +25,17 @@ OD_READINESS_RECHECKS = 24
 OD_READINESS_RECHECK_SECONDS = 30
 OD_READINESS_LEASE_RETRIES = 6
 OD_READINESS_LEASE_RETRY_SECONDS = 20
-# Which workflow's failure may move day-close to degraded: (FailureModeChoice condition, third mode the transaction accepts).
-DAY_CLOSE_FAILURE = {
+# Whose failure may move a mode to degraded: only the run that owns the transition. Anything else that fails while a prepare,
+# a failback or a close is under way, such as a duplicate prepare or a signal, must leave it running.
+# (FailureModeChoice condition, third mode the transaction accepts besides failover-prep and failback, if any.)
+FAILURE_OWNERSHIP = {
  'day-close':("$failedMode.state.S in ['failover-prep','failback','day-close']",'day-close'),
- 'origin-guard':("$failedMode.state.S in ['failover-prep','failback'] or ($failedMode.state.S='day-close' and $request.intent='park-od')",E("$request.intent='park-od' ? 'day-close' : 'failback'")),
+ 'origin-guard':("($dispatch='associate' and $failedMode.state.S in ['failover-prep','failback']) or ($failedMode.state.S='day-close' and $request.intent='park-od')",E("$request.intent='park-od' ? 'day-close' : 'failback'")),
+ 'od-standby':("$ownsMode and $failedMode.state.S in ['failover-prep','failback']",None),
+ 'day-open':('false',None),
 }
+# A read failing after the lease goes through Failure to release it. These run while it may be held and ended in Failed instead.
+LEASE_HELD_GATES = {'origin-guard':['StableSnapshotGate'],'od-standby':['A1SnapshotGate']}
 # No write can come from a prepare this long after it recorded odStartedAt: od-standby's 2700 s window, the 1800 s window of
 # the origin-guard child it may have started last, and a margin. Every fence refuses a write past its own run's window.
 ORPHAN_QUIESCE_MS = 4800000
@@ -396,13 +402,13 @@ def harden(b):
   for n in ['NightRdsChoice','FinalInvariant']:
    s[n]['Default']='Failure'
  if b.name!='ready-check':
-  # Only day-close itself, and the child parking the address for it, may end a close as degraded. Another workflow failing
-  # here must leave the mode alone, or the waiting close can never take its lease. The transaction repeats this for a late change.
-  closing=DAY_CLOSE_FAILURE.get(b.name)
+  # Only day-close itself, and the child parking the address for it, may end a close as degraded, or the waiting close can
+  # never take its lease. The transaction repeats this for a change after the read.
+  condition,closing=FAILURE_OWNERSHIP[b.name]
+  s['FailureModeChoice']['Choices'][0]['Condition']=E(condition)
   if closing:
-   s['FailureModeChoice']['Choices'][0]['Condition']=E(closing[0])
    tx=s['MarkDegraded']['Arguments']['TransactItems'];up=next(x['Update'] for x in tx if x.get('Update',{}).get('Key',{}).get('pk')==S('mode'))
-   up['ConditionExpression']=up['ConditionExpression'].replace('#state IN (:s0, :s1)','#state IN (:s0, :s1, :s2)');up['ExpressionAttributeValues'][':s2']=S(closing[1])
+   up['ConditionExpression']=up['ConditionExpression'].replace('#state IN (:s0, :s1)','#state IN (:s0, :s1, :s2)');up['ExpressionAttributeValues'][':s2']=S(closing)
  if b.name=='origin-guard':
   # Each transient retry re-observes physical membership/health before taking a new address-write fence.
   s['WaitRetryAssociate']['Next']='StableSnapshot'
@@ -414,8 +420,8 @@ def harden(b):
   b.read('ReadFailureLease','dynamodb','getItem',{'TableName':TABLE,'Key':{'pk':S('lock#runtime')},'ConsistentRead':True},'FailureLeaseChoice',{'failureLease':E('$exists($states.result.Item) ? $states.result.Item : {}')})
   s['ReadFailureLease']['Catch']=[{'ErrorEquals':['States.ALL'],'Next':'Failed'}]
   b.choice('FailureLeaseChoice',[("$failureLease.owner.S=$states.context.Execution.Id and $failureLease.lockToken.S=$token",'MarkDegraded'),("$not($exists($failureLease.pk)) or $number($failureLease.expiresAt.N)<$millis()",'ReacquireFailure')],'Release')
-  closing=DAY_CLOSE_FAILURE.get(b.name)
-  b.reacquire('ReacquireFailure','MarkDegraded',['failover-prep','failback']+([closing[1]] if closing else []))
+  closing=FAILURE_OWNERSHIP[b.name][1]
+  b.reacquire('ReacquireFailure','MarkDegraded',['failover-prep','failback']+([closing] if closing else []))
 
  if b.name=='origin-guard':
   # A lost response may not be noticed until the next 30-minute tick, after a 10-minute attestation expired.
@@ -461,6 +467,17 @@ def harden(b):
   op=next(x['ConditionCheck'] for x in s['FenceCommitRecoveredHolder']['Arguments']['TransactItems'] if x.get('ConditionCheck',{}).get('Key',{}).get('pk')==S('mode'))
   op['ConditionExpression']=op['ConditionExpression'].replace('#state IN (:s0, :s1)','#state IN (:s0, :s1, :s2)');op['ExpressionAttributeValues'][':s2']=S('degraded')
  if b.name=='origin-guard':orphan_cleanup(b)
+ # Failure ownership. The variables exist from Init, so every failure path can read them.
+ if b.name=='origin-guard':s['Init']['Assign']['dispatch']=''
+ if b.name=='od-standby':
+  s['Init']['Assign']['ownsMode']=False
+  for n in ['FailoverMode','FailbackMode']:s[n]['Assign']={'ownsMode':True}
+ if b.name!='ready-check':
+  for n,state in s.items():
+   if state['Type']=='Task' and state['Resource'].split(':')[-1].startswith(('describe','get')) and not n.startswith('Orphan') and n not in ['ReadMode','ReadMaintenance','ReadFailureMode','ReadFailureLease'] and b.name!='day-close':
+    for catch in state.get('Catch',[]):
+     if catch['Next']=='Failed':catch['Next']='Failure'
+  for n in LEASE_HELD_GATES.get(b.name,[]):s[n]['Default']='Failure'
 
 def orphan_cleanup(b):
  # A prepare that ended without Failure leaves failover-prep, and Reconcile has no branch for it. See "Orphaned failover-prep"

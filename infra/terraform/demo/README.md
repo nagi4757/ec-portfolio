@@ -1171,7 +1171,7 @@ A prepare that ended without `Failure` left mode `failover-prep`, and `Reconcile
 | `ready#` | a proof at a time | liveness; not used here |
 | arming, maintenance | whether a write may happen | liveness |
 
-The prepare is quiet 80 minutes after `odStartedAt`: 2700 s for `od-standby`, 1800 s for the `origin-guard` child it may have started last, and 300 s of margin. A test ties this to the Terraform windows.
+The prepare is quiet 80 minutes after `odStartedAt`: 2700 s for `od-standby`, 1800 s for the `origin-guard` child it may have started last, and 300 s of margin. A test ties this to the Terraform windows. The longer `day_open` and `day_close` windows are not in the sum on purpose: only the prepare path can return to `failover-prep` after waiting without the lease, which a test enumerates, and every other writer needs the lease this cleanup takes.
 
 ```
 Reconcile: failover-prep, holder is not OD, odStartedAt present, quiet
@@ -1193,9 +1193,23 @@ It makes no EC2, EIP or `StartInstances` call, and no attestation is read or wri
 | arming off, maintenance | `NotArmed`, nothing; cleared by a later tick once it is back |
 | no `odStartedAt` today | `Runtime.ManualRecovery`, nothing |
 
-**What this cannot do.** It is time, not an observation of the run, so recovery is late: 80 minutes and up to 30 more for the tick, then the stop and the new boot. `TIMED_OUT` and `FAILED` already reach the alert topic, so an operator can act sooner.
+**What this cannot do.** It is time, not an observation of the run, so recovery is late: 80 minutes, then the next `Reconcile`, the stop and the new boot. `Reconcile` runs on an accepted signal or on `origin_guard_tick`, every 30 minutes from 08:00 to 21:30 JST on weekdays, so the wait is at most 30 minutes only inside those hours. A prepare after about 20:40 is not quiet before `day_close` at 22:00, which closes it from `failover-prep` instead. In the rehearsal scope nothing but a manual run reaches it. `TIMED_OUT` and `FAILED` already reach the alert topic, so an operator can act sooner.
 
 **Manual recovery.** Needed for `Runtime.ManualRecovery`, for the daily limit of 3 starts reached in `degraded` with no holder, and for a holder on OD whose proof keeps failing. Check the holder, the host and the failed execution's history, then set the state with the Operator permission set.
+
+### Failures of runs that do not own the transition
+
+Any run failing during a prepare could mark it degraded, which cancelled a healthy recovery: `MarkDegraded`, the next tick stops OD, and a start is spent. Replayed before the fix:
+
+| While a prepare is under way | Result before |
+| --- | --- |
+| A second prepare past the gate, which the shared signal rule makes likely by starting `od-standby` directly and through `origin-guard` | its `FailoverMode` fails, and it marks the first run's prepare degraded |
+| An event-started `od-standby`, a supervise child, a `day_open`, or a tick failing on a read in the boot wait | degraded |
+| A launch signal failing on a read after taking the lease | ended in `Failed` holding the lease, so the prepare could not re-acquire it |
+
+Now only the owner may mark it: in `od-standby` the run whose `FailoverMode` or `FailbackMode` succeeded, in `origin-guard` the run moving the address (`$dispatch='associate'`). A failure of any other run releases its own lease and changes nothing. Reads that ended in `Failed` while the lease could be held now go through `Failure`, as most already did.
+
+A promotion that really fails still marks degraded, and that still costs a start: the parent has nothing left to wait for.
 
 ### Day-close overwritten
 

@@ -3898,7 +3898,7 @@
       "Type": "Choice",
       "Choices": [
         {
-          "Condition": "{% $failedMode.state.S in ['failover-prep','failback'] %}",
+          "Condition": "{% false %}",
           "Next": "ReadFailureLease"
         }
       ],
@@ -4381,7 +4381,7 @@
           "ErrorEquals": [
             "States.ALL"
           ],
-          "Next": "Failed"
+          "Next": "Failure"
         }
       ]
     },

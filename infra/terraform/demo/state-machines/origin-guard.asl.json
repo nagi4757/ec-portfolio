@@ -88,7 +88,8 @@
         "commandId": "",
         "event": "{% $exists($request.event) ? $request.event : {} %}",
         "nowJst": "{% $fromMillis($millis(), '[Y0001]-[M01]-[D01]T[H01]:[m01]:[s01]', '+0900') %}",
-        "dayKey": "{% 'day#' & $fromMillis($millis(), '[Y0001]-[M01]-[D01]', '+0900') %}"
+        "dayKey": "{% 'day#' & $fromMillis($millis(), '[Y0001]-[M01]-[D01]', '+0900') %}",
+        "dispatch": ""
       },
       "Next": "ValidateInput"
     },
@@ -3246,7 +3247,7 @@
           "Next": "ReadStableRecord"
         }
       ],
-      "Default": "Failed"
+      "Default": "Failure"
     },
     "ReadStableRecord": {
       "Type": "Task",
@@ -3747,7 +3748,7 @@
           "ErrorEquals": [
             "States.ALL"
           ],
-          "Next": "Failed"
+          "Next": "Failure"
         }
       ]
     },
@@ -4129,7 +4130,7 @@
       "Type": "Choice",
       "Choices": [
         {
-          "Condition": "{% $failedMode.state.S in ['failover-prep','failback'] or ($failedMode.state.S='day-close' and $request.intent='park-od') %}",
+          "Condition": "{% ($dispatch='associate' and $failedMode.state.S in ['failover-prep','failback']) or ($failedMode.state.S='day-close' and $request.intent='park-od') %}",
           "Next": "ReadFailureLease"
         }
       ],
@@ -4304,7 +4305,7 @@
           "ErrorEquals": [
             "States.ALL"
           ],
-          "Next": "Failed"
+          "Next": "Failure"
         }
       ]
     },
@@ -4340,7 +4341,7 @@
           "ErrorEquals": [
             "States.ALL"
           ],
-          "Next": "Failed"
+          "Next": "Failure"
         }
       ]
     },
