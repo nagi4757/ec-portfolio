@@ -29,7 +29,7 @@ OD_READINESS_LEASE_RETRY_SECONDS = 20
 # a failback or a close is under way, such as a duplicate prepare or a signal, must leave it running.
 # (FailureModeChoice condition, third mode the transaction accepts besides failover-prep and failback, if any.)
 FAILURE_OWNERSHIP = {
- 'day-close':("$failedMode.state.S in ['failover-prep','failback','day-close']",'day-close'),
+ 'day-close':("$ownsClose",None),
  'origin-guard':("($dispatch='associate' and $failedMode.state.S in ['failover-prep','failback']) or ($failedMode.state.S='day-close' and $request.intent='park-od')",E("$request.intent='park-od' ? 'day-close' : 'failback'")),
  'od-standby':("$ownsMode and $failedMode.state.S in ['failover-prep','failback']",None),
  'day-open':('false',None),
@@ -467,6 +467,7 @@ def harden(b):
   op=next(x['ConditionCheck'] for x in s['FenceCommitRecoveredHolder']['Arguments']['TransactItems'] if x.get('ConditionCheck',{}).get('Key',{}).get('pk')==S('mode'))
   op['ConditionExpression']=op['ConditionExpression'].replace('#state IN (:s0, :s1)','#state IN (:s0, :s1, :s2)');op['ExpressionAttributeValues'][':s2']=S('degraded')
  if b.name=='origin-guard':orphan_cleanup(b)
+ if b.name=='day-close':close_ownership(b)
  # Failure ownership. The variables exist from Init, so every failure path can read them.
  if b.name=='origin-guard':s['Init']['Assign']['dispatch']=''
  if b.name=='od-standby':
@@ -478,6 +479,32 @@ def harden(b):
     for catch in state.get('Catch',[]):
      if catch['Next']=='Failed':catch['Next']='Failure'
   for n in LEASE_HELD_GATES.get(b.name,[]):s[n]['Default']='Failure'
+
+def close_ownership(b):
+ # A close owns the mode from the moment its CloseMode commits, and only then: it holds no lease and no transition before that.
+ s=b.s
+ s['Init']['Assign']['ownsClose']=False
+ s['CloseMode']['Assign']={'ownsClose':True}
+ s['CloseMode']['Catch']=[{'ErrorEquals':['States.ALL'],'Next':'ReadCloseOutcome'}]
+ b.read('ReadCloseOutcome','dynamodb','getItem',{'TableName':TABLE,'Key':{'pk':S('mode')},'ConsistentRead':True},'CloseOutcome',{'closeRead':E('$exists($states.result.Item) ? $states.result.Item : {}')})
+ b.choice('CloseOutcome',[("$closeRead.state.S='day-close' and $closeRead.closeOwner.S=$states.context.Execution.Id",'CloseConfirmed')],'Failed')
+ b.add('CloseConfirmed',{'Type':'Pass','Assign':{'ownsClose':True},'Next':'BootstrapGate'})
+ # Both the choice and the transactions accept only day-close: a close never moves a prepare or a failback.
+ s['FailureModeChoice']['Default']='Failed'
+ s['FailureModeChoice']['Choices'][0]['Next']='ReadFailureLease'
+ del s['MarkDegraded'],s['ReacquireFailure']
+ b.modewrite('MarkDegraded','degraded','Release',['day-close'])
+ s['MarkDegraded']['Catch']=[{'ErrorEquals':['States.ALL'],'Next':'Release'}]
+ b.reacquire('ReacquireFailure','MarkDegraded',['day-close'])
+ mine="$failureLease.owner.S=$states.context.Execution.Id and $failureLease.lockToken.S=$token"
+ s['FailureLeaseChoice']['Choices']=[{'Condition':E(c),'Next':n} for c,n in [(mine+" and $failedMode.state.S='day-close'",'MarkDegraded'),(mine,'Release'),("($not($exists($failureLease.pk)) or $number($failureLease.expiresAt.N)<$millis()) and $failedMode.state.S='day-close'",'ReacquireFailure')]]
+ s['FailureLeaseChoice']['Default']='Failed'
+ # Every way a close can stop after it owns the mode goes through that path.
+ for n in ['BootstrapBusy','ParkChoice','FinalSnapshotGate']:s[n]['Default']='Failure'
+ for n in ['ReacquireClose','ReacquireFinal']:s[n]['Catch']=[{'ErrorEquals':['States.ALL'],'Next':'Failure'}]
+ # A failed release is reported as such. It may be the fence working: the lease then stays until it expires.
+ for n in ['Release','ReleasePark','ReleaseNightWait']:s[n]['Catch']=[{'ErrorEquals':['States.ALL'],'Next':'ReleaseFailed'}]
+ b.fail('ReleaseFailed','Runtime.ReleaseFailed','The lease of this close could not be released, for example under maintenance, without arming or past its window. It stays until it expires. See the README.')
 
 def orphan_cleanup(b):
  # A prepare that ended without Failure leaves failover-prep, and Reconcile has no branch for it. See "Orphaned failover-prep"
@@ -626,7 +653,9 @@ def day_close():
  b=Build('day-close');b.snapshot('Begin','CloseInput')
  b.choice('CloseInput',[("($request.rdsStop='schedule' or ($mode.scope.S='rehearsal' and $request.rdsStop='self')) and $request.parkEip='od'",'CloseMode')],'Failed')
  # Close mode deliberately precedes lease acquisition, fencing out promotions already waiting for the lease.
- check=b.modecheck(MODE_STATES)['ConditionCheck'];up={k:v for k,v in check.items() if k!='ConditionExpression'};up['ConditionExpression']=check['ConditionExpression'];up['UpdateExpression']='SET #state = :close';up['ExpressionAttributeValues'][':close']=S('day-close')
+ check=b.modecheck(MODE_STATES)['ConditionCheck'];up={k:v for k,v in check.items() if k!='ConditionExpression'};up['ConditionExpression']=check['ConditionExpression'];up['UpdateExpression']='SET #state = :close, closeOwner = :me, closeUntil = :writeUntil';up['ExpressionAttributeValues'].update({':close':S('day-close'),':me':S(E('$states.context.Execution.Id'))})
+ # The owner is written atomically with the mode, so a lost response can be told from a refused write. A close still inside its window is never taken over.
+ up['ConditionExpression'] += ' AND (#state <> :close OR attribute_not_exists(closeUntil) OR closeUntil < :nowMs)'
  b.txn('CloseMode',[{'ConditionCheck':{'TableName':TABLE,'Key':{'pk':S('maintenance')},'ConditionExpression':'attribute_not_exists(pk)'}},{'Update':up}],'BootstrapGate','Failed')
  b.bootstrap('ScaleZero',['day-close'])
  b.write('ScaleZero','autoscaling','setDesiredCapacity',{'AutoScalingGroupName':'${asg_name}','DesiredCapacity':0,'HonorCooldown':False},'StopOd',['day-close'])

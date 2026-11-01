@@ -1518,6 +1518,95 @@ class P3a4Tests(unittest.TestCase):
             self.assertIn("REJECT P3A3 exact updates", err)
 
 
+def p3a5_plan():
+    """The integrated plan after P3-a5: the five updates of P3-a4 and day_close."""
+    plan = p3a4_plan()
+    address = 'aws_sfn_state_machine.runtime["day_close"]'
+    definition = RENDERED["resources"][address]["definition"]
+    stored = {**after(plan, address), "definition": definition.replace("P3-a real", "P3-a old")}
+    bind_refreshed(plan, address, stored)
+    resource(plan, address)["change"].update(actions=["update"], after={**stored, "definition": definition}, after_unknown={"tags_all": {}})
+    p3a3_sync(plan)
+    return plan
+
+
+class P3a5Tests(unittest.TestCase):
+    """validate_p3a5 on the exact 0 / 6 / 0 plan. The earlier updates share their checks."""
+    CLOSE = 'aws_sfn_state_machine.runtime["day_close"]'
+    GUARD = 'aws_sfn_state_machine.runtime["origin_guard"]'
+
+    def reject(self, mutate, prefix, rendered=None, plan_factory=p3a5_plan):
+        global FIXTURE_CHECKS
+        FIXTURE_CHECKS += 1
+        plan = plan_factory()
+        mutate(plan)
+        p3a3_sync(plan)
+        with self.assertRaises(G.Rejected) as caught:
+            G.validate_p3a5(plan, rendered or RENDERED)
+        self.assertTrue(str(caught.exception).startswith(prefix), str(caught.exception))
+
+    def change(self, plan, address):
+        return resource(plan, address)["change"]
+
+    def test_exact_plan_passes(self):
+        result = G.validate_p3a5(p3a5_plan(), RENDERED)
+        self.assertEqual((result["mode"], result["creates"], result["changes"], result["destroys"]), ("p3a5", 0, 6, 0))
+        self.assertEqual(G.validate_p3a5(p3a3_stale_role(p3a5_plan()), RENDERED)["result"], "PASS")
+
+    def test_every_mode_stays_exact(self):
+        self.reject(lambda p: None, "P3A3 exact updates", plan_factory=p3a4_plan)
+        self.reject(lambda p: None, "P3A3 exact updates", plan_factory=p3a3_plan)
+        for validate in (lambda p: G.validate_p3a3(p, RENDERED), lambda p: G.validate_p3a4(p, RENDERED)):
+            with self.assertRaises(G.Rejected) as caught:
+                validate(p3a5_plan())
+            self.assertEqual(str(caught.exception), "P3A3 exact updates")
+
+    def test_unexpected_changes(self):
+        for other in ('aws_sfn_state_machine.runtime["ready_check"]', "aws_iam_role_policy.runtime_eip_writer", "aws_iam_role_policy.runtime_orchestrator", ORIGINAL.P3A2_GROUP, ORIGINAL.P3A2_TEMPLATE,
+                      'aws_scheduler_schedule.runtime_orchestration["day_close"]', 'aws_scheduler_schedule.runtime_orchestration["origin_guard_tick"]', "aws_instance.demo"):
+            self.reject(lambda p, a=other: self.change(p, a).update(actions=["update"]), "P3A3 exact updates")
+        for address in sorted(G.P3A3_CHANGED | G.P3A5_COMMANDLESS):
+            self.reject(lambda p, a=address: self.change(p, a).update(actions=["no-op"]), "P3A3 exact updates")
+        self.reject(lambda p: p["output_changes"]["ecs_spot_launch_template_version"].update(actions=["update"]), "P3A3 output changed")
+
+    def test_day_close(self):
+        c = self.CLOSE
+        self.reject(lambda p: self.change(p, c).update(actions=["delete", "create"]), "P3A3 update action")
+        self.reject(lambda p: self.change(p, c)["before"].update(name="stale"), "P3A3 update not bound")
+        self.reject(lambda p: self.change(p, c)["after_unknown"].update(revision_id=True), "P3A3 update unknown")
+        self.reject(lambda p: self.change(p, c)["after"].update(publish=True), "P3A3 machine changed fields")
+        self.reject(lambda p: self.change(p, c)["after"].update(role_arn="arn:aws:iam::000000000000:role/other"), "P3A3 machine changed fields")
+        self.reject(lambda p: self.change(p, c)["after"].update(definition=json.dumps({"States": {}})), "P3A3 machine reviewed definition")
+        definition = json.loads(RENDERED["resources"][c]["definition"])
+        definition["States"]["Extra"] = {"Type": "Task", "Resource": "arn:aws:states:::aws-sdk:ssm:sendCommand", "Arguments": {"DocumentName": '{% "ec-portfolio-demo-od-readiness" %}', "DocumentVersion": "2"}}
+        source = copy.deepcopy(RENDERED)
+        source["resources"][c]["definition"] = json.dumps(definition)
+        self.reject(lambda p: self.change(p, c)["after"].update(definition=source["resources"][c]["definition"]), "P3A3 commandless machine sends a command", rendered=source)
+
+    def test_earlier_checks_still_run(self):
+        self.reject(lambda p: self.change(p, "aws_ssm_document.od_readiness")["after"].update(content="OTHER"), "P3A3 document reviewed content")
+        self.reject(lambda p: configuration(p, "aws_sfn_state_machine.runtime").pop("depends_on"), "P3A3 document ordering")
+        self.reject(lambda p: self.change(p, self.GUARD)["after"].update(definition=json.dumps({"States": {}})), "P3A3 machine reviewed definition")
+
+    def test_real_source_keeps_day_close_commandless(self):
+        self.assertEqual(G.p3a3_pins(json.loads(RENDERED["resources"][self.CLOSE]["definition"])), [])
+
+    def test_entry_point(self):
+        entry = EntryTests("test_p3a3_mode_runs_its_own_validation")
+        entry.setUp()
+        with tempfile.TemporaryDirectory() as temporary:
+            plan = p3a5_plan()
+            entry.show_plan = plan
+            saved, path = entry.files(temporary, plan)
+            code, out, err = entry.call("p3a5", str(saved), str(path), ACCOUNT_SHA)
+            self.assertEqual(code, 0, err)
+            self.assertEqual((json.loads(out)["mode"], json.loads(out)["changes"]), ("p3a5", 6))
+            for other in ("p3a3", "p3a4"):
+                code, out, err = entry.call(other, str(saved), str(path), ACCOUNT_SHA)
+                self.assertEqual(code, 1)
+                self.assertIn("REJECT P3A3 exact updates", err)
+
+
 def suite():
     return unittest.TestSuite([unittest.defaultTestLoader.loadTestsFromTestCase(FixtureTests),
                                unittest.defaultTestLoader.loadTestsFromTestCase(RevisionTests),
@@ -1525,6 +1614,7 @@ def suite():
                                unittest.defaultTestLoader.loadTestsFromTestCase(P3a2FirstRefreshTests),
                                unittest.defaultTestLoader.loadTestsFromTestCase(P3a3Tests),
                                unittest.defaultTestLoader.loadTestsFromTestCase(P3a4Tests),
+                               unittest.defaultTestLoader.loadTestsFromTestCase(P3a5Tests),
                                unittest.defaultTestLoader.loadTestsFromTestCase(EntryTests)])
 
 
@@ -1549,6 +1639,11 @@ SCOPE_MUTATIONS = [
     ("document: stored permissions before", 'changed == {"permissions"} and before.get("permissions") is None and', 'changed == {"permissions"} and'),
     ("document: any value after", 'after.get("permissions") == {} and after.get("name")', 'after.get("name")'),
     ("document: any name", 'and after.get("name") == rule["empty_permissions_document"], "PG4 document permissions")', ', "PG4 document permissions")'),
+    ("the p3a5 entry runs the p3a4 check", 'result = validate_p3a5(plan, exporter.export(context))', 'result = validate_p3a4(plan, exporter.export(context))'),
+    ("the p3a5 mode has no entry", 'elif mode == "p3a5":', 'elif mode == "never":'),
+    ("the p3a5 mode omits day_close", 'P3A5_COMMANDLESS = P3A4_COMMANDLESS | {\'aws_sfn_state_machine.runtime["day_close"]\'}', 'P3A5_COMMANDLESS = P3A4_COMMANDLESS'),
+    ("the p3a5 mode omits the guard", 'return validate_p3a3(plan, rendered, P3A5_COMMANDLESS, "p3a5")', 'return validate_p3a3(plan, rendered, P3A5_COMMANDLESS - P3A4_COMMANDLESS, "p3a5")'),
+    ("the p3a4 mode accepts day_close", 'return validate_p3a3(plan, rendered, P3A4_COMMANDLESS, "p3a4")', 'return validate_p3a3(plan, rendered, P3A5_COMMANDLESS, "p3a4")'),
     ("the p3a4 entry runs the p3a3 check", 'result = validate_p3a4(plan, exporter.export(context))', 'result = validate_p3a3(plan, exporter.export(context))'),
     ("the p3a4 mode has no entry", 'elif mode == "p3a4":', 'elif mode == "never":'),
     ("the p3a4 mode allows no guard", 'return validate_p3a3(plan, rendered, P3A4_COMMANDLESS, "p3a4")', 'return validate_p3a3(plan, rendered, frozenset(), "p3a4")'),

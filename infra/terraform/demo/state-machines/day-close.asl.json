@@ -88,7 +88,8 @@
         "commandId": "",
         "event": "{% $exists($request.event) ? $request.event : {} %}",
         "nowJst": "{% $fromMillis($millis(), '[Y0001]-[M01]-[D01]T[H01]:[m01]:[s01]', '+0900') %}",
-        "dayKey": "{% 'day#' & $fromMillis($millis(), '[Y0001]-[M01]-[D01]', '+0900') %}"
+        "dayKey": "{% 'day#' & $fromMillis($millis(), '[Y0001]-[M01]-[D01]', '+0900') %}",
+        "ownsClose": false
       },
       "Next": "ValidateInput"
     },
@@ -398,7 +399,7 @@
           "ErrorEquals": [
             "States.ALL"
           ],
-          "Next": "Failed"
+          "Next": "ReleaseFailed"
         }
       ],
       "Next": "EndChoice",
@@ -806,10 +807,13 @@
                 },
                 ":close": {
                   "S": "day-close"
+                },
+                ":me": {
+                  "S": "{% $states.context.Execution.Id %}"
                 }
               },
-              "ConditionExpression": "attribute_exists(enabled) AND enabled = :yes AND #scope = :scope AND approvalRef = :approval AND (#scope = :production OR (#scope = :rehearsal AND armedUntil = :armedUntil AND armedUntil > :nowUtc)) AND #state IN (:s0, :s1, :s2, :s3, :s4, :s5, :s6) AND :currentRedrive = :zero AND :writeUntil > :nowMs",
-              "UpdateExpression": "SET #state = :close"
+              "ConditionExpression": "attribute_exists(enabled) AND enabled = :yes AND #scope = :scope AND approvalRef = :approval AND (#scope = :production OR (#scope = :rehearsal AND armedUntil = :armedUntil AND armedUntil > :nowUtc)) AND #state IN (:s0, :s1, :s2, :s3, :s4, :s5, :s6) AND :currentRedrive = :zero AND :writeUntil > :nowMs AND (#state <> :close OR attribute_not_exists(closeUntil) OR closeUntil < :nowMs)",
+              "UpdateExpression": "SET #state = :close, closeOwner = :me, closeUntil = :writeUntil"
             }
           },
           {
@@ -830,11 +834,14 @@
           "ErrorEquals": [
             "States.ALL"
           ],
-          "Next": "Failed"
+          "Next": "ReadCloseOutcome"
         }
       ],
       "Next": "BootstrapGate",
-      "TimeoutSeconds": 60
+      "TimeoutSeconds": 60,
+      "Assign": {
+        "ownsClose": true
+      }
     },
     "BootstrapGate": {
       "Type": "Choice",
@@ -997,7 +1004,7 @@
           "Next": "WaitLease"
         }
       ],
-      "Default": "Failed"
+      "Default": "Failure"
     },
     "WaitLease": {
       "Type": "Wait",
@@ -1803,7 +1810,7 @@
           "ErrorEquals": [
             "States.ALL"
           ],
-          "Next": "Failed"
+          "Next": "ReleaseFailed"
         }
       ],
       "Next": "WaitPark",
@@ -1859,7 +1866,7 @@
           "Next": "WaitPark"
         }
       ],
-      "Default": "Failed"
+      "Default": "Failure"
     },
     "ReacquireClose": {
       "Type": "Task",
@@ -1972,7 +1979,7 @@
           "ErrorEquals": [
             "States.ALL"
           ],
-          "Next": "Failed"
+          "Next": "Failure"
         }
       ],
       "Next": "RdsStopChoice",
@@ -2305,7 +2312,7 @@
           "ErrorEquals": [
             "States.ALL"
           ],
-          "Next": "Failed"
+          "Next": "ReleaseFailed"
         }
       ],
       "Next": "NightWait",
@@ -2472,7 +2479,7 @@
           "ErrorEquals": [
             "States.ALL"
           ],
-          "Next": "Failed"
+          "Next": "Failure"
         }
       ],
       "Next": "FinalRead",
@@ -2772,7 +2779,7 @@
           "Next": "FinalInvariant"
         }
       ],
-      "Default": "Failed"
+      "Default": "Failure"
     },
     "FinalInvariant": {
       "Type": "Choice",
@@ -2955,11 +2962,118 @@
       "Type": "Choice",
       "Choices": [
         {
-          "Condition": "{% $failedMode.state.S in ['failover-prep','failback','day-close'] %}",
+          "Condition": "{% $ownsClose %}",
           "Next": "ReadFailureLease"
         }
       ],
-      "Default": "Release"
+      "Default": "Failed"
+    },
+    "ReadFailureLease": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:getItem",
+      "Arguments": {
+        "TableName": "${table_name}",
+        "Key": {
+          "pk": {
+            "S": "lock#runtime"
+          }
+        },
+        "ConsistentRead": true
+      },
+      "Next": "FailureLeaseChoice",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "failureLease": "{% $exists($states.result.Item) ? $states.result.Item : {} %}"
+      },
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failed"
+        }
+      ]
+    },
+    "FailureLeaseChoice": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Condition": "{% $failureLease.owner.S=$states.context.Execution.Id and $failureLease.lockToken.S=$token and $failedMode.state.S='day-close' %}",
+          "Next": "MarkDegraded"
+        },
+        {
+          "Condition": "{% $failureLease.owner.S=$states.context.Execution.Id and $failureLease.lockToken.S=$token %}",
+          "Next": "Release"
+        },
+        {
+          "Condition": "{% ($not($exists($failureLease.pk)) or $number($failureLease.expiresAt.N)<$millis()) and $failedMode.state.S='day-close' %}",
+          "Next": "ReacquireFailure"
+        }
+      ],
+      "Default": "Failed"
+    },
+    "ReadCloseOutcome": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:getItem",
+      "Arguments": {
+        "TableName": "${table_name}",
+        "Key": {
+          "pk": {
+            "S": "mode"
+          }
+        },
+        "ConsistentRead": true
+      },
+      "Next": "CloseOutcome",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "closeRead": "{% $exists($states.result.Item) ? $states.result.Item : {} %}"
+      },
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failed"
+        }
+      ]
+    },
+    "CloseOutcome": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Condition": "{% $closeRead.state.S='day-close' and $closeRead.closeOwner.S=$states.context.Execution.Id %}",
+          "Next": "CloseConfirmed"
+        }
+      ],
+      "Default": "Failed"
+    },
+    "CloseConfirmed": {
+      "Type": "Pass",
+      "Assign": {
+        "ownsClose": true
+      },
+      "Next": "BootstrapGate"
     },
     "MarkDegraded": {
       "Type": "Task",
@@ -3022,22 +3136,16 @@
                   "N": "{% $string($millis()) %}"
                 },
                 ":s0": {
-                  "S": "failover-prep"
-                },
-                ":s1": {
-                  "S": "failback"
+                  "S": "day-close"
                 },
                 ":newState": {
                   "S": "degraded"
                 },
                 ":updated": {
                   "N": "{% $string($millis()) %}"
-                },
-                ":s2": {
-                  "S": "day-close"
                 }
               },
-              "ConditionExpression": "attribute_exists(enabled) AND enabled = :yes AND #scope = :scope AND approvalRef = :approval AND (#scope = :production OR (#scope = :rehearsal AND armedUntil = :armedUntil AND armedUntil > :nowUtc)) AND #state IN (:s0, :s1, :s2) AND :currentRedrive = :zero AND :writeUntil > :nowMs",
+              "ConditionExpression": "attribute_exists(enabled) AND enabled = :yes AND #scope = :scope AND approvalRef = :approval AND (#scope = :production OR (#scope = :rehearsal AND armedUntil = :armedUntil AND armedUntil > :nowUtc)) AND #state IN (:s0) AND :currentRedrive = :zero AND :writeUntil > :nowMs",
               "ExpressionAttributeNames": {
                 "#scope": "scope",
                 "#state": "state"
@@ -3098,56 +3206,6 @@
       "Next": "Release",
       "TimeoutSeconds": 60
     },
-    "ReadFailureLease": {
-      "Type": "Task",
-      "Resource": "arn:aws:states:::dynamodb:getItem",
-      "Arguments": {
-        "TableName": "${table_name}",
-        "Key": {
-          "pk": {
-            "S": "lock#runtime"
-          }
-        },
-        "ConsistentRead": true
-      },
-      "Next": "FailureLeaseChoice",
-      "Retry": [
-        {
-          "ErrorEquals": [
-            "States.TaskFailed"
-          ],
-          "IntervalSeconds": 2,
-          "MaxAttempts": 2,
-          "BackoffRate": 2
-        }
-      ],
-      "Assign": {
-        "failureLease": "{% $exists($states.result.Item) ? $states.result.Item : {} %}"
-      },
-      "TimeoutSeconds": 60,
-      "Catch": [
-        {
-          "ErrorEquals": [
-            "States.ALL"
-          ],
-          "Next": "Failed"
-        }
-      ]
-    },
-    "FailureLeaseChoice": {
-      "Type": "Choice",
-      "Choices": [
-        {
-          "Condition": "{% $failureLease.owner.S=$states.context.Execution.Id and $failureLease.lockToken.S=$token %}",
-          "Next": "MarkDegraded"
-        },
-        {
-          "Condition": "{% $not($exists($failureLease.pk)) or $number($failureLease.expiresAt.N)<$millis() %}",
-          "Next": "ReacquireFailure"
-        }
-      ],
-      "Default": "Release"
-    },
     "ReacquireFailure": {
       "Type": "Task",
       "Comment": "Atomic arming/mode/maintenance and lease fence; TTL is never authorization.",
@@ -3173,7 +3231,7 @@
                   "S": "mode"
                 }
               },
-              "ConditionExpression": "attribute_exists(enabled) AND enabled = :yes AND #scope = :scope AND approvalRef = :approval AND (#scope = :production OR (#scope = :rehearsal AND armedUntil = :armedUntil AND armedUntil > :nowUtc)) AND #state IN (:s0, :s1, :s2) AND :currentRedrive = :zero AND :writeUntil > :nowMs",
+              "ConditionExpression": "attribute_exists(enabled) AND enabled = :yes AND #scope = :scope AND approvalRef = :approval AND (#scope = :production OR (#scope = :rehearsal AND armedUntil = :armedUntil AND armedUntil > :nowUtc)) AND #state IN (:s0) AND :currentRedrive = :zero AND :writeUntil > :nowMs",
               "ExpressionAttributeNames": {
                 "#scope": "scope",
                 "#state": "state"
@@ -3213,12 +3271,6 @@
                   "N": "{% $string($millis()) %}"
                 },
                 ":s0": {
-                  "S": "failover-prep"
-                },
-                ":s1": {
-                  "S": "failback"
-                },
-                ":s2": {
                   "S": "day-close"
                 }
               }
@@ -3270,6 +3322,11 @@
       ],
       "Next": "MarkDegraded",
       "TimeoutSeconds": 60
+    },
+    "ReleaseFailed": {
+      "Type": "Fail",
+      "Error": "Runtime.ReleaseFailed",
+      "Cause": "The lease of this close could not be released, for example under maintenance, without arming or past its window. It stays until it expires. See the README."
     }
   }
 }
