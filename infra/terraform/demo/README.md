@@ -1236,6 +1236,73 @@ scripts/cold-standby-plan-gate.sh verify "$PRIVATE_DIR/p3a4.tfplan" <saved_plan_
 
 A revert and an apply of the definitions. The mode and day records stay compatible: the extra `orphanClearedAt` attribute is not read.
 
+## Phase 6C-5c P3-a5: day-close ownership and lease cleanup
+
+Applied together with P3-a3 and P3-a4, neither of which has reached AWS yet. Three defects, reproduced by replay on `dcd8120`:
+
+| Defect | Before |
+| --- | --- |
+| A read error before `CloseMode`, during a boot wait | marked the live prepare degraded |
+| `FinalSnapshotGate` not matching | ended in `Failed` holding the lease for up to 160 minutes |
+| `CloseMode` committed, response lost | ended in `Failed` with the mode `day-close` and the group, OD and the EIP untouched |
+
+### Ownership
+
+A close owns the mode from the moment its `CloseMode` commits, and only then.
+
+```
+Before: CloseMode not committed -> no lease, no transition -> Failure -> Failed, no write
+After:  CloseMode committed     -> ownsClose -> Failure -> own lease: MarkDegraded -> Release -> Failed
+                                                        -> free lease: ReacquireFailure -> MarkDegraded -> Release -> Failed
+                                                        -> another run's live lease: Failed, nothing touched
+```
+
+Both layers enforce it: `FailureModeChoice` and `FailureLeaseChoice` read `$ownsClose` and the mode, and the `MarkDegraded` and `ReacquireFailure` transactions accept only `day-close`.
+
+**A lost response.** `CloseMode` writes `closeOwner` and `closeUntil` in the same transaction as the mode, so the record exists only if this execution's write committed. On an error it reads the mode consistently: its own `closeOwner` proves the commit and the close continues; anything else, or an unreadable answer, is `Failed` with no write. Nothing is assumed.
+
+**Duplicates.** A close inside another's `closeUntil` is refused by `CloseMode` itself, so it cannot overwrite the owner. The same run key stays refused by `run#`. After `closeUntil` a later close can take over a dead one, as the next night's close could before.
+
+### Failure path
+
+Every stop after the mode is owned goes through `Failure`: `BootstrapBusy`, `ParkChoice`, `FinalSnapshotGate`, `FinalInvariant`, reads and writes, and `ReacquireClose` and `ReacquireFinal`. `OffMode` still runs only after `FinalSnapshotGate` and `FinalInvariant` both pass.
+
+A failed release is `Runtime.ReleaseFailed`, never a success. All cleanup transactions keep the fence, so under maintenance, without arming or past the write window the lease stays until it expires: the fence wins over the cleanup.
+
+### What stays manual
+
+A close can end with mode `day-close`, which `day-open` does not accept. No automatic path covers it before the next night's close:
+
+| Condition | Result | Lease |
+| --- | --- | --- |
+| Maintenance or arming off during the close | `Runtime.Failed` or `Runtime.ReleaseFailed` | held up to 160 minutes if taken |
+| Another run's live lease when it fails | `Runtime.Failed`, nothing touched | that run's |
+| `ReadFailureMode` or `ReadFailureLease` failing | `Runtime.Failed` | held up to 160 minutes if taken |
+| `CloseMode` outcome unreadable | `Runtime.Failed`, no further write | none |
+
+Both errors reach the alert topic. Check the execution history and the hosts, then set the state with the Operator permission set, or let the next night's close take over after `closeUntil`.
+
+### Plan delta
+
+Expected, not from a real plan:
+
+```
+Plan: 0 to add, 6 to change, 0 to destroy.
+```
+
+The five updates of P3-a4 and `aws_sfn_state_machine.runtime["day_close"]`, in `definition` only. `ready_check`, the documents' content beyond P3-a3, `*.tf` and IAM do not change: `UpdateExistingMode` already allows `dynamodb:UpdateItem` on `mode`.
+
+The gate mode is `p3a5`. It runs every earlier check and adds exactly `day_close`: only its `definition` differs, it equals the reviewed render, and it sends no command. `p3a3` and `p3a4` still accept exactly four and five, so they reject this plan.
+
+```sh
+scripts/cold-standby-plan-gate.sh p3a5 "$PRIVATE_DIR/p3a5.tfplan" "$PRIVATE_DIR/p3a5.plan.json" <sha256 of the 12-digit account id>
+scripts/cold-standby-plan-gate.sh verify "$PRIVATE_DIR/p3a5.tfplan" <saved_plan_sha256> <source_commit>
+```
+
+### Rollback
+
+A revert and an apply of the definitions. The extra `closeOwner` and `closeUntil` attributes on `mode` are not read by earlier definitions.
+
 ## Local validation
 
 Run static checks in the isolated code worktree without AWS credentials or runtime input files:

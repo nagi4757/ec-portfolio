@@ -81,10 +81,13 @@ P3A3_DRIFT_RULES = ADDRESSES["P3A3_DRIFT_RULES"]
 # P3-a4 is applied together with P3-a3: the same exact updates, and origin_guard, which
 # sends no command and pins no document.
 P3A4_COMMANDLESS = {'aws_sfn_state_machine.runtime["origin_guard"]'}
+# P3-a5 joins them with day_close, which sends no command either.
+P3A5_COMMANDLESS = P3A4_COMMANDLESS | {'aws_sfn_state_machine.runtime["day_close"]'}
 USAGE = ("usage: cold-standby-plan-gate.sh p3a <saved.tfplan> <plan.json> <approved-account-sha256>\n"
          "       cold-standby-plan-gate.sh p3a2 <saved.tfplan> <plan.json> <approved-account-sha256>\n"
          "       cold-standby-plan-gate.sh p3a3 <saved.tfplan> <plan.json> <approved-account-sha256>\n"
          "       cold-standby-plan-gate.sh p3a4 <saved.tfplan> <plan.json> <approved-account-sha256>\n"
+         "       cold-standby-plan-gate.sh p3a5 <saved.tfplan> <plan.json> <approved-account-sha256>\n"
          "       cold-standby-plan-gate.sh verify <saved.tfplan> <saved-plan-sha256> <source-commit>")
 
 
@@ -622,6 +625,10 @@ def validate_p3a4(plan, rendered):
     return validate_p3a3(plan, rendered, P3A4_COMMANDLESS, "p3a4")
 
 
+def validate_p3a5(plan, rendered):
+    return validate_p3a3(plan, rendered, P3A5_COMMANDLESS, "p3a5")
+
+
 def regular_file(value, code):
     path = Path(value)
     check(path.is_file() and not path.is_symlink(), code)
@@ -668,6 +675,8 @@ def gate(saved_value, plan_value, approved_account_sha, mode="p3a"):
         result = validate_p3a3(plan, exporter.export(context))
     elif mode == "p3a4":
         result = validate_p3a4(plan, exporter.export(context))
+    elif mode == "p3a5":
+        result = validate_p3a5(plan, exporter.export(context))
     else:
         result = validate(plan, exporter.export(context))
     check(sha(saved) == saved_sha and sha(path) == plan_sha, "PG0 plan changed during the gate")
@@ -688,7 +697,7 @@ def verify(saved_value, saved_sha, commit):
 
 
 def main(argv):
-    if len(argv) != 5 or argv[1] not in ("p3a", "p3a2", "p3a3", "p3a4", "verify"):
+    if len(argv) != 5 or argv[1] not in ("p3a", "p3a2", "p3a3", "p3a4", "p3a5", "verify"):
         print(USAGE, file=sys.stderr)
         return 2
     try:
