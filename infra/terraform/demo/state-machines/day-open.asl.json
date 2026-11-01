@@ -3898,7 +3898,7 @@
       "Type": "Choice",
       "Choices": [
         {
-          "Condition": "{% $failedMode.state.S in ['failover-prep','failback','day-close'] %}",
+          "Condition": "{% false %}",
           "Next": "ReadFailureLease"
         }
       ],
@@ -3975,12 +3975,9 @@
                 },
                 ":updated": {
                   "N": "{% $string($millis()) %}"
-                },
-                ":s2": {
-                  "S": "day-close"
                 }
               },
-              "ConditionExpression": "attribute_exists(enabled) AND enabled = :yes AND #scope = :scope AND approvalRef = :approval AND (#scope = :production OR (#scope = :rehearsal AND armedUntil = :armedUntil AND armedUntil > :nowUtc)) AND #state IN (:s0, :s1, :s2) AND :currentRedrive = :zero AND :writeUntil > :nowMs",
+              "ConditionExpression": "attribute_exists(enabled) AND enabled = :yes AND #scope = :scope AND approvalRef = :approval AND (#scope = :production OR (#scope = :rehearsal AND armedUntil = :armedUntil AND armedUntil > :nowUtc)) AND #state IN (:s0, :s1) AND :currentRedrive = :zero AND :writeUntil > :nowMs",
               "ExpressionAttributeNames": {
                 "#scope": "scope",
                 "#state": "state"
@@ -4384,7 +4381,7 @@
           "ErrorEquals": [
             "States.ALL"
           ],
-          "Next": "Failed"
+          "Next": "Failure"
         }
       ]
     },
@@ -4795,7 +4792,7 @@
                   "S": "mode"
                 }
               },
-              "ConditionExpression": "attribute_exists(enabled) AND enabled = :yes AND #scope = :scope AND approvalRef = :approval AND (#scope = :production OR (#scope = :rehearsal AND armedUntil = :armedUntil AND armedUntil > :nowUtc)) AND #state IN (:s0, :s1, :s2) AND :currentRedrive = :zero AND :writeUntil > :nowMs",
+              "ConditionExpression": "attribute_exists(enabled) AND enabled = :yes AND #scope = :scope AND approvalRef = :approval AND (#scope = :production OR (#scope = :rehearsal AND armedUntil = :armedUntil AND armedUntil > :nowUtc)) AND #state IN (:s0, :s1) AND :currentRedrive = :zero AND :writeUntil > :nowMs",
               "ExpressionAttributeNames": {
                 "#scope": "scope",
                 "#state": "state"
@@ -4839,9 +4836,6 @@
                 },
                 ":s1": {
                   "S": "failback"
-                },
-                ":s2": {
-                  "S": "day-close"
                 }
               }
             }

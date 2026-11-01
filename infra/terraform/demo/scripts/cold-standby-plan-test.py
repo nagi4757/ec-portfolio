@@ -1121,7 +1121,7 @@ class EntryTests(unittest.TestCase):
             saved, path = self.files(temporary, plan)
             code, out, err = self.call("p3a3", str(saved), str(path), ACCOUNT_SHA)
             self.assertEqual(code, 1)
-            self.assertIn("REJECT P3A3 exact", err)
+            self.assertIn("REJECT P3A3 exact updates", err)
 
     def test_p3a2_mode_records_the_same_evidence_and_rejects_the_p3a_plan(self):
         self.show_plan = p3a2_plan()
@@ -1275,11 +1275,11 @@ class P3a3Tests(unittest.TestCase):
 
     def test_exact_changes(self):
         for address in sorted(G.P3A3_CHANGED):
-            self.reject(lambda p, a=address: self.change(p, a).update(actions=["no-op"]), "P3A3 exact 4 updates")
+            self.reject(lambda p, a=address: self.change(p, a).update(actions=["no-op"]), "P3A3 exact updates")
         for other in ('aws_sfn_state_machine.runtime["origin_guard"]', 'aws_sfn_state_machine.runtime["ready_check"]', 'aws_sfn_state_machine.runtime["day_close"]',
                       "aws_iam_role_policy.runtime_orchestrator", ORIGINAL.P3A2_TEMPLATE, ORIGINAL.P3A2_GROUP, 'aws_scheduler_schedule.runtime_orchestration["day_open"]'):
-            self.reject(lambda p, a=other: self.change(p, a).update(actions=["update"]), "P3A3 exact 4 updates")
-        self.reject(lambda p: p["resource_changes"].append({"address": "aws_iam_role_policy.extra", "mode": "managed", "type": "aws_iam_role_policy", "change": {"actions": ["create"], "before": None, "after": {}, "after_unknown": {}}}), "P3A3 exact 4 updates")
+            self.reject(lambda p, a=other: self.change(p, a).update(actions=["update"]), "P3A3 exact updates")
+        self.reject(lambda p: p["resource_changes"].append({"address": "aws_iam_role_policy.extra", "mode": "managed", "type": "aws_iam_role_policy", "change": {"actions": ["create"], "before": None, "after": {}, "after_unknown": {}}}), "P3A3 exact updates")
 
     def test_root_and_existing_resources(self):
         def remove_prior(p, address):
@@ -1431,12 +1431,100 @@ class P3a3Tests(unittest.TestCase):
             self.assertEqual({name for name, _ in pins}, set(G.P3A3_DOCUMENTS.values()))
 
 
+def p3a4_plan():
+    """The integrated P3-a3 and P3-a4 plan: the four updates and origin_guard."""
+    plan = p3a3_plan()
+    address = next(iter(ORIGINAL.P3A4_COMMANDLESS))
+    definition = RENDERED["resources"][address]["definition"]
+    stored = {**after(plan, address), "definition": definition.replace("P3-a real", "P3-a old")}
+    bind_refreshed(plan, address, stored)
+    resource(plan, address)["change"].update(actions=["update"], after={**stored, "definition": definition}, after_unknown={"tags_all": {}})
+    p3a3_sync(plan)
+    return plan
+
+
+class P3a4Tests(unittest.TestCase):
+    """validate_p3a4 on the exact 0 / 5 / 0 plan. The four updates share the p3a3 checks."""
+    GUARD = 'aws_sfn_state_machine.runtime["origin_guard"]'
+
+    def reject(self, mutate, prefix, rendered=None, plan_factory=p3a4_plan):
+        global FIXTURE_CHECKS
+        FIXTURE_CHECKS += 1
+        plan = plan_factory()
+        mutate(plan)
+        p3a3_sync(plan)
+        with self.assertRaises(G.Rejected) as caught:
+            G.validate_p3a4(plan, rendered or RENDERED)
+        self.assertTrue(str(caught.exception).startswith(prefix), str(caught.exception))
+
+    def change(self, plan, address):
+        return resource(plan, address)["change"]
+
+    def test_exact_plan_passes(self):
+        result = G.validate_p3a4(p3a4_plan(), RENDERED)
+        self.assertEqual((result["mode"], result["creates"], result["changes"], result["destroys"]), ("p3a4", 0, 5, 0))
+        self.assertEqual(G.validate_p3a4(p3a3_stale_role(p3a4_plan()), RENDERED)["result"], "PASS")
+
+    def test_modes_stay_exact(self):
+        self.reject(lambda p: None, "P3A3 exact updates", plan_factory=p3a3_plan)
+        with self.assertRaises(G.Rejected) as caught:
+            G.validate_p3a3(p3a4_plan(), RENDERED)
+        self.assertEqual(str(caught.exception), "P3A3 exact updates")
+        for other in ('aws_sfn_state_machine.runtime["day_close"]', 'aws_sfn_state_machine.runtime["ready_check"]', "aws_iam_role_policy.runtime_eip_writer", "aws_iam_role_policy.runtime_orchestrator", 'aws_scheduler_schedule.runtime_orchestration["origin_guard_tick"]'):
+            self.reject(lambda p, a=other: self.change(p, a).update(actions=["update"]), "P3A3 exact updates")
+        for address in sorted(G.P3A3_CHANGED):
+            self.reject(lambda p, a=address: self.change(p, a).update(actions=["no-op"]), "P3A3 exact updates")
+
+    def test_every_p3a3_check_still_runs(self):
+        for address in sorted(G.P3A3_DOCUMENTS):
+            self.reject(lambda p, a=address: self.change(p, a)["after"].update(content="OTHER"), "P3A3 document reviewed content")
+            self.reject(lambda p, a=address: self.change(p, a)["after_unknown"].pop("hash"), "P3A3 update unknown")
+        self.reject(lambda p: configuration(p, "aws_sfn_state_machine.runtime").pop("depends_on"), "P3A3 document ordering")
+        source = copy.deepcopy(RENDERED)
+        pinned = 'aws_sfn_state_machine.runtime["od_standby"]'
+        source["resources"][pinned]["definition"] = source["resources"][pinned]["definition"].replace('"DocumentVersion": "2"', '"DocumentVersion": "1"')
+        self.reject(lambda p: self.change(p, pinned)["after"].update(definition=source["resources"][pinned]["definition"]), "P3A3 machine document pin", rendered=source)
+
+    def test_origin_guard(self):
+        g = self.GUARD
+        self.reject(lambda p: self.change(p, g).update(actions=["delete", "create"]), "P3A3 update action")
+        self.reject(lambda p: resource(p, g).update(previous_address="aws_x.old"), "P3A3 update import/move")
+        self.reject(lambda p: self.change(p, g)["before"].update(name="stale"), "P3A3 update not bound")
+        self.reject(lambda p: self.change(p, g)["after_unknown"].update(revision_id=True), "P3A3 update unknown")
+        self.reject(lambda p: self.change(p, g)["after"].update(publish=True), "P3A3 machine changed fields")
+        self.reject(lambda p: self.change(p, g)["after"].update(role_arn="arn:aws:iam::000000000000:role/other"), "P3A3 machine changed fields")
+        self.reject(lambda p: self.change(p, g)["after"].update(definition=json.dumps({"States": {}})), "P3A3 machine reviewed definition")
+        definition = json.loads(RENDERED["resources"][g]["definition"])
+        definition["States"]["Extra"] = {"Type": "Task", "Resource": "arn:aws:states:::aws-sdk:ssm:sendCommand", "Arguments": {"DocumentName": '{% "ec-portfolio-demo-od-readiness" %}', "DocumentVersion": "2"}}
+        source = copy.deepcopy(RENDERED)
+        source["resources"][g]["definition"] = json.dumps(definition)
+        self.reject(lambda p: self.change(p, g)["after"].update(definition=source["resources"][g]["definition"]), "P3A3 commandless machine sends a command", rendered=source)
+
+    def test_real_source_keeps_the_guard_commandless(self):
+        self.assertEqual(G.p3a3_pins(json.loads(RENDERED["resources"][self.GUARD]["definition"])), [])
+
+    def test_entry_point(self):
+        entry = EntryTests("test_p3a3_mode_runs_its_own_validation")
+        entry.setUp()
+        with tempfile.TemporaryDirectory() as temporary:
+            plan = p3a4_plan()
+            entry.show_plan = plan
+            saved, path = entry.files(temporary, plan)
+            code, out, err = entry.call("p3a4", str(saved), str(path), ACCOUNT_SHA)
+            self.assertEqual(code, 0, err)
+            self.assertEqual((json.loads(out)["mode"], json.loads(out)["changes"]), ("p3a4", 5))
+            code, out, err = entry.call("p3a3", str(saved), str(path), ACCOUNT_SHA)
+            self.assertEqual(code, 1)
+            self.assertIn("REJECT P3A3 exact updates", err)
+
+
 def suite():
     return unittest.TestSuite([unittest.defaultTestLoader.loadTestsFromTestCase(FixtureTests),
                                unittest.defaultTestLoader.loadTestsFromTestCase(RevisionTests),
                                unittest.defaultTestLoader.loadTestsFromTestCase(P3a2Tests),
                                unittest.defaultTestLoader.loadTestsFromTestCase(P3a2FirstRefreshTests),
                                unittest.defaultTestLoader.loadTestsFromTestCase(P3a3Tests),
+                               unittest.defaultTestLoader.loadTestsFromTestCase(P3a4Tests),
                                unittest.defaultTestLoader.loadTestsFromTestCase(EntryTests)])
 
 
@@ -1461,6 +1549,11 @@ SCOPE_MUTATIONS = [
     ("document: stored permissions before", 'changed == {"permissions"} and before.get("permissions") is None and', 'changed == {"permissions"} and'),
     ("document: any value after", 'after.get("permissions") == {} and after.get("name")', 'after.get("name")'),
     ("document: any name", 'and after.get("name") == rule["empty_permissions_document"], "PG4 document permissions")', ', "PG4 document permissions")'),
+    ("the p3a4 entry runs the p3a3 check", 'result = validate_p3a4(plan, exporter.export(context))', 'result = validate_p3a3(plan, exporter.export(context))'),
+    ("the p3a4 mode has no entry", 'elif mode == "p3a4":', 'elif mode == "never":'),
+    ("the p3a4 mode allows no guard", 'return validate_p3a3(plan, rendered, P3A4_COMMANDLESS, "p3a4")', 'return validate_p3a3(plan, rendered, frozenset(), "p3a4")'),
+    ("the p3a3 mode allows the guard", 'def validate_p3a3(plan, rendered, commandless=frozenset(), mode="p3a3"):', 'def validate_p3a3(plan, rendered, commandless=P3A4_COMMANDLESS, mode="p3a3"):'),
+    ("the changed set ignores the exact list", 'check(changed == P3A3_CHANGED | set(commandless), "P3A3 exact updates")', 'check(changed >= P3A3_CHANGED, "P3A3 exact updates")'),
     ("the p3a3 entry runs the p3a2 check", 'result = validate_p3a3(plan, exporter.export(context))', 'result = validate_p3a2(plan)'),
     ("the p3a3 entry runs the p3a check", 'elif mode == "p3a3":', 'elif mode == "never":'),
     ("the p3a3 mode ignores its rule", 'drift_check(plan, P3A3_DRIFT_RULES)', 'drift_check(plan)'),
@@ -1477,7 +1570,9 @@ SCOPE_MUTATIONS = [
     ("p3a3: only latest_version read", 'for key in ("default_version", "document_version", "latest_version")', 'for key in ("latest_version",)'),
     ("p3a3: shared document", 'check(before.get("name") == name and not before.get("permissions")', 'check(before.get("name") == name'),
     ("p3a3: another document name", 'check(before.get("name") == name and not before.get("permissions")', 'check(not before.get("permissions")'),
-    ("p3a3: machines may be unknown", 'before, after = p3a3_update(managed, prior, address, set())', 'before, after = p3a3_update(managed, prior, address, unknown_leaves(managed[address]["change"].get("after_unknown")))'),
+    ("p3a3: machines may be unknown", 'for address in P3A3_MACHINES:\n        before, after = p3a3_update(managed, prior, address, set())', 'for address in P3A3_MACHINES:\n        before, after = p3a3_update(managed, prior, address, unknown_leaves(managed[address]["change"].get("after_unknown")))'),
+    ("p3a4: the guard may be unknown", 'for address in commandless:\n        before, after = p3a3_update(managed, prior, address, set())', 'for address in commandless:\n        before, after = p3a3_update(managed, prior, address, unknown_leaves(managed[address]["change"].get("after_unknown")))'),
+    ("p3a4: the guard may send a command", 'check(p3a3_pins(definition) == [], "P3A3 commandless', 'check(True, "P3A3 commandless'),
 ]
 
 

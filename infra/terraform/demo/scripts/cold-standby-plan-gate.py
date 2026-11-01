@@ -78,9 +78,13 @@ P3A3_DOCUMENT_UNKNOWN = {"/default_version", "/document_version", "/hash", "/lat
 # The convergence after P3-a2 is never applied, so the stored role still lists the
 # deleted policy until the next apply. Only validate_p3a3 passes this rule.
 P3A3_DRIFT_RULES = ADDRESSES["P3A3_DRIFT_RULES"]
+# P3-a4 is applied together with P3-a3: the same exact updates, and origin_guard, which
+# sends no command and pins no document.
+P3A4_COMMANDLESS = {'aws_sfn_state_machine.runtime["origin_guard"]'}
 USAGE = ("usage: cold-standby-plan-gate.sh p3a <saved.tfplan> <plan.json> <approved-account-sha256>\n"
          "       cold-standby-plan-gate.sh p3a2 <saved.tfplan> <plan.json> <approved-account-sha256>\n"
          "       cold-standby-plan-gate.sh p3a3 <saved.tfplan> <plan.json> <approved-account-sha256>\n"
+         "       cold-standby-plan-gate.sh p3a4 <saved.tfplan> <plan.json> <approved-account-sha256>\n"
          "       cold-standby-plan-gate.sh verify <saved.tfplan> <saved-plan-sha256> <source-commit>")
 
 
@@ -558,19 +562,19 @@ def p3a3_pins(definition):
     return pins
 
 
-def validate_p3a3(plan, rendered):
+def validate_p3a3(plan, rendered, commandless=frozenset(), mode="p3a3"):
     plan_format_check(plan)
     changes = indexed(plan.get("resource_changes", []), "P3A3 changes")
     managed = {address: value for address, value in changes.items() if value.get("mode") == "managed"}
     changed = {address for address, value in managed.items() if value.get("change", {}).get("actions") != ["no-op"]}
-    check(changed == P3A3_CHANGED, "P3A3 exact 4 updates")
+    check(changed == P3A3_CHANGED | set(commandless), "P3A3 exact updates")
     prior = indexed(resources(plan.get("prior_state", {}).get("values", {}).get("root_module", {})), "P3A3 prior")
     prior_managed = {address: value for address, value in prior.items() if value.get("mode") == "managed"}
     check((EXISTING | NEW) - {P3A2_POLICY} <= set(prior_managed), "P3A3 wrong/incomplete root")
     check(set(managed) == set(prior_managed), "P3A3 all prior resources represented")
     check(P3A2_POLICY not in prior_managed, "P3A3 promotion policy returned")
     for address, resource in prior_managed.items():
-        if address in P3A3_CHANGED:
+        if address in changed:
             continue
         change = managed[address]["change"]
         check(change.get("before") == change.get("after") == resource.get("values"), "P3A3 existing changed " + address)
@@ -592,6 +596,12 @@ def validate_p3a3(plan, rendered):
         pins = p3a3_pins(definition)
         check(pins and all(version == P3A3_VERSION_AFTER for _, version in pins), "P3A3 machine document pin " + address)
         check({name for name, _ in pins} == set(P3A3_DOCUMENTS.values()), "P3A3 machine document coverage " + address)
+    for address in commandless:
+        before, after = p3a3_update(managed, prior, address, set())
+        check(p3a2_changed_keys(before, after) == {"definition"}, "P3A3 machine changed fields " + address)
+        definition = strict_json(after["definition"])
+        check(definition == strict_json(rendered["resources"][address]["definition"]), "P3A3 machine reviewed definition " + address)
+        check(p3a3_pins(definition) == [], "P3A3 commandless machine sends a command " + address)
 
     planned = indexed(resources(plan.get("planned_values", {}).get("root_module", {})), "P3A3 planned")
     check({a for a, r in planned.items() if r.get("mode") == "managed"} == set(managed), "P3A3 planned resource coverage")
@@ -604,8 +614,12 @@ def validate_p3a3(plan, rendered):
     check(isinstance(outputs, dict) and all(value.get("actions") == ["no-op"] and value.get("before") == value.get("after") and not value.get("after_unknown") for value in outputs.values()), "P3A3 output changed")
     check(plan.get("planned_values", {}).get("outputs", {}) == plan.get("prior_state", {}).get("values", {}).get("outputs", {}), "P3A3 output snapshot changed")
     drift_check(plan, P3A3_DRIFT_RULES)
-    return {"result": "PASS", "mode": "p3a3", "creates": 0, "changes": 4, "destroys": 0,
+    return {"result": "PASS", "mode": mode, "creates": 0, "changes": len(changed), "destroys": 0,
             "scope": "saved-plan gate only; apply still requires separate approval"}
+
+
+def validate_p3a4(plan, rendered):
+    return validate_p3a3(plan, rendered, P3A4_COMMANDLESS, "p3a4")
 
 
 def regular_file(value, code):
@@ -652,6 +666,8 @@ def gate(saved_value, plan_value, approved_account_sha, mode="p3a"):
         result = validate_p3a2(plan)
     elif mode == "p3a3":
         result = validate_p3a3(plan, exporter.export(context))
+    elif mode == "p3a4":
+        result = validate_p3a4(plan, exporter.export(context))
     else:
         result = validate(plan, exporter.export(context))
     check(sha(saved) == saved_sha and sha(path) == plan_sha, "PG0 plan changed during the gate")
@@ -672,7 +688,7 @@ def verify(saved_value, saved_sha, commit):
 
 
 def main(argv):
-    if len(argv) != 5 or argv[1] not in ("p3a", "p3a2", "p3a3", "verify"):
+    if len(argv) != 5 or argv[1] not in ("p3a", "p3a2", "p3a3", "p3a4", "verify"):
         print(USAGE, file=sys.stderr)
         return 2
     try:
