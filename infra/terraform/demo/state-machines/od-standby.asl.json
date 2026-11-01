@@ -2351,7 +2351,8 @@
         "odBootAt": "{% $odBootAt=0 ? $millis() : $odBootAt %}",
         "polls": 0,
         "attempts": 0,
-        "odReadinessRechecks": 0
+        "odReadinessRechecks": 0,
+        "odReadinessLeaseRetries": 0
       }
     },
     "ReleaseBoot": {
@@ -2716,7 +2717,7 @@
           "ErrorEquals": [
             "States.ALL"
           ],
-          "Next": "Failed"
+          "Next": "OdReadinessLeaseRetry"
         }
       ],
       "Next": "FenceOdReadiness",
@@ -9598,6 +9599,28 @@
         }
       ],
       "Default": "Failure"
+    },
+    "OdReadinessLeaseRetry": {
+      "Type": "Pass",
+      "Assign": {
+        "odReadinessLeaseRetries": "{% $odReadinessLeaseRetries+1 %}"
+      },
+      "Next": "OdReadinessLeaseRetryChoice"
+    },
+    "OdReadinessLeaseRetryChoice": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Condition": "{% $odReadinessLeaseRetries<6 and $millis()<$odBootAt+1200000 %}",
+          "Next": "OdReadinessLeaseWait"
+        }
+      ],
+      "Default": "Failure"
+    },
+    "OdReadinessLeaseWait": {
+      "Type": "Wait",
+      "Seconds": 20,
+      "Next": "ReacquireReadiness"
     },
     "ReadFailureLease": {
       "Type": "Task",

@@ -23,6 +23,8 @@ NOT_READY_OUTPUT = "['NOT_READY convergence-in-progress','NOT_READY convergence-
 OD_BOOT_DEADLINE = '$odBootAt+1200000'
 OD_READINESS_RECHECKS = 24
 OD_READINESS_RECHECK_SECONDS = 30
+OD_READINESS_LEASE_RETRIES = 6
+OD_READINESS_LEASE_RETRY_SECONDS = 20
 class Build:
  def __init__(self,name):
   self.name=name; self.s={}
@@ -361,7 +363,7 @@ def harden(b):
   s['RdsAvailable']['Choices'][0]['Condition']=E("$dbStatus='available' and $millis()<=$rdsWaitUntil")
   s['RdsAvailable']['Choices'][1]['Condition']=E("$dbStatus in ['starting','stopped'] and $polls<40 and $millis()<$rdsWaitUntil")
  if b.name=='od-standby':
-  s['StartOd']['Assign']={'odBootAt':E('$odBootAt=0 ? $millis() : $odBootAt'),'polls':0,'attempts':0,'odReadinessRechecks':0}
+  s['StartOd']['Assign']={'odBootAt':E('$odBootAt=0 ? $millis() : $odBootAt'),'polls':0,'attempts':0,'odReadinessRechecks':0,'odReadinessLeaseRetries':0}
   s['SsmOnlineChoice']['Choices'][1]['Condition']=E('$attempts<40 and $millis()<'+OD_BOOT_DEADLINE)
   s['OdReadinessChoice']['Choices'][0]['Condition']=E("$commandStatus='Success' and $commandCode=0 and $millis()<="+OD_BOOT_DEADLINE)
   s['OdReadinessChoice']['Choices'][1]['Condition']=E("$commandStatus in ['Pending','InProgress','Delayed'] and $polls<36 and $millis()<"+OD_BOOT_DEADLINE)
@@ -373,6 +375,12 @@ def harden(b):
   b.add('OdReadinessRecheck',{'Type':'Pass','Assign':{'odReadinessRechecks':E('$odReadinessRechecks+1')},'Next':'OdReadinessRecheckWait'})
   b.wait('OdReadinessRecheckWait',OD_READINESS_RECHECK_SECONDS,'OdReadinessRecheckGate')
   b.choice('OdReadinessRecheckGate',[('$millis()<'+OD_BOOT_DEADLINE,'OdReadiness')],'Failure')
+  # A guard signal can hold the lease for seconds as the host comes Online. Losing that race must not end the run with no
+  # cleanup: wait like BootstrapBusy, then take the Failure path. Each attempt re-checks arming, maintenance and mode.
+  s['ReacquireReadiness']['Catch']=[{'ErrorEquals':['States.ALL'],'Next':'OdReadinessLeaseRetry'}]
+  b.add('OdReadinessLeaseRetry',{'Type':'Pass','Assign':{'odReadinessLeaseRetries':E('$odReadinessLeaseRetries+1')},'Next':'OdReadinessLeaseRetryChoice'})
+  b.choice('OdReadinessLeaseRetryChoice',[(f'$odReadinessLeaseRetries<{OD_READINESS_LEASE_RETRIES} and $millis()<{OD_BOOT_DEADLINE}','OdReadinessLeaseWait')],'Failure')
+  b.wait('OdReadinessLeaseWait',OD_READINESS_LEASE_RETRY_SECONDS,'ReacquireReadiness')
  if b.name=='day-close':
   deadline="$toMillis($fromMillis($toMillis($states.context.Execution.StartTime),'[Y0001]-[M01]-[D01]','+0900') & 'T22:45:00+09:00')"
   s['NightRdsChoice']['Choices'][0]['Condition']=E("$dbStatus in ['stopping','stopped'] and ($mode.scope.S='rehearsal' or $millis()<="+deadline+")")

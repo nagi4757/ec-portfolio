@@ -54,7 +54,8 @@ property, is a failure.
 "Started this boot" is a positive `ExecMainStartTimestampMonotonic`. "Queued" is a
 positive `Job`: systemd holds the start job while the unit waits for
 `docker.service`, before the unit shows any activity. Not ready runs no later check
-and is not a pass.
+and is not a pass. The property format and the `Type=oneshot` transitions were read in
+the systemd v252 source; the version and values on the real host are NOT VERIFIED.
 
 | `Status` | `ResponseCode` | stdout | The workflow |
 | --- | --- | --- | --- |
