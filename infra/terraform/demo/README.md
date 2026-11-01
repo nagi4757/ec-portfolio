@@ -1110,7 +1110,7 @@ Recovery does not depend on the lost signals: `Reconcile` works from the holder 
 
 Re-acquiring on every cycle was replayed too. It records those signals, but adds 2 lease transactions per cycle and lets `origin-guard` flip the mode to `spot-active` and stop OD in the middle of a boot, which the promotion check otherwise does once at the end, with the proof available.
 
-**Known gap, not changed here (same on `c0f4156`):** a run that ends without `Failure` leaves `failover-prep`, and no tick acts on it (`Reconcile` ends in `Done`), so OD keeps running without the EIP until the day closes. It takes `SsmOnlineChoice` or `BootChoice` running out, a timed-out execution, a lease busy past the retry above, or maintenance or disarming during the run (the operator's case; the lease stays until it expires). Separately, a failure of `od-standby` during `day-close` overwrites that mode with `degraded`. Both need their own change before production arming.
+Two gaps found in this review are closed by [P3-a4](#phase-6c-5c-p3-a4-failover-recovery-safety).
 
 ### Plan delta
 
@@ -1149,6 +1149,78 @@ Read back both documents at version 2 and `Active`, with the content's SHA-256 e
 ### Rollback
 
 A revert and an apply: the definitions pin version 1 again, which still exists, and the documents move on to version 3 with the old content. No host runs either during the change.
+
+## Phase 6C-5c P3-a4: failover recovery safety
+
+Applied together with P3-a3, which has not reached AWS. Two defects, both present since P3-a and reproduced by replay on `c0f4156`.
+
+### Orphaned failover-prep
+
+A prepare that ended without `Failure` left mode `failover-prep`, and `Reconcile` has no branch for it: it ends in `Done`, so OD ran without the EIP until the day closed.
+
+**Direct failures.** `BootChoice` and `SsmOnlineChoice` running out now take `Failure`, like every other failure on that path: mode `degraded`, lease free, no EC2 or EIP write. The next tick asks to stop OD and then to prepare again, within the daily limit.
+
+**Detection.** It covers what cannot reach `Failure`: a timed-out execution, a lease busy past the retry, the `A1` path, and maintenance or disarming during the run. No runtime role can read an execution's status, and none is added. The evidence is what the run can no longer do:
+
+| Evidence | Proves | Does not prove |
+| --- | --- | --- |
+| `mode = failover-prep` | a prepare entered it | that the run is alive |
+| `odStartedAt` | the run that wrote it started no later; its write window ends within 2700 s of it, enforced by every fence and argument guard, and a redrive is refused | anything about a later run |
+| `lock#runtime` | exclusivity, atomically | absence does not mean no run: the boot wait holds no lease |
+| `run#` | the key was used | that the run finished |
+| `ready#` | a proof at a time | liveness; not used here |
+| arming, maintenance | whether a write may happen | liveness |
+
+The prepare is quiet 80 minutes after `odStartedAt`: 2700 s for `od-standby`, 1800 s for the `origin-guard` child it may have started last, and 300 s of margin. A test ties this to the Terraform windows.
+
+```
+Reconcile: failover-prep, holder is not OD, odStartedAt present, quiet
+  -> BootstrapOrphan -> Bootstrap (never takes a live lease; fences arming, maintenance, approval)
+  -> re-read holder and day: anything changed -> Release, no write
+  -> one transaction: mode failover-prep -> degraded, odStartedAt unchanged, orphanClearedAt recorded
+  -> Release. The next ticks use the existing paths
+```
+
+It makes no EC2, EIP or `StartInstances` call, and no attestation is read or written.
+
+| State past the quiet time | Result |
+| --- | --- |
+| EIP on OD | not cleared; the existing proof path runs, OD is not stopped |
+| EIP on Spot, OD running | `degraded`, then only stopping OD is asked; the EIP stays |
+| EIP on Spot, OD stopped | `degraded`, nothing starts |
+| no EIP holder, OD running or stopped | `degraded`, then stop and prepare, within the daily limit |
+| a live lease, of a dead or live run | nothing; the run fails in `BootstrapBusy` and a later tick retries |
+| arming off, maintenance | `NotArmed`, nothing; cleared by a later tick once it is back |
+| no `odStartedAt` today | `Runtime.ManualRecovery`, nothing |
+
+**What this cannot do.** It is time, not an observation of the run, so recovery is late: 80 minutes and up to 30 more for the tick, then the stop and the new boot. `TIMED_OUT` and `FAILED` already reach the alert topic, so an operator can act sooner.
+
+**Manual recovery.** Needed for `Runtime.ManualRecovery`, for the daily limit of 3 starts reached in `degraded` with no holder, and for a holder on OD whose proof keeps failing. Check the holder, the host and the failed execution's history, then set the state with the Operator permission set.
+
+### Day-close overwritten
+
+A failure in another workflow during a close moved `day-close` to `degraded`, so the waiting close could never take its lease. Only `day-close` itself, and the `park-od` child parking the address for it, may do that now. `FailureModeChoice` and the `MarkDegraded` and `ReacquireFailure` transactions all enforce it, so a change between the read and the write is refused too.
+
+### Plan delta
+
+Expected, not from a real plan:
+
+```
+Plan: 0 to add, 5 to change, 0 to destroy.
+```
+
+The four updates of P3-a3 and `aws_sfn_state_machine.runtime["origin_guard"]`, in `definition` only. `day_close` and `ready_check` do not change, the documents are as in P3-a3, and there is no IAM change: `CountDailySignals` already allows `dynamodb:UpdateItem` on `day#*` for the guard.
+
+The gate mode is `p3a4`. It runs every check of `p3a3` on the four updates and adds exactly `origin_guard`: only its `definition` differs, it equals the reviewed render, and it sends no command. `p3a3` still accepts exactly four, so it rejects this plan.
+
+```sh
+scripts/cold-standby-plan-gate.sh p3a4 "$PRIVATE_DIR/p3a4.tfplan" "$PRIVATE_DIR/p3a4.plan.json" <sha256 of the 12-digit account id>
+scripts/cold-standby-plan-gate.sh verify "$PRIVATE_DIR/p3a4.tfplan" <saved_plan_sha256> <source_commit>
+```
+
+### Rollback
+
+A revert and an apply of the definitions. The mode and day records stay compatible: the extra `orphanClearedAt` attribute is not read.
 
 ## Local validation
 

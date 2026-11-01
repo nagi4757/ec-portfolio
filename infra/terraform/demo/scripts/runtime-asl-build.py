@@ -25,6 +25,14 @@ OD_READINESS_RECHECKS = 24
 OD_READINESS_RECHECK_SECONDS = 30
 OD_READINESS_LEASE_RETRIES = 6
 OD_READINESS_LEASE_RETRY_SECONDS = 20
+# Which workflow's failure may move day-close to degraded: (FailureModeChoice condition, third mode the transaction accepts).
+DAY_CLOSE_FAILURE = {
+ 'day-close':("$failedMode.state.S in ['failover-prep','failback','day-close']",'day-close'),
+ 'origin-guard':("$failedMode.state.S in ['failover-prep','failback'] or ($failedMode.state.S='day-close' and $request.intent='park-od')",E("$request.intent='park-od' ? 'day-close' : 'failback'")),
+}
+# No write can come from a prepare this long after it recorded odStartedAt: od-standby's 2700 s window, the 1800 s window of
+# the origin-guard child it may have started last, and a margin. Every fence refuses a write past its own run's window.
+ORPHAN_QUIESCE_MS = 4800000
 class Build:
  def __init__(self,name):
   self.name=name; self.s={}
@@ -388,9 +396,13 @@ def harden(b):
   for n in ['NightRdsChoice','FinalInvariant']:
    s[n]['Default']='Failure'
  if b.name!='ready-check':
-  s['FailureModeChoice']['Choices'][0]['Condition']=E("$failedMode.state.S in ['failover-prep','failback','day-close']")
-  tx=s['MarkDegraded']['Arguments']['TransactItems'];up=next(x['Update'] for x in tx if x.get('Update',{}).get('Key',{}).get('pk')==S('mode'))
-  up['ConditionExpression']=up['ConditionExpression'].replace('#state IN (:s0, :s1)','#state IN (:s0, :s1, :s2)');up['ExpressionAttributeValues'][':s2']=S('day-close')
+  # Only day-close itself, and the child parking the address for it, may end a close as degraded. Another workflow failing
+  # here must leave the mode alone, or the waiting close can never take its lease. The transaction repeats this for a late change.
+  closing=DAY_CLOSE_FAILURE.get(b.name)
+  if closing:
+   s['FailureModeChoice']['Choices'][0]['Condition']=E(closing[0])
+   tx=s['MarkDegraded']['Arguments']['TransactItems'];up=next(x['Update'] for x in tx if x.get('Update',{}).get('Key',{}).get('pk')==S('mode'))
+   up['ConditionExpression']=up['ConditionExpression'].replace('#state IN (:s0, :s1)','#state IN (:s0, :s1, :s2)');up['ExpressionAttributeValues'][':s2']=S(closing[1])
  if b.name=='origin-guard':
   # Each transient retry re-observes physical membership/health before taking a new address-write fence.
   s['WaitRetryAssociate']['Next']='StableSnapshot'
@@ -402,7 +414,8 @@ def harden(b):
   b.read('ReadFailureLease','dynamodb','getItem',{'TableName':TABLE,'Key':{'pk':S('lock#runtime')},'ConsistentRead':True},'FailureLeaseChoice',{'failureLease':E('$exists($states.result.Item) ? $states.result.Item : {}')})
   s['ReadFailureLease']['Catch']=[{'ErrorEquals':['States.ALL'],'Next':'Failed'}]
   b.choice('FailureLeaseChoice',[("$failureLease.owner.S=$states.context.Execution.Id and $failureLease.lockToken.S=$token",'MarkDegraded'),("$not($exists($failureLease.pk)) or $number($failureLease.expiresAt.N)<$millis()",'ReacquireFailure')],'Release')
-  b.reacquire('ReacquireFailure','MarkDegraded',['failover-prep','failback','day-close'])
+  closing=DAY_CLOSE_FAILURE.get(b.name)
+  b.reacquire('ReacquireFailure','MarkDegraded',['failover-prep','failback']+([closing[1]] if closing else []))
 
  if b.name=='origin-guard':
   # A lost response may not be noticed until the next 30-minute tick, after a 10-minute attestation expired.
@@ -447,6 +460,27 @@ def harden(b):
   s['RecoveryProofChoice']['Choices'][0]['Condition']=E("($mode.state.S in ['failover-prep','failback'] or ("+bounded+")) and $exists($day.odDeadline.N) and $number($day.odDeadline.N)>$millis()")
   op=next(x['ConditionCheck'] for x in s['FenceCommitRecoveredHolder']['Arguments']['TransactItems'] if x.get('ConditionCheck',{}).get('Key',{}).get('pk')==S('mode'))
   op['ConditionExpression']=op['ConditionExpression'].replace('#state IN (:s0, :s1)','#state IN (:s0, :s1, :s2)');op['ExpressionAttributeValues'][':s2']=S('degraded')
+ if b.name=='origin-guard':orphan_cleanup(b)
+
+def orphan_cleanup(b):
+ # A prepare that ended without Failure leaves failover-prep, and Reconcile has no branch for it. See "Orphaned failover-prep"
+ # in the README. Evidence is what the run can no longer do, because no runtime role can read an execution's status.
+ s=b.s;od="'${od_instance_id}'"
+ passed=lambda day:f"$holder!={od} and $exists({day}.odStartedAt.N) and $millis()>=$number({day}.odStartedAt.N)+{ORPHAN_QUIESCE_MS}"
+ s['Reconcile']['Choices'].insert(0,{'Condition':E("$mode.state.S='failover-prep' and "+passed('$tickDay')),'Next':'BootstrapOrphan'})
+ s['Reconcile']['Choices'].append({'Condition':E(f"$mode.state.S='failover-prep' and $holder!={od} and $not($exists($tickDay.odStartedAt.N))"),'Next':'ManualRecoveryRequired'})
+ b.fail('ManualRecoveryRequired','Runtime.ManualRecovery','failover-prep with no recorded start today and the EIP not on the On-Demand host. Nothing proves the prepare has ended, so no write was made. See the README.')
+ b.add('BootstrapOrphan',{'Type':'Pass','Assign':{'dispatch':'orphan'},'Next':'BootstrapGate'})
+ s['Dispatch']['Choices'].insert(0,{'Condition':E("$dispatch='orphan'"),'Next':'OrphanSnapshot'})
+ # With the lease held, read again what the decision used. Anything unexpected releases with no write.
+ b.snapshot('OrphanSnapshot','OrphanReadDay','Orphan')
+ b.read('OrphanReadDay','dynamodb','getItem',{'TableName':TABLE,'Key':{'pk':S(E('$dayKey'))},'ConsistentRead':True},'OrphanRecheck',{'orphanDay':E('$exists($states.result.Item) ? $states.result.Item : {}')})
+ b.choice('OrphanRecheck',[(passed('$orphanDay'),'OrphanDegraded')],'Release')
+ b.modewrite('OrphanDegraded','degraded','Release',['failover-prep'])
+ s['OrphanDegraded']['Arguments']['TransactItems'].append({'Update':{'TableName':TABLE,'Key':{'pk':S(E('$dayKey'))},'UpdateExpression':'SET orphanClearedAt=:now','ConditionExpression':'odStartedAt = :observed','ExpressionAttributeValues':{':now':N('$millis()'),':observed':N('$number($orphanDay.odStartedAt.N)')}}})
+ for n,state in s.items():
+  if n.startswith('Orphan') and state['Type']=='Task':state['Catch']=[{'ErrorEquals':['States.ALL'],'Next':'Release'}]
+ s['OrphanSnapshotGate']['Default']='Release'
 
 def day_open():
  b=Build('day-open');b.snapshot('Begin','NightGate')
@@ -547,9 +581,9 @@ def od_standby():
  b.write('StartOd','ec2','startInstances',{'InstanceIds':['${od_instance_id}']},'ReleaseBoot',['failover-prep'],True)
  b.release('ReleaseBoot','WaitBoot');b.wait('WaitBoot',15,'PollBoot')
  b.read('PollBoot','ec2','describeInstances',{'InstanceIds':['${od_instance_id}']},'BootChoice',{'od':E('$states.result.Reservations[0].Instances[0]'),'polls':E('$polls+1')})
- b.choice('BootChoice',[("$od.InstanceId='${od_instance_id}' and $od.State.Name='running' and ($exists($od.PublicIpAddress) or $holder='${od_instance_id}')",'ReadSsmOnline'),("$polls<20",'WaitBoot')],'Failed')
+ b.choice('BootChoice',[("$od.InstanceId='${od_instance_id}' and $od.State.Name='running' and ($exists($od.PublicIpAddress) or $holder='${od_instance_id}')",'ReadSsmOnline'),("$polls<20",'WaitBoot')],'Failure')
  b.read('ReadSsmOnline','ssm','describeInstanceInformation',{'Filters':[{'Key':'InstanceIds','Values':['${od_instance_id}']}]},'SsmOnlineChoice',{'ssmOnline':E("$count($states.result.InstanceInformationList[InstanceId='${od_instance_id}' and PingStatus='Online'])=1"),'attempts':E('$attempts+1')})
- b.choice('SsmOnlineChoice',[("$ssmOnline",'ReacquireReadiness'),("$attempts<40",'WaitSsm')],'Failed');b.wait('WaitSsm',15,'ReadSsmOnline');b.reacquire('ReacquireReadiness','OdReadiness',['failover-prep'])
+ b.choice('SsmOnlineChoice',[("$ssmOnline",'ReacquireReadiness'),("$attempts<40",'WaitSsm')],'Failure');b.wait('WaitSsm',15,'ReadSsmOnline');b.reacquire('ReacquireReadiness','OdReadiness',['failover-prep'])
  b.local_smoke('OdReadiness',"'${od_instance_id}'",'${od_readiness_document_name}','AttestOd',modes=['failover-prep']);b.attest('AttestOd','PromoteOd')
  b.child('PromoteOd','${origin_guard_arn}',{'intent':'promote-od'},'ReleasePromoteOd',['failover-prep']);b.release('ReleasePromoteOd','WaitOdPromotion')
  b.wait('WaitOdPromotion',15,'ReadOdPromotion');b.read('ReadOdPromotion','ec2','describeAddresses',{'AllocationIds':['${eip_allocation_id}']},'OdPromoted',{'newHolder':E('$states.result.Addresses[0].InstanceId'),'polls':E('$polls+1')})

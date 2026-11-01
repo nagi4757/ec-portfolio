@@ -728,6 +728,10 @@
       "Type": "Choice",
       "Choices": [
         {
+          "Condition": "{% $mode.state.S='failover-prep' and $holder!='${od_instance_id}' and $exists($tickDay.odStartedAt.N) and $millis()>=$number($tickDay.odStartedAt.N)+4800000 %}",
+          "Next": "BootstrapOrphan"
+        },
+        {
           "Condition": "{% $holder='${od_instance_id}' and $instances[InstanceId='${od_instance_id}'][0].State.Name='running' and $exists($tickDay.odDeadline.N) and $number($tickDay.odDeadline.N)>$millis() and $db.DbInstanceStatus='available' and $mode.state.S in ['failover-prep','failback','degraded'] and ($not($exists($tickReady.validUntil.N)) or $number($tickReady.validUntil.N)<=$millis() or $tickReady.sha.S!=$liveSha or $tickReady.taskDefinition.S!=$tdArn or ($mode.state.S='degraded' and ($not($exists($tickReady.proofKind.S)) or $tickReady.proofKind.S!='recovery-endToEnd'))) %}",
           "Next": "RecoverNeedsProof"
         },
@@ -758,6 +762,10 @@
         {
           "Condition": "{% $mode.state.S in ['spot-active','degraded'] and ($holder='' or $event.\"detail-type\"='EC2 Spot Instance Interruption Warning' and $event.detail.\"instance-id\"=$holder) %}",
           "Next": "BootstrapPrepare"
+        },
+        {
+          "Condition": "{% $mode.state.S='failover-prep' and $holder!='${od_instance_id}' and $not($exists($tickDay.odStartedAt.N)) %}",
+          "Next": "ManualRecoveryRequired"
         }
       ],
       "Default": "Done"
@@ -1108,6 +1116,10 @@
     "Dispatch": {
       "Type": "Choice",
       "Choices": [
+        {
+          "Condition": "{% $dispatch='orphan' %}",
+          "Next": "OrphanSnapshot"
+        },
         {
           "Condition": "{% $dispatch='recover-proof' %}",
           "Next": "FenceRequestRecoveryProof"
@@ -4117,7 +4129,7 @@
       "Type": "Choice",
       "Choices": [
         {
-          "Condition": "{% $failedMode.state.S in ['failover-prep','failback','day-close'] %}",
+          "Condition": "{% $failedMode.state.S in ['failover-prep','failback'] or ($failedMode.state.S='day-close' and $request.intent='park-od') %}",
           "Next": "ReadFailureLease"
         }
       ],
@@ -4196,7 +4208,7 @@
                   "N": "{% $string($millis()) %}"
                 },
                 ":s2": {
-                  "S": "day-close"
+                  "S": "{% $request.intent='park-od' ? 'day-close' : 'failback' %}"
                 }
               },
               "ConditionExpression": "attribute_exists(enabled) AND enabled = :yes AND #scope = :scope AND approvalRef = :approval AND (#scope = :production OR (#scope = :rehearsal AND armedUntil = :armedUntil AND armedUntil > :nowUtc)) AND #state IN (:s0, :s1, :s2) AND :currentRedrive = :zero AND :writeUntil > :nowMs",
@@ -4453,7 +4465,7 @@
                   "S": "failback"
                 },
                 ":s2": {
-                  "S": "day-close"
+                  "S": "{% $request.intent='park-od' ? 'day-close' : 'failback' %}"
                 }
               }
             }
@@ -4658,6 +4670,511 @@
           "Next": "Failure"
         }
       ],
+      "TimeoutSeconds": 60
+    },
+    "ManualRecoveryRequired": {
+      "Type": "Fail",
+      "Error": "Runtime.ManualRecovery",
+      "Cause": "failover-prep with no recorded start today and the EIP not on the On-Demand host. Nothing proves the prepare has ended, so no write was made. See the README."
+    },
+    "BootstrapOrphan": {
+      "Type": "Pass",
+      "Assign": {
+        "dispatch": "orphan"
+      },
+      "Next": "BootstrapGate"
+    },
+    "OrphanSnapshot": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:autoscaling:describeAutoScalingGroups",
+      "Arguments": {
+        "AutoScalingGroupNames": [
+          "${asg_name}"
+        ]
+      },
+      "Next": "OrphanReadInstances",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "group": "{% $states.result.AutoScalingGroups[0] %}"
+      },
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Release"
+        }
+      ]
+    },
+    "OrphanReadInstances": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:ec2:describeInstances",
+      "Arguments": {
+        "InstanceIds": "{% $append(['${od_instance_id}'], $exists($group.Instances) ? $group.Instances.InstanceId : []) %}"
+      },
+      "Next": "OrphanReadAddress",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "instances": "{% $append([], $states.result.Reservations.Instances) %}"
+      },
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Release"
+        }
+      ]
+    },
+    "OrphanReadAddress": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:ec2:describeAddresses",
+      "Arguments": {
+        "AllocationIds": [
+          "${eip_allocation_id}"
+        ]
+      },
+      "Next": "OrphanReadAssociationInstance",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "addresses": "{% $states.result.Addresses %}",
+        "holder": "{% $exists($states.result.Addresses[0].InstanceId) ? $states.result.Addresses[0].InstanceId : '' %}"
+      },
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Release"
+        }
+      ]
+    },
+    "OrphanReadAssociationInstance": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:ec2:describeInstances",
+      "Arguments": {
+        "InstanceIds": "{% $distinct($append($append(['${od_instance_id}'], $exists($group.Instances) ? $group.Instances.InstanceId : []), $holder!='' ? [$holder] : [])) %}"
+      },
+      "Next": "OrphanReadAssociationRecord",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "instances": "{% $append([], $states.result.Reservations.Instances) %}"
+      },
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Release"
+        }
+      ]
+    },
+    "OrphanReadAssociationRecord": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:getItem",
+      "Arguments": {
+        "TableName": "${table_name}",
+        "Key": {
+          "pk": {
+            "S": "{% 'instance#' & $holder %}"
+          }
+        },
+        "ConsistentRead": true
+      },
+      "Next": "OrphanReadOdAttribute",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "holderRecord": "{% $exists($states.result.Item) ? $states.result.Item : {} %}"
+      },
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Release"
+        }
+      ]
+    },
+    "OrphanReadOdAttribute": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:ec2:describeNetworkInterfaceAttribute",
+      "Arguments": {
+        "NetworkInterfaceId": "${od_eni_id}",
+        "Attribute": "associatePublicIpAddress"
+      },
+      "Next": "OrphanReadRds",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "odPublic": "{% $states.result.AssociatePublicIpAddress %}"
+      },
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Release"
+        }
+      ]
+    },
+    "OrphanReadRds": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:rds:describeDBInstances",
+      "Arguments": {
+        "DbInstanceIdentifier": "${db_instance_identifier}"
+      },
+      "Next": "OrphanReadService",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "db": "{% $states.result.DbInstances[0] %}"
+      },
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Release"
+        }
+      ]
+    },
+    "OrphanReadService": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:ecs:describeServices",
+      "Arguments": {
+        "Cluster": "${ecs_cluster_arn}",
+        "Services": [
+          "${ecs_service_name}"
+        ]
+      },
+      "Next": "OrphanReadTaskDefinition",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "service": "{% $states.result.Services[0] %}",
+        "tdArn": "{% $states.result.Services[0].TaskDefinition %}"
+      },
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Release"
+        }
+      ]
+    },
+    "OrphanReadTaskDefinition": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:ecs:describeTaskDefinition",
+      "Arguments": {
+        "TaskDefinition": "{% $tdArn %}"
+      },
+      "Next": "OrphanSnapshotGate",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "liveSha": "{% ($images := $states.result.TaskDefinition.ContainerDefinitions[Name='api'].Image; $count($images)=1 and $substringBefore($images[0], ':') = '${expected_image_repository}' ? $substringAfter($images[0], ':') : '') %}"
+      },
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Release"
+        }
+      ]
+    },
+    "OrphanSnapshotGate": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Condition": "{% $group.AutoScalingGroupName = '${asg_name}' and $group.MinSize = 0 and $group.MaxSize = 2 and $group.CapacityRebalance = false and $count($group.Instances) <= 2 and $count($addresses) = 1 and $addresses[0].AllocationId = '${eip_allocation_id}' and ($holder = '' or $holder = '${od_instance_id}' or $holder in $group.Instances.InstanceId or ($holderRecord.asg.S='${asg_name}' and $instances[InstanceId=$holder][0].IamInstanceProfile.Arn='${spot_instance_profile_arn}' and $instances[InstanceId=$holder][0].InstanceLifecycle='spot' and $instances[InstanceId=$holder][0].State.Name in ['terminated','shutting-down','stopped'])) and $count($instances[InstanceId='${od_instance_id}' and IamInstanceProfile.Arn='${od_instance_profile_arn}'])=1 and $db.DbInstanceIdentifier = '${db_instance_identifier}' and $service.ServiceName = '${ecs_service_name}' and $contains($liveSha, /^[a-f0-9]{40}$/) %}",
+          "Next": "OrphanReadDay"
+        }
+      ],
+      "Default": "Release"
+    },
+    "OrphanReadDay": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:getItem",
+      "Arguments": {
+        "TableName": "${table_name}",
+        "Key": {
+          "pk": {
+            "S": "{% $dayKey %}"
+          }
+        },
+        "ConsistentRead": true
+      },
+      "Next": "OrphanRecheck",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "orphanDay": "{% $exists($states.result.Item) ? $states.result.Item : {} %}"
+      },
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Release"
+        }
+      ]
+    },
+    "OrphanRecheck": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Condition": "{% $holder!='${od_instance_id}' and $exists($orphanDay.odStartedAt.N) and $millis()>=$number($orphanDay.odStartedAt.N)+4800000 %}",
+          "Next": "OrphanDegraded"
+        }
+      ],
+      "Default": "Release"
+    },
+    "OrphanDegraded": {
+      "Type": "Task",
+      "Comment": "Atomic arming/mode/maintenance and lease fence; TTL is never authorization.",
+      "Resource": "arn:aws:states:::aws-sdk:dynamodb:transactWriteItems",
+      "Arguments": {
+        "TransactItems": [
+          {
+            "ConditionCheck": {
+              "TableName": "${table_name}",
+              "Key": {
+                "pk": {
+                  "S": "maintenance"
+                }
+              },
+              "ConditionExpression": "attribute_not_exists(pk)"
+            }
+          },
+          {
+            "Update": {
+              "TableName": "${table_name}",
+              "Key": {
+                "pk": {
+                  "S": "mode"
+                }
+              },
+              "UpdateExpression": "SET #state = :newState, updatedAt = :updated",
+              "ExpressionAttributeValues": {
+                ":yes": {
+                  "Bool": true
+                },
+                ":scope": {
+                  "S": "{% $mode.scope.S %}"
+                },
+                ":approval": {
+                  "S": "{% $mode.approvalRef.S %}"
+                },
+                ":production": {
+                  "S": "production"
+                },
+                ":rehearsal": {
+                  "S": "rehearsal"
+                },
+                ":armedUntil": {
+                  "S": "{% $exists($mode.armedUntil.S) ? $mode.armedUntil.S : '' %}"
+                },
+                ":nowUtc": {
+                  "S": "{% $fromMillis($millis()) %}"
+                },
+                ":currentRedrive": {
+                  "N": "{% $string($exists($states.context.Execution.RedriveCount) ? $states.context.Execution.RedriveCount : 0) %}"
+                },
+                ":zero": {
+                  "N": "0"
+                },
+                ":writeUntil": {
+                  "N": "{% $string($writeUntil) %}"
+                },
+                ":nowMs": {
+                  "N": "{% $string($millis()) %}"
+                },
+                ":s0": {
+                  "S": "failover-prep"
+                },
+                ":newState": {
+                  "S": "degraded"
+                },
+                ":updated": {
+                  "N": "{% $string($millis()) %}"
+                }
+              },
+              "ConditionExpression": "attribute_exists(enabled) AND enabled = :yes AND #scope = :scope AND approvalRef = :approval AND (#scope = :production OR (#scope = :rehearsal AND armedUntil = :armedUntil AND armedUntil > :nowUtc)) AND #state IN (:s0) AND :currentRedrive = :zero AND :writeUntil > :nowMs",
+              "ExpressionAttributeNames": {
+                "#scope": "scope",
+                "#state": "state"
+              }
+            }
+          },
+          {
+            "Update": {
+              "TableName": "${table_name}",
+              "Key": {
+                "pk": {
+                  "S": "lock#runtime"
+                }
+              },
+              "UpdateExpression": "SET lastWrite = :label, lastWriteAt = :now",
+              "ConditionExpression": "#owner = :owner AND lockToken = :token AND expiresAt > :minExpiry AND writeUntil = :writeUntil AND writeUntil > :now AND redriveCount = :zero AND :currentRedrive = :zero",
+              "ExpressionAttributeNames": {
+                "#owner": "owner"
+              },
+              "ExpressionAttributeValues": {
+                ":owner": {
+                  "S": "{% $states.context.Execution.Id %}"
+                },
+                ":token": {
+                  "S": "{% $token %}"
+                },
+                ":minExpiry": {
+                  "N": "{% $string($millis() + ${write_margin_ms}) %}"
+                },
+                ":writeUntil": {
+                  "N": "{% $string($writeUntil) %}"
+                },
+                ":now": {
+                  "N": "{% $string($millis()) %}"
+                },
+                ":zero": {
+                  "N": "0"
+                },
+                ":label": {
+                  "S": "OrphanDegraded"
+                },
+                ":currentRedrive": {
+                  "N": "{% $string($exists($states.context.Execution.RedriveCount) ? $states.context.Execution.RedriveCount : 0) %}"
+                }
+              }
+            }
+          },
+          {
+            "Update": {
+              "TableName": "${table_name}",
+              "Key": {
+                "pk": {
+                  "S": "{% $dayKey %}"
+                }
+              },
+              "UpdateExpression": "SET orphanClearedAt=:now",
+              "ConditionExpression": "odStartedAt = :observed",
+              "ExpressionAttributeValues": {
+                ":now": {
+                  "N": "{% $string($millis()) %}"
+                },
+                ":observed": {
+                  "N": "{% $string($number($orphanDay.odStartedAt.N)) %}"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Release"
+        }
+      ],
+      "Next": "Release",
       "TimeoutSeconds": 60
     }
   }
