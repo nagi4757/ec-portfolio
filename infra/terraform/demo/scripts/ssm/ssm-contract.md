@@ -36,7 +36,42 @@ this boot, the exact full ECR image reference, running API and Valkey, and the
 existing private Docker port contract. The Spot check requires both bootstrap
 markers, ECS active, exactly one API container, the expected production cluster,
 family, revision, image reference, host network mode, and loopback-only API and
-Valkey listeners. It rejects the measurement cluster/family.
+Valkey listeners. It rejects the measurement cluster/family, and never reads the
+convergence unit, so it can never report not ready.
+
+`ec-portfolio-api-converge.service` is `Type=oneshot` with `Restart=no` and no
+`ExecStartPre`. The first On-Demand check reads six named properties and reaches
+one of these results. A state not listed here, and any missing or malformed
+property, is a failure.
+
+| `ActiveState` / `SubState` | `Result` | `ExecMainStatus` | Started this boot | `Job` | Document result |
+| --- | --- | --- | --- | --- | --- |
+| `inactive` / `dead` | `success` | `0` | yes | none | next check |
+| `activating` / `start` | `success` | `0` | yes | any | exit 75, `NOT_READY convergence-in-progress` |
+| `inactive` / `dead` | `success` | `0` | no | queued | exit 75, `NOT_READY convergence-start-queued` |
+| `inactive` / `dead` | `success` | `0` | no | none | exit 1, never started |
+
+"Started this boot" is a positive `ExecMainStartTimestampMonotonic`. "Queued" is a
+positive `Job`: systemd holds the start job while the unit waits for
+`docker.service`, before the unit shows any activity. Not ready runs no later check
+and is not a pass.
+
+| `Status` | `ResponseCode` | stdout | The workflow |
+| --- | --- | --- | --- |
+| `Success` | `0` | one JSON result | proof accepted |
+| `Failed` | `75` | exactly one of the two `NOT_READY` lines | `OdReadiness` only: bounded re-send, then failure |
+| anything else | any | any | failure, no re-send |
+
+75 is `EX_TEMPFAIL`. Nothing else in the command exits with it: the shell uses 1,
+2, 126 and 127, Python and `main()` use 1, and SSM reserves 194 for a reboot
+request. Requiring the fixed output as well keeps an unrelated 75 from a re-send.
+
+Both documents embed `ssm_runtime.py` verbatim, so changing it creates a new version
+of both, even when only one of them behaves differently. The workflows pin an exact
+version per document (`DOCUMENT_VERSIONS` in `runtime-asl-build.py`), never `$LATEST`
+or `$DEFAULT`. The pin assumes SSM numbers an update as the next version; the plan
+gate requires the stored documents to be at the version before it, and the number
+stays an expectation until the post-apply read-back.
 
 Both require readiness UP, Nginx active, no port 80 listener, and HTTPS against
 loopback with the real origin SNI. Python verifies the served certificate and
@@ -63,16 +98,18 @@ console logging. The existing CloudFront origin request policy forwards
 format does not include a correlation ID, so this implementation does not
 invent Nginx correlation evidence.
 
-Live host behavior is NOT VERIFIED. P3-b must verify the agent version, the live
-image's logging contract, local Docker log access with the configured log
+Live host behavior is NOT VERIFIED. P3-b must verify the agent version, the
+systemd values above during a real cold boot, the `Failed`/75 and stdout shape of a
+real invocation, the live image's logging contract, local Docker log access with the configured log
 driver, the JP/KR-restricted CloudFront route, TLS remaining lifetime, actual
 instance permissions and network egress, and bounded command completion.
 Missing evidence must not be replaced with a weaker remote-only health check.
 No extra host policy or log-reading AWS permission was introduced to hide
 those uncertainties. TLS restore remains a separately reviewed operation.
 
-Offline command: `python3 -B scripts/ssm/ssm_test.py`. Result: 23 tests PASS and 37/37
-behavioural guard mutations killed, with unmodified controls passing. Transport,
+Offline command: `python3 -B scripts/ssm/ssm_test.py`. Result: 31 tests PASS, 37/37
+behavioural guard mutations and 21/21 boot race mutations killed, with unmodified
+controls passing. Transport,
 AWS CLI, Docker, systemd, socket and TLS interactions are mocked. The only real
 child processes are `/bin/sh -n` and a generated environment-boundary test whose
 host program is replaced with a stdlib environment echo. Actual AWS calls: 0.

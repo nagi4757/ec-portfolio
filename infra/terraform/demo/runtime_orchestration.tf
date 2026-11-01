@@ -256,9 +256,13 @@ resource "aws_sfn_state_machine" "runtime" {
     }
   }
 
+  # A definition pins exact document versions, so an update reaches it only after
+  # the documents: a failed document update leaves the old pin, whose version stays.
   depends_on = [
     aws_iam_role_policy.runtime_orchestrator,
     aws_iam_role_policy.runtime_eip_writer,
+    aws_ssm_document.od_readiness,
+    aws_ssm_document.spot_smoke,
   ]
 }
 

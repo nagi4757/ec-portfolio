@@ -1103,6 +1103,26 @@ class EntryTests(unittest.TestCase):
                 G.validate(plan, rendered)
             self.assertEqual(str(rejected.exception), "PG5 new schedule/rule not DISABLED")
 
+    def test_p3a3_mode_runs_its_own_validation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            plan = p3a3_plan()
+            self.show_plan = plan
+            saved, path = self.files(temporary, plan)
+            code, out, err = self.call("p3a3", str(saved), str(path), ACCOUNT_SHA)
+            self.assertEqual(code, 0, err)
+            result = json.loads(out)
+            self.assertEqual((result["mode"], result["changes"], result["destroys"]), ("p3a3", 4, 0))
+            self.assertEqual(result["source_commit"], self.COMMIT)
+            code, out, err = self.call("p3a2", str(saved), str(path), ACCOUNT_SHA)
+            self.assertEqual(code, 1)
+            self.assertIn("REJECT P3A2 exact", err)
+            plan = p3a2_plan()
+            self.show_plan = plan
+            saved, path = self.files(temporary, plan)
+            code, out, err = self.call("p3a3", str(saved), str(path), ACCOUNT_SHA)
+            self.assertEqual(code, 1)
+            self.assertIn("REJECT P3A3 exact", err)
+
     def test_p3a2_mode_records_the_same_evidence_and_rejects_the_p3a_plan(self):
         self.show_plan = p3a2_plan()
         with tempfile.TemporaryDirectory(prefix="p3a2-MOCK-plan-") as temporary:
@@ -1181,11 +1201,242 @@ class EntryTests(unittest.TestCase):
             self.assertFalse((HERE / ("cold-standby-plan-" + name + ".py")).exists())
 
 
+def p3a3_plan():
+    """The P3-a3 plan: the state after P3-a2, and only the two documents and the two
+    workflows that send commands change. Unknowns are those of AWS provider 6.62.0."""
+    plan = p3a2_plan()
+    plan["prior_state"]["values"]["root_module"]["resources"] = [r for r in plan["prior_state"]["values"]["root_module"]["resources"] if r["address"] != ORIGINAL.P3A2_POLICY]
+    plan["resource_changes"] = [r for r in plan["resource_changes"] if r["address"] != ORIGINAL.P3A2_POLICY]
+    for address in (ORIGINAL.P3A2_TEMPLATE, ORIGINAL.P3A2_GROUP):
+        change = resource(plan, address)["change"]
+        change.update(actions=["no-op"], after=change["before"], after_unknown={})
+    plan["output_changes"] = {name: {"actions": ["no-op"], "before": value, "after": value, "after_unknown": False}
+                              for name, value in (("ecs_spot_launch_template_version", 5), ("ecs_spot_launch_template_id", "lt-MOCK"))}
+    plan["prior_state"]["values"]["outputs"] = {name: {"value": value["after"]} for name, value in plan["output_changes"].items()}
+    for address, name in ORIGINAL.P3A3_DOCUMENTS.items():
+        content = RENDERED["resources"][address]["content"]
+        stored = {"name": name, "content": content.replace("NOT_READY", "OLD_SOURCE"), "default_version": "1", "document_version": "1", "latest_version": "1",
+                  "hash": "MOCK-hash", "parameter": [{"name": "checkMode"}], "permissions": {}, "tags": {"Name": name}}
+        bind_refreshed(plan, address, stored)
+        resource(plan, address)["change"].update(actions=["update"], after={key: value for key, value in {**stored, "content": content}.items() if key not in ("default_version", "document_version", "hash", "latest_version", "parameter")},
+                                                 after_unknown={"default_version": True, "document_version": True, "hash": True, "latest_version": True, "parameter": True, "tags": {}})
+    for address in ORIGINAL.P3A3_MACHINES:
+        definition = RENDERED["resources"][address]["definition"]
+        stored = {**after(plan, address), "definition": definition.replace('"DocumentVersion": "2"', '"DocumentVersion": "1"').replace("P3-a real", "P3-a old")}
+        bind_refreshed(plan, address, stored)
+        resource(plan, address)["change"].update(actions=["update"], after={**stored, "definition": definition}, after_unknown={"tags_all": {}})
+    configuration(plan, "aws_sfn_state_machine.runtime")["depends_on"] = ["aws_iam_role_policy.runtime_orchestrator", "aws_iam_role_policy.runtime_eip_writer", *ORIGINAL.P3A3_DOCUMENTS]
+    plan["configuration"]["root_module"]["resources"] = [r for r in plan["configuration"]["root_module"]["resources"] if r["address"] != ORIGINAL.P3A2_POLICY]
+    p3a3_sync(plan)
+    return plan
+
+
+def p3a3_sync(plan):
+    p3a2_sync(plan)
+    plan["planned_values"]["outputs"] = copy.deepcopy(plan["prior_state"]["values"]["outputs"])
+
+
+def p3a3_stale_role(plan):
+    """The stored role still lists the policy P3-a2 deleted, as the sealed convergence plan shows."""
+    role = "aws_iam_role.ecs_spot"
+    kept = [{"name": "ecr-image-pull", "policy": "{}"}, {"name": "session-manager-core", "policy": "{}"}]
+    stale = [kept[0], {"name": "origin-eip-promotion", "policy": "{}"}, kept[1]]
+    values = {**resource(plan, role)["change"]["before"], "name": "ec-portfolio-demo-ecs-spot", "inline_policy": kept}
+    bind_refreshed(plan, role, values)
+    plan["resource_drift"] = [{"address": role, "mode": "managed", "type": "aws_iam_role", "change": {"actions": ["update"], "before": {**values, "inline_policy": stale}, "after": values, "after_unknown": {}}}]
+    p3a3_sync(plan)
+    return plan
+
+
+class P3a3Tests(unittest.TestCase):
+    """validate_p3a3 on the exact 0 / 4 / 0 plan and on one violation at a time."""
+
+    def reject(self, mutate, prefix, sync=True, rendered=None, base=p3a3_plan):
+        global FIXTURE_CHECKS
+        FIXTURE_CHECKS += 1
+        plan = base()
+        mutate(plan)
+        if sync:
+            p3a3_sync(plan)
+        with self.assertRaises(G.Rejected) as caught:
+            G.validate_p3a3(plan, rendered or RENDERED)
+        self.assertTrue(str(caught.exception).startswith(prefix), str(caught.exception))
+
+    def change(self, plan, address):
+        return resource(plan, address)["change"]
+
+    def test_exact_plan_passes(self):
+        result = G.validate_p3a3(p3a3_plan(), RENDERED)
+        self.assertEqual((result["mode"], result["creates"], result["changes"], result["destroys"]), ("p3a3", 0, 4, 0))
+        self.assertEqual(G.validate_p3a3(p3a3_stale_role(p3a3_plan()), RENDERED)["result"], "PASS")
+
+    def test_format_is_checked(self):
+        self.reject(lambda p: p.update(terraform_version="1.15.0"), "PG0 plan format/version")
+
+    def test_exact_changes(self):
+        for address in sorted(G.P3A3_CHANGED):
+            self.reject(lambda p, a=address: self.change(p, a).update(actions=["no-op"]), "P3A3 exact 4 updates")
+        for other in ('aws_sfn_state_machine.runtime["origin_guard"]', 'aws_sfn_state_machine.runtime["ready_check"]', 'aws_sfn_state_machine.runtime["day_close"]',
+                      "aws_iam_role_policy.runtime_orchestrator", ORIGINAL.P3A2_TEMPLATE, ORIGINAL.P3A2_GROUP, 'aws_scheduler_schedule.runtime_orchestration["day_open"]'):
+            self.reject(lambda p, a=other: self.change(p, a).update(actions=["update"]), "P3A3 exact 4 updates")
+        self.reject(lambda p: p["resource_changes"].append({"address": "aws_iam_role_policy.extra", "mode": "managed", "type": "aws_iam_role_policy", "change": {"actions": ["create"], "before": None, "after": {}, "after_unknown": {}}}), "P3A3 exact 4 updates")
+
+    def test_root_and_existing_resources(self):
+        def remove_prior(p, address):
+            p["prior_state"]["values"]["root_module"]["resources"] = [r for r in p["prior_state"]["values"]["root_module"]["resources"] if r["address"] != address]
+        self.reject(lambda p: remove_prior(p, "aws_instance.demo"), "P3A3 wrong/incomplete root")
+        self.reject(lambda p: p["resource_changes"].append({"address": "aws_x.unknown", "mode": "managed", "type": "aws_x", "change": {"actions": ["no-op"], "before": {}, "after": {}, "after_unknown": {}}}), "P3A3 all prior resources")
+        self.reject(lambda p: p["resource_changes"].remove(resource(p, "aws_instance.demo")), "P3A3 all prior resources")
+        self.reject(lambda p: self.change(p, "aws_instance.demo").update(after={"MOCK": "other"}), "P3A3 existing changed")
+        self.reject(lambda p: self.change(p, "aws_instance.demo").update(after_unknown={"arn": True}), "P3A3 existing unknown/moved")
+        self.reject(lambda p: resource(p, "aws_instance.demo").update(previous_address="aws_instance.old"), "P3A3 existing unknown/moved")
+
+    def test_deleted_promotion_policy_stays_deleted(self):
+        def returned(p):
+            values = {"name": "origin-eip-promotion"}
+            p["prior_state"]["values"]["root_module"]["resources"].append({"address": ORIGINAL.P3A2_POLICY, "mode": "managed", "type": "aws_iam_role_policy", "values": values})
+            p["resource_changes"].append({"address": ORIGINAL.P3A2_POLICY, "mode": "managed", "type": "aws_iam_role_policy", "change": {"actions": ["no-op"], "before": values, "after": values, "after_unknown": {}}})
+        self.reject(returned, "P3A3 promotion policy returned")
+
+    def test_update_binding(self):
+        for address in sorted(G.P3A3_CHANGED):
+            self.reject(lambda p, a=address: self.change(p, a).update(actions=["delete", "create"]), "P3A3 update action")
+            self.reject(lambda p, a=address: resource(p, a).update(previous_address="aws_x.old"), "P3A3 update import/move")
+            self.reject(lambda p, a=address: self.change(p, a).update(importing={"id": "x"}), "P3A3 update import/move")
+            self.reject(lambda p, a=address: self.change(p, a)["before"].update(name="stale"), "P3A3 update not bound")
+            self.reject(lambda p, a=address: self.change(p, a)["after_unknown"].update(name=True), "P3A3 update unknown")
+
+    def test_documents(self):
+        for address in sorted(G.P3A3_DOCUMENTS):
+            change = lambda p, a=address: self.change(p, a)
+            self.reject(lambda p, a=address: self.change(p, a)["after_unknown"].pop("hash"), "P3A3 update unknown")
+            self.reject(lambda p, a=address: self.change(p, a)["after"].update(document_format="JSON"), "P3A3 document changed fields")
+            self.reject(lambda p, a=address: self.change(p, a)["after"].update(permissions={"account_ids": "all", "type": "Share"}), "P3A3 document changed fields")
+            self.reject(lambda p, a=address: self.change(p, a)["after"].update(content=self.change(p, a)["before"]["content"]), "P3A3 document changed fields")
+            self.reject(lambda p, a=address: self.change(p, a)["after"].update(content="OTHER"), "P3A3 document reviewed content")
+            for key in ("default_version", "document_version", "latest_version"):
+                def moved(p, a=address, k=key):
+                    values = {**self.change(p, a)["before"], k: "2"}
+                    self.change(p, a)["before"] = values
+                    bind_refreshed_only(p, a)
+                self.reject(moved, "P3A3 document version before")
+            def renamed(p, a=address):
+                values = {**self.change(p, a)["before"], "name": "ec-portfolio-demo-other"}
+                self.change(p, a)["before"] = values
+                self.change(p, a)["after"]["name"] = "ec-portfolio-demo-other"
+                bind_refreshed_only(p, a)
+            self.reject(renamed, "P3A3 document identity")
+            def shared(p, a=address):
+                values = {**self.change(p, a)["before"], "permissions": {"account_ids": "all", "type": "Share"}}
+                self.change(p, a)["before"] = values
+                self.change(p, a)["after"]["permissions"] = values["permissions"]
+                bind_refreshed_only(p, a)
+            self.reject(shared, "P3A3 document identity")
+
+    def test_document_ordering(self):
+        for name in sorted(G.P3A3_DOCUMENTS):
+            self.reject(lambda p, n=name: configuration(p, "aws_sfn_state_machine.runtime")["depends_on"].remove(n), "P3A3 document ordering")
+        self.reject(lambda p: configuration(p, "aws_sfn_state_machine.runtime").pop("depends_on"), "P3A3 document ordering")
+
+    def test_machines(self):
+        for address in sorted(G.P3A3_MACHINES):
+            self.reject(lambda p, a=address: self.change(p, a)["after_unknown"].update(revision_id=True), "P3A3 update unknown")
+            self.reject(lambda p, a=address: self.change(p, a)["after"].update(publish=True), "P3A3 machine changed fields")
+            self.reject(lambda p, a=address: self.change(p, a)["after"].update(role_arn="arn:aws:iam::000000000000:role/other"), "P3A3 machine changed fields")
+            self.reject(lambda p, a=address: self.change(p, a)["after"].update(definition=json.dumps({"States": {}})), "P3A3 machine reviewed definition")
+            # The same stale or floating pin in the plan and the source: the reviewed definition alone would match.
+            for pin in ("1", "$LATEST", "$DEFAULT"):
+                source = copy.deepcopy(RENDERED)
+                source["resources"][address]["definition"] = source["resources"][address]["definition"].replace('"DocumentVersion": "2"', '"DocumentVersion": "' + pin + '"')
+                self.reject(lambda p, a=address, s=source: self.change(p, a)["after"].update(definition=s["resources"][a]["definition"]), "P3A3 machine document pin", rendered=source)
+            def one_document(p, a=address):
+                definition = json.loads(self.change(p, a)["after"]["definition"])
+                definition["States"] = {n: s for n, s in definition["States"].items() if not (s.get("Resource", "").endswith(":sendCommand") and "spot-smoke" in s["Arguments"]["DocumentName"])}
+                return json.dumps(definition)
+            source = copy.deepcopy(RENDERED)
+            source["resources"][address]["definition"] = one_document(p3a3_plan())
+            self.reject(lambda p, a=address, s=source: self.change(p, a)["after"].update(definition=s["resources"][a]["definition"]), "P3A3 machine document coverage", rendered=source)
+            def no_commands(p, a=address):
+                definition = json.loads(self.change(p, a)["after"]["definition"])
+                definition["States"] = {n: s for n, s in definition["States"].items() if not s.get("Resource", "").endswith(":sendCommand")}
+                return json.dumps(definition)
+            source = copy.deepcopy(RENDERED)
+            source["resources"][address]["definition"] = no_commands(p3a3_plan())
+            self.reject(lambda p, a=address, s=source: self.change(p, a)["after"].update(definition=s["resources"][a]["definition"]), "P3A3 machine document pin", rendered=source)
+            def foreign(p, a=address):
+                definition = json.loads(self.change(p, a)["after"]["definition"])
+                state = next(s for s in definition["States"].values() if s.get("Resource", "").endswith(":sendCommand"))
+                state["Arguments"]["DocumentName"] = "{% 'AWS-RunShellScript' %}"
+                return json.dumps(definition)
+            source = copy.deepcopy(RENDERED)
+            source["resources"][address]["definition"] = foreign(p3a3_plan())
+            self.reject(lambda p, a=address, s=source: self.change(p, a)["after"].update(definition=s["resources"][a]["definition"]), "P3A3 machine document coverage", rendered=source)
+
+    def test_planned_and_outputs(self):
+        def remove_planned(p):
+            p3a3_sync(p)
+            p["planned_values"]["root_module"]["resources"] = [r for r in p["planned_values"]["root_module"]["resources"] if r["address"] != "aws_instance.demo"]
+        self.reject(remove_planned, "P3A3 planned resource coverage", sync=False)
+        def inconsistent(p):
+            p3a3_sync(p)
+            planned = next(r for r in p["planned_values"]["root_module"]["resources"] if r["address"] == "aws_ssm_document.od_readiness")
+            planned["values"] = {**planned["values"], "content": "OTHER"}
+        self.reject(inconsistent, "P3A3 planned value inconsistency", sync=False)
+        name = "ecs_spot_launch_template_version"
+        self.reject(lambda p: p["output_changes"][name].update(actions=["update"]), "P3A3 output changed")
+        self.reject(lambda p: p["output_changes"][name].update(after=6), "P3A3 output changed")
+        self.reject(lambda p: p["output_changes"][name].update(after_unknown=True), "P3A3 output changed")
+        def snapshot(p):
+            p3a3_sync(p)
+            p["planned_values"]["outputs"][name] = {"value": 6}
+        self.reject(snapshot, "P3A3 output snapshot changed", sync=False)
+
+    def test_stale_role_rule_is_exact(self):
+        role = "aws_iam_role.ecs_spot"
+        base = lambda: p3a3_stale_role(p3a3_plan())
+        drift = lambda p: p["resource_drift"][0]["change"]
+        self.reject(lambda p: drift(p)["before"].update(inline_policy=drift(p)["after"]["inline_policy"]), "PG4 empty drift", base=base)
+        self.reject(lambda p: drift(p)["before"].update(inline_policy=None), "PG4 removed inline exact policy", base=base)
+        self.reject(lambda p: drift(p)["before"]["inline_policy"].append({"name": "origin-eip-promotion", "policy": "{}"}), "PG4 removed inline exact policy", base=base)
+        self.reject(lambda p: drift(p)["before"].update(name="another-role"), "PG4 unexpected drift fields", base=base)
+        self.reject(lambda p: drift(p)["before"]["inline_policy"].append({"name": "another", "policy": "{}"}), "PG4 removed inline exact policy", base=base)
+        self.reject(lambda p: drift(p)["before"]["inline_policy"].__setitem__(1, {"name": "other-policy", "policy": "{}"}), "PG4 removed inline exact policy", base=base)
+        self.reject(lambda p: drift(p)["before"]["inline_policy"].__setitem__(0, {"name": "ecr-image-pull", "policy": "{\"changed\": true}"}), "PG4 removed inline exact policy", base=base)
+        def policy_in_prior(p):
+            p["prior_state"]["values"]["root_module"]["resources"].append({"address": "aws_iam_role_policy.ecs_spot_origin_eip_promotion", "mode": "data", "type": "aws_iam_role_policy", "values": {}})
+        self.reject(policy_in_prior, "PG4 removed inline separate-policy", base=base)
+        self.reject(lambda p: p["configuration"]["root_module"]["resources"].append({"address": "aws_iam_role_policy.ecs_spot_origin_eip_promotion", "mode": "managed", "type": "aws_iam_role_policy"}), "PG4 removed inline separate-policy", base=base)
+        self.reject(lambda p: p["configuration"]["root_module"]["resources"].append({"address": role, "mode": "managed", "type": "aws_iam_role", "expressions": {"inline_policy": {"constant_value": []}}}), "PG4 removed inline separate-policy", base=base)
+
+    def test_rule_belongs_to_this_mode_only(self):
+        plan = p3a3_stale_role(p3a3_plan())
+        with self.assertRaises(G.Rejected) as caught:
+            G.drift_check(plan)
+        self.assertEqual(str(caught.exception), "PG4 unexpected drift")
+        with self.assertRaises(G.Rejected) as caught:
+            G.drift_check(plan, G.P3A2_DRIFT_RULES)
+        self.assertEqual(str(caught.exception), "PG4 unexpected drift")
+        self.assertEqual(set(G.P3A3_DRIFT_RULES), {"aws_iam_role.ecs_spot"})
+
+    def test_other_modes_reject_this_plan(self):
+        with self.assertRaises(G.Rejected):
+            G.validate_p3a2(p3a3_plan())
+        with self.assertRaises(G.Rejected):
+            G.validate(p3a3_plan(), RENDERED)
+
+    def test_real_source_pins_and_covers_both_documents(self):
+        for address in G.P3A3_MACHINES:
+            pins = G.p3a3_pins(json.loads(RENDERED["resources"][address]["definition"]))
+            self.assertEqual({version for _, version in pins}, {G.P3A3_VERSION_AFTER})
+            self.assertEqual({name for name, _ in pins}, set(G.P3A3_DOCUMENTS.values()))
+
+
 def suite():
     return unittest.TestSuite([unittest.defaultTestLoader.loadTestsFromTestCase(FixtureTests),
                                unittest.defaultTestLoader.loadTestsFromTestCase(RevisionTests),
                                unittest.defaultTestLoader.loadTestsFromTestCase(P3a2Tests),
                                unittest.defaultTestLoader.loadTestsFromTestCase(P3a2FirstRefreshTests),
+                               unittest.defaultTestLoader.loadTestsFromTestCase(P3a3Tests),
                                unittest.defaultTestLoader.loadTestsFromTestCase(EntryTests)])
 
 
@@ -1210,6 +1461,23 @@ SCOPE_MUTATIONS = [
     ("document: stored permissions before", 'changed == {"permissions"} and before.get("permissions") is None and', 'changed == {"permissions"} and'),
     ("document: any value after", 'after.get("permissions") == {} and after.get("name")', 'after.get("name")'),
     ("document: any name", 'and after.get("name") == rule["empty_permissions_document"], "PG4 document permissions")', ', "PG4 document permissions")'),
+    ("the p3a3 entry runs the p3a2 check", 'result = validate_p3a3(plan, exporter.export(context))', 'result = validate_p3a2(plan)'),
+    ("the p3a3 entry runs the p3a check", 'elif mode == "p3a3":', 'elif mode == "never":'),
+    ("the p3a3 mode ignores its rule", 'drift_check(plan, P3A3_DRIFT_RULES)', 'drift_check(plan)'),
+    ("the p3a3 mode reads the p3a2 rules", 'drift_check(plan, P3A3_DRIFT_RULES)', 'drift_check(plan, P3A2_DRIFT_RULES)'),
+    ("removed inline: more than one policy", 'isinstance(new, list) and len(old) == len(new) + 1 and', 'isinstance(new, list) and'),
+    ("removed inline: another name", '[item for item in old if item.get("name") != rule["removed_inline_policy"]] == new', 'len(old) >= len(new)'),
+    ("removed inline: the policy still exists", 'check(rule["removed_policy_address"] not in prior and rule["removed_policy_address"] not in changes and\n', 'check(rule["removed_policy_address"] not in changes and\n'),
+    ("removed inline: the policy still configured", 'rule["removed_policy_address"] not in config and "inline_policy" not in', '"inline_policy" not in'),
+    ("removed inline: configured inline policy", 'not in config and "inline_policy" not in config.get(address, {}).get("expressions", {}), "PG4 removed inline separate-policy")', 'not in config, "PG4 removed inline separate-policy")'),
+    ("p3a3: one document ignored", 'check(set(P3A3_DOCUMENTS) <= set(configuration', 'check(set(list(P3A3_DOCUMENTS)[:1]) <= set(configuration'),
+    ("p3a3: any machine pin", 'check(pins and all(version == P3A3_VERSION_AFTER for _, version in pins)', 'check(pins'),
+    ("p3a3: a machine with no command", 'check(pins and all(version', 'check(all(version'),
+    ("p3a3: machine coverage subset", '{name for name, _ in pins} == set(P3A3_DOCUMENTS.values())', '{name for name, _ in pins} <= set(P3A3_DOCUMENTS.values())'),
+    ("p3a3: only latest_version read", 'for key in ("default_version", "document_version", "latest_version")', 'for key in ("latest_version",)'),
+    ("p3a3: shared document", 'check(before.get("name") == name and not before.get("permissions")', 'check(before.get("name") == name'),
+    ("p3a3: another document name", 'check(before.get("name") == name and not before.get("permissions")', 'check(not before.get("permissions")'),
+    ("p3a3: machines may be unknown", 'before, after = p3a3_update(managed, prior, address, set())', 'before, after = p3a3_update(managed, prior, address, unknown_leaves(managed[address]["change"].get("after_unknown")))'),
 ]
 
 
@@ -1248,7 +1516,7 @@ def mutations():
             continue
         message = call.args[1]
         code = message.value if isinstance(message, ast.Constant) else message.left.value if isinstance(message, ast.BinOp) and isinstance(message.left, ast.Constant) else None
-        if code in selected or code in prefixes or (code or "").startswith("P3A2 "):
+        if code in selected or code in prefixes or (code or "").startswith(("P3A2 ", "P3A3 ", "PG4 removed inline")):
             chosen.append((call, code))
     revision_codes = {"PG0 refreshed caller account mismatch", "PG0 caller provider binding", "PG0 provider credential override",
                       "PG4 unexpected drift", "PG4 document permissions", "PG4 configured document permissions",

@@ -5,6 +5,7 @@ Mutation runs the same behavioural fixtures against altered production code.
 All transport/command access is replaced by FakeHost, never a real Host.
 """
 import ast
+import contextlib
 import copy
 import hashlib
 import io
@@ -31,12 +32,15 @@ ENV = {"SSM_expectedImageSha": "a" * 40,
        "SSM_checkMode": "local", "SSM_cloudFrontDomain": "dexample.cloudfront.net"}
 TOKEN = "MOCK_SECRET_MUST_NEVER_BE_LOGGED_123456789"
 CONTAINER_ID = "abcdef012345"
+CONVERGED = "Result=success\nExecMainStatus=0\nExecMainStartTimestampMonotonic=100\nActiveState=inactive\nSubState=dead\nJob=\n"
+CONVERGING = "Result=success\nExecMainStatus=0\nExecMainStartTimestampMonotonic=100\nActiveState=activating\nSubState=start\nJob=12\n"
+START_QUEUED = "Result=success\nExecMainStatus=0\nExecMainStartTimestampMonotonic=0\nActiveState=inactive\nSubState=dead\nJob=12\n"
 
 
 class FakeHost:
     def __init__(self):
         self.calls = []
-        self.converge = "Result=success\nExecMainStatus=0\nExecMainStartTimestampMonotonic=100\nActiveState=inactive\n"
+        self.converge = CONVERGED
         self.api = {"State": {"Running": True}, "Config": {"Image": ENV["SSM_expectedImageRepository"] + ":" + "a" * 40,
                     "Labels": {"com.amazonaws.ecs.cluster": "ec-portfolio-demo", "com.amazonaws.ecs.task-definition-family": "ec-portfolio-demo-api",
                                "com.amazonaws.ecs.task-definition-version": "23"}},
@@ -182,6 +186,79 @@ class HostChecks(unittest.TestCase):
                               ("Monotonic=100", "Monotonic=0"), ("ActiveState=inactive", "ActiveState=activating")):
             self.reject(lambda h: setattr(h, "converge", h.converge.replace(before, after)), code="convergence-not-successful-this-boot")
 
+    def test_convergence_running_is_not_ready_not_failure(self):
+        for state, code in ((CONVERGING, "convergence-in-progress"), (START_QUEUED, "convergence-start-queued")):
+            for mode in ("local", "endToEnd"):
+                host = FakeHost()
+                host.converge = state
+                with self.subTest(code=code, mode=mode), self.assertRaises(MODULE.NotReady) as caught:
+                    self.run_check("od", host, mode)
+                self.assertEqual(str(caught.exception), code)
+                # No later check runs, so a partial boot cannot pass or fail any of them.
+                self.assertEqual([c[1][:2] for c in host.calls], [["systemctl", "show"]])
+
+    def test_not_ready_is_not_a_check_failure(self):
+        self.assertFalse(issubclass(MODULE.NotReady, MODULE.CheckFailure))
+
+    def test_convergence_states_that_must_fail(self):
+        no_job = lambda text: text.replace("Job=12", "Job=")
+        started_failed = CONVERGED.replace("Result=success", "Result=exit-code").replace("ExecMainStatus=0", "ExecMainStatus=1").replace("ActiveState=inactive", "ActiveState=failed").replace("SubState=dead", "SubState=failed")
+        for label, value in (("failed", started_failed),
+                             ("failed by timeout", started_failed.replace("Result=exit-code", "Result=timeout")),
+                             ("never started", no_job(START_QUEUED)),
+                             ("never started, no job field", START_QUEUED.replace("Job=12\n", "")),
+                             ("never started, job zero", START_QUEUED.replace("Job=12", "Job=0")),
+                             ("activating without a start this boot", CONVERGING.replace("Monotonic=100", "Monotonic=0")),
+                             ("activating after a failure", CONVERGING.replace("Result=success", "Result=exit-code")),
+                             ("activating with an exit status", CONVERGING.replace("ExecMainStatus=0", "ExecMainStatus=1")),
+                             ("activating in another sub-state", CONVERGING.replace("SubState=start", "SubState=auto-restart")),
+                             ("queued after a failure", START_QUEUED.replace("Result=success", "Result=exit-code")),
+                             ("queued with an exit status", START_QUEUED.replace("ExecMainStatus=0", "ExecMainStatus=1")),
+                             ("queued in another state", START_QUEUED.replace("ActiveState=inactive", "ActiveState=deactivating")),
+                             ("finished with a job pending", CONVERGED.replace("Job=", "Job=13")),
+                             ("deactivating", CONVERGED.replace("ActiveState=inactive", "ActiveState=deactivating")),
+                             ("reloading", CONVERGED.replace("ActiveState=inactive", "ActiveState=reloading")),
+                             ("unknown active state", CONVERGED.replace("ActiveState=inactive", "ActiveState=maintenance")),
+                             ("no sub-state", CONVERGED.replace("SubState=dead\n", "")),
+                             ("no active state", CONVERGED.replace("ActiveState=inactive\n", "")),
+                             ("no result", CONVERGED.replace("Result=success\n", "")),
+                             ("no exit status", CONVERGED.replace("ExecMainStatus=0\n", "")),
+                             ("no start time", CONVERGED.replace("ExecMainStartTimestampMonotonic=100\n", "")),
+                             ("start time not a number", CONVERGED.replace("Monotonic=100", "Monotonic=soon")),
+                             ("job not a number", START_QUEUED.replace("Job=12", "Job=start")),
+                             ("empty answer", "")):
+            with self.subTest(label):
+                self.reject(lambda h, v=value: setattr(h, "converge", v), code="convergence-not-successful-this-boot")
+
+    def test_later_failures_still_fail_after_convergence(self):
+        self.reject(lambda h: h.api["State"].update(Running=False), code="api-not-running")
+        self.reject(lambda h: h.valkey["State"].update(Running=False), code="valkey-not-running")
+        self.reject(lambda h: setattr(h, "readiness_status", 503), code="readiness-http-status")
+        self.reject(lambda h: setattr(h, "origin_tls", False), code="mock-tls-failed")
+        self.reject(lambda h: setattr(h, "fail_command", "docker"), code="mock-command-failed")
+
+    def test_spot_never_reads_or_waits_for_convergence(self):
+        for state in (CONVERGING, START_QUEUED, "ActiveState=failed\n"):
+            host = FakeHost()
+            host.converge = state
+            self.assertEqual(self.run_check("spot", host)["result"], "PASS")
+            self.assertFalse(any(c[0] == "command" and c[1][:2] == ["systemctl", "show"] for c in host.calls))
+
+    def run_main(self, side_effect=None):
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(MODULE, "check", side_effect=side_effect, return_value={"result": "PASS"}), \
+                mock.patch.object(MODULE.os, "geteuid", return_value=0), mock.patch.object(MODULE.sys, "argv", ["doc", "od"]), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = MODULE.main()
+        return code, out.getvalue(), err.getvalue()
+
+    def test_main_exit_contract(self):
+        self.assertEqual(self.run_main()[0], 0)
+        for reason in ("convergence-in-progress", "convergence-start-queued"):
+            self.assertEqual(self.run_main(MODULE.NotReady(reason)), (75, "NOT_READY " + reason + "\n", ""))
+        self.assertEqual(self.run_main(MODULE.CheckFailure("api-not-running")), (1, "", "FAIL api-not-running\n"))
+        self.assertEqual(self.run_main(KeyError("x")), (1, "", "FAIL unexpected-response-shape\n"))
+
     def test_convergence_duplicate_field(self):
         self.reject(lambda h: setattr(h, "converge", h.converge + "Result=success\n"))
         self.reject(lambda h: setattr(h, "converge", h.converge + "not-a-property\n"))
@@ -295,6 +372,23 @@ class DocumentChecks(unittest.TestCase):
             for param in doc["parameters"].values():
                 self.assertEqual(param["interpolationType"], "ENV_VAR")
 
+    def test_workflow_uses_the_exact_exit_contract(self):
+        # Both sides of the contract, so neither can move alone.
+        definition = json.loads((ROOT / "state-machines" / "od-standby.asl.json").read_text().replace("${timeout_seconds}", "0"))
+        choice = next(c["Condition"] for c in definition["States"]["OdReadinessChoice"]["Choices"] if c["Next"] == "OdReadinessRecheck")
+        self.assertIn("$commandCode=" + str(runtime.EXIT_NOT_READY) + " and", choice)
+        self.assertEqual(sorted(re.findall(r"'NOT_READY ([a-z-]+)'", choice)), sorted(re.findall(r'raise NotReady\("([a-z-]+)"\)', Path(runtime.__file__).read_text())))
+        self.assertNotIn(runtime.EXIT_NOT_READY, (0, 1, 2, 126, 127, 194))
+
+    def test_exit_code_reaches_ssm_through_the_shell(self):
+        # The generated exec boundary with the host program replaced: its exit code is what SSM reports.
+        command = documents.document("od")["mainSteps"][0]["inputs"]["runCommand"][0]
+        prefix = command.split(" python3 -I - od <<", 1)[0]
+        script = prefix + " python3 -I -c 'print(\"NOT_READY convergence-in-progress\");raise SystemExit(" + str(runtime.EXIT_NOT_READY) + ")'\n"
+        env = dict(os.environ, **{"SSM_" + name: "x" for name in documents.PARAMETERS})
+        result = subprocess.run(["/bin/sh", "-c", script], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.assertEqual((result.returncode, result.stdout), (75, b"NOT_READY convergence-in-progress\n"))
+
     def test_source_has_no_resource_write_or_shell_eval(self):
         source = (Path(__file__).resolve().with_name("ssm_runtime.py")).read_text()
         ast.parse(source)
@@ -368,6 +462,32 @@ def run_suite(cls, stream):
     return unittest.TextTestRunner(stream=stream, verbosity=1).run(unittest.defaultTestLoader.loadTestsFromTestCase(cls))
 
 
+# Conditions inside the convergence decision, which removing a whole require() cannot tell apart.
+BOOT_RACE_MUTATIONS = [
+    ("not-ready exits zero", 'EXIT_NOT_READY = 75', 'EXIT_NOT_READY = 0'),
+    ("not-ready exits one", 'EXIT_NOT_READY = 75', 'EXIT_NOT_READY = 1'),
+    ("not-ready output moves to stderr", 'print("NOT_READY " + str(exc))', 'print("NOT_READY " + str(exc), file=sys.stderr)'),
+    ("not-ready is a check failure", 'class NotReady(Exception):', 'class NotReady(CheckFailure):'),
+    ("activating counts as converged", 'raise NotReady("convergence-in-progress")', 'return'),
+    ("a queued job counts as converged", 'raise NotReady("convergence-start-queued")', 'return'),
+    ("activating ignores the result", 'if clean and state == ("activating", "start") and ran:', 'if state == ("activating", "start") and ran:'),
+    ("activating accepts any sub-state", 'if clean and state == ("activating", "start") and ran:', 'if clean and state[0] == "activating" and ran:'),
+    ("activating needs no start evidence", 'if clean and state == ("activating", "start") and ran:', 'if clean and state == ("activating", "start"):'),
+    ("queued ignores the result", 'if clean and state == ("inactive", "dead") and not ran and queued:', 'if state == ("inactive", "dead") and not ran and queued:'),
+    ("queued accepts any state", 'if clean and state == ("inactive", "dead") and not ran and queued:', 'if clean and not ran and queued:'),
+    ("never started is transient", 'and not ran and queued:', 'and not ran:'),
+    ("queued after it ran", 'and not ran and queued:', 'and queued:'),
+    ("a pending job counts as converged", 'and ran and not queued:', 'and ran:'),
+    ("no start evidence needed", 'and ran and not queued:', 'and not queued:'),
+    ("every other state is transient", 'raise CheckFailure("convergence-not-successful-this-boot")', 'raise NotReady("convergence-in-progress")'),
+    ("result not checked", 'clean = fields.get("Result") == "success" and fields.get("ExecMainStatus") == "0"', 'clean = fields.get("ExecMainStatus") == "0"'),
+    ("exit status not checked", 'clean = fields.get("Result") == "success" and fields.get("ExecMainStatus") == "0"', 'clean = fields.get("Result") == "success"'),
+    ("a job of any shape", '(job == "" or job.isdigit())', 'True'),
+    ("job zero is queued", 'queued = job not in ("", "0")', 'queued = job != ""'),
+    ("spot waits for convergence too", '    if kind == "od":\n        require_convergence(host)', '    require_convergence(host)\n    if kind == "od":'),
+]
+
+
 def mutation_test():
     global MODULE
     source = (Path(__file__).resolve().with_name("ssm_runtime.py")).read_text()
@@ -391,12 +511,23 @@ def mutation_test():
                                    unittest.defaultTestLoader.loadTestsFromTestCase(DocumentChecks)])
         result = unittest.TextTestRunner(stream=io.StringIO(), verbosity=0).run(suite)
         (killed if not result.wasSuccessful() else survived).append(code)
+    race_killed, race_survived = [], []
+    for label, old, new in BOOT_RACE_MUTATIONS:
+        assert source.count(old) == 1, "boot race mutation does not match once: " + label
+        module = types.ModuleType("mutant_ssm_runtime")
+        exec(compile(source.replace(old, new), "<offline-mutant>", "exec"), module.__dict__)
+        MODULE = module
+        suite = unittest.TestSuite([unittest.defaultTestLoader.loadTestsFromTestCase(HostChecks),
+                                   unittest.defaultTestLoader.loadTestsFromTestCase(DocumentChecks)])
+        result = unittest.TextTestRunner(stream=io.StringIO(), verbosity=0).run(suite)
+        (race_killed if not result.wasSuccessful() else race_survived).append(label)
     MODULE = runtime
     require_control = run_suite(HostChecks, io.StringIO())
     assert require_control.wasSuccessful(), "unmutated behavioural control failed"
     print("SSM mutation: %d/%d killed" % (len(killed), len(killed) + len(survived)))
-    if survived:
-        print("SURVIVED: " + ", ".join(survived))
+    print("SSM boot race mutation: %d/%d killed" % (len(race_killed), len(BOOT_RACE_MUTATIONS)))
+    if survived or race_survived:
+        print("SURVIVED: " + ", ".join(survived + race_survived))
         return 1
     return 0
 

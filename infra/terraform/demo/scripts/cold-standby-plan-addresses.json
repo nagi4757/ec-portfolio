@@ -166,5 +166,12 @@
       "fields": ["permissions"],
       "empty_permissions_document": "ec-portfolio-demo-spot-smoke"
     }
+  },
+  "P3A3_DRIFT_RULES": {
+    "aws_iam_role.ecs_spot": {
+      "fields": ["inline_policy"],
+      "removed_inline_policy": "origin-eip-promotion",
+      "removed_policy_address": "aws_iam_role_policy.ecs_spot_origin_eip_promotion"
+    }
   }
 }

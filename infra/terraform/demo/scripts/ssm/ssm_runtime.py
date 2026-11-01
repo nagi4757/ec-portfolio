@@ -22,10 +22,17 @@ PUBLIC_READ = "/api/public/categories"
 MIN_TLS_SECONDS = 14 * 86400
 MAX_RESPONSE = 1048576
 REGION = "ap-northeast-1"
+# sysexits EX_TEMPFAIL. The On-Demand workflow re-sends only on this exit code with
+# the fixed NOT_READY stdout line; 194 is reserved by SSM for a reboot request.
+EXIT_NOT_READY = 75
 
 
 class CheckFailure(Exception):
     pass
+
+
+class NotReady(Exception):
+    """A boot step still under way. Neither a pass nor a failure of the host."""
 
 
 def require(value, code):
@@ -154,22 +161,39 @@ def inspect_container(host, identifier):
     return data[0]
 
 
+def require_convergence(host):
+    # Parse property names, not positional --value output; systemd property
+    # order is not an API contract. A positive monotonic start proves it ran
+    # this boot, instead of accepting the default Result=success.
+    values = host.command(["systemctl", "show", "ec-portfolio-api-converge.service",
+                           "--property=ActiveState,SubState,Result,ExecMainStatus,ExecMainStartTimestampMonotonic,Job"]).splitlines()
+    fields = {}
+    for line in values:
+        require("=" in line, "convergence-result-shape")
+        key, value = line.split("=", 1)
+        require(key not in fields, "convergence-result-duplicate")
+        fields[key] = value
+    started, job = fields.get("ExecMainStartTimestampMonotonic", ""), fields.get("Job", "")
+    require(started.isdigit() and (job == "" or job.isdigit()), "convergence-not-successful-this-boot")
+    state = (fields.get("ActiveState"), fields.get("SubState"))
+    clean = fields.get("Result") == "success" and fields.get("ExecMainStatus") == "0"
+    ran = int(started) > 0
+    queued = job not in ("", "0")
+    if clean and state == ("inactive", "dead") and ran and not queued:
+        return
+    # The unit is Type=oneshot with Restart=no and no ExecStartPre, so these are
+    # the only two ways a healthy boot can be unfinished. systemd holds the start
+    # job while it waits for docker.service, before the unit shows any activity.
+    if clean and state == ("activating", "start") and ran:
+        raise NotReady("convergence-in-progress")
+    if clean and state == ("inactive", "dead") and not ran and queued:
+        raise NotReady("convergence-start-queued")
+    raise CheckFailure("convergence-not-successful-this-boot")
+
+
 def container_for(host, kind, p):
     if kind == "od":
-        # Parse property names, not positional --value output; systemd property
-        # order is not an API contract. A positive monotonic start proves it ran
-        # this boot, instead of accepting the default Result=success.
-        values = host.command(["systemctl", "show", "ec-portfolio-api-converge.service",
-                               "--property=Result,ExecMainStatus,ExecMainStartTimestampMonotonic,ActiveState"]).splitlines()
-        fields = {}
-        for line in values:
-            require("=" in line, "convergence-result-shape")
-            key, value = line.split("=", 1)
-            require(key not in fields, "convergence-result-duplicate")
-            fields[key] = value
-        require(fields.get("Result") == "success" and fields.get("ExecMainStatus") == "0" and
-                fields.get("ActiveState") == "inactive" and fields.get("ExecMainStartTimestampMonotonic", "").isdigit() and
-                int(fields["ExecMainStartTimestampMonotonic"]) > 0, "convergence-not-successful-this-boot")
+        require_convergence(host)
         identifier = "ec-portfolio-demo-api"
         container = inspect_container(host, identifier)
         valkey = inspect_container(host, "ec-portfolio-demo-valkey")
@@ -263,6 +287,9 @@ def main():
         require(os.geteuid() == 0, "root-required")
         print(json.dumps(check(sys.argv[1]), sort_keys=True))
         return 0
+    except NotReady as exc:
+        print("NOT_READY " + str(exc))
+        return EXIT_NOT_READY
     except CheckFailure as exc:
         print("FAIL " + str(exc), file=sys.stderr)
         return 1
