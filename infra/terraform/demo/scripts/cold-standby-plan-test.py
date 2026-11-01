@@ -1570,7 +1570,9 @@ SCOPE_MUTATIONS = [
     ("p3a3: only latest_version read", 'for key in ("default_version", "document_version", "latest_version")', 'for key in ("latest_version",)'),
     ("p3a3: shared document", 'check(before.get("name") == name and not before.get("permissions")', 'check(before.get("name") == name'),
     ("p3a3: another document name", 'check(before.get("name") == name and not before.get("permissions")', 'check(not before.get("permissions")'),
-    ("p3a3: machines may be unknown", 'before, after = p3a3_update(managed, prior, address, set())', 'before, after = p3a3_update(managed, prior, address, unknown_leaves(managed[address]["change"].get("after_unknown")))'),
+    ("p3a3: machines may be unknown", 'for address in P3A3_MACHINES:\n        before, after = p3a3_update(managed, prior, address, set())', 'for address in P3A3_MACHINES:\n        before, after = p3a3_update(managed, prior, address, unknown_leaves(managed[address]["change"].get("after_unknown")))'),
+    ("p3a4: the guard may be unknown", 'for address in commandless:\n        before, after = p3a3_update(managed, prior, address, set())', 'for address in commandless:\n        before, after = p3a3_update(managed, prior, address, unknown_leaves(managed[address]["change"].get("after_unknown")))'),
+    ("p3a4: the guard may send a command", 'check(p3a3_pins(definition) == [], "P3A3 commandless', 'check(True, "P3A3 commandless'),
 ]
 
 
