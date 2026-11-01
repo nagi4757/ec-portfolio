@@ -2350,7 +2350,9 @@
       "Assign": {
         "odBootAt": "{% $odBootAt=0 ? $millis() : $odBootAt %}",
         "polls": 0,
-        "attempts": 0
+        "attempts": 0,
+        "odReadinessRechecks": 0,
+        "odReadinessLeaseRetries": 0
       }
     },
     "ReleaseBoot": {
@@ -2715,7 +2717,7 @@
           "ErrorEquals": [
             "States.ALL"
           ],
-          "Next": "Failed"
+          "Next": "OdReadinessLeaseRetry"
         }
       ],
       "Next": "FenceOdReadiness",
@@ -2746,7 +2748,7 @@
                   "S": "mode"
                 }
               },
-              "ConditionExpression": "attribute_exists(enabled) AND enabled = :yes AND #scope = :scope AND approvalRef = :approval AND (#scope = :production OR (#scope = :rehearsal AND armedUntil = :armedUntil AND armedUntil > :nowUtc)) AND #state IN (:s0, :s1, :s2, :s3, :s4, :s5, :s6) AND :currentRedrive = :zero AND :writeUntil > :nowMs",
+              "ConditionExpression": "attribute_exists(enabled) AND enabled = :yes AND #scope = :scope AND approvalRef = :approval AND (#scope = :production OR (#scope = :rehearsal AND armedUntil = :armedUntil AND armedUntil > :nowUtc)) AND #state IN (:s0) AND :currentRedrive = :zero AND :writeUntil > :nowMs",
               "ExpressionAttributeNames": {
                 "#scope": "scope",
                 "#state": "state"
@@ -2786,25 +2788,7 @@
                   "N": "{% $string($millis()) %}"
                 },
                 ":s0": {
-                  "S": "off"
-                },
-                ":s1": {
-                  "S": "spot-active"
-                },
-                ":s2": {
                   "S": "failover-prep"
-                },
-                ":s3": {
-                  "S": "od-active"
-                },
-                ":s4": {
-                  "S": "failback"
-                },
-                ":s5": {
-                  "S": "day-close"
-                },
-                ":s6": {
-                  "S": "degraded"
                 }
               }
             }
@@ -2868,7 +2852,7 @@
       "Resource": "arn:aws:states:::aws-sdk:ssm:sendCommand",
       "Arguments": {
         "DocumentName": "{% ($assert(($exists($states.context.Execution.RedriveCount) ? $states.context.Execution.RedriveCount : 0)=0 and $millis()<$writeUntil,'Redriven or expired write Task'); \"${od_readiness_document_name}\") %}",
-        "DocumentVersion": "1",
+        "DocumentVersion": "2",
         "InstanceIds": [
           "{% '${od_instance_id}' %}"
         ],
@@ -2932,7 +2916,8 @@
       "Assign": {
         "commandStatus": "{% $states.result.Status %}",
         "commandCode": "{% $states.result.ResponseCode %}",
-        "polls": "{% $polls+1 %}"
+        "polls": "{% $polls+1 %}",
+        "commandOutput": "{% $exists($states.result.StandardOutputContent) ? $trim($states.result.StandardOutputContent) : '' %}"
       },
       "TimeoutSeconds": 60,
       "Catch": [
@@ -2954,6 +2939,10 @@
         {
           "Condition": "{% $commandStatus in ['Pending','InProgress','Delayed'] and $polls<36 and $millis()<$odBootAt+1200000 %}",
           "Next": "OdReadinessWait"
+        },
+        {
+          "Condition": "{% $commandStatus='Failed' and $commandCode=75 and $commandOutput in ['NOT_READY convergence-in-progress','NOT_READY convergence-start-queued'] and $odReadinessRechecks<24 and $millis()<$odBootAt+1200000 %}",
+          "Next": "OdReadinessRecheck"
         }
       ],
       "Default": "Failure"
@@ -3724,7 +3713,7 @@
       "Resource": "arn:aws:states:::aws-sdk:ssm:sendCommand",
       "Arguments": {
         "DocumentName": "{% ($assert(($exists($states.context.Execution.RedriveCount) ? $states.context.Execution.RedriveCount : 0)=0 and $millis()<$writeUntil,'Redriven or expired write Task'); \"${od_readiness_document_name}\") %}",
-        "DocumentVersion": "1",
+        "DocumentVersion": "2",
         "InstanceIds": [
           "{% '${od_instance_id}' %}"
         ],
@@ -3961,7 +3950,7 @@
       "Resource": "arn:aws:states:::aws-sdk:ssm:sendCommand",
       "Arguments": {
         "DocumentName": "{% ($assert(($exists($states.context.Execution.RedriveCount) ? $states.context.Execution.RedriveCount : 0)=0 and $millis()<$writeUntil,'Redriven or expired write Task'); \"${od_readiness_document_name}\") %}",
-        "DocumentVersion": "1",
+        "DocumentVersion": "2",
         "InstanceIds": [
           "{% '${od_instance_id}' %}"
         ],
@@ -4383,7 +4372,7 @@
       "Resource": "arn:aws:states:::aws-sdk:ssm:sendCommand",
       "Arguments": {
         "DocumentName": "{% ($assert(($exists($states.context.Execution.RedriveCount) ? $states.context.Execution.RedriveCount : 0)=0 and $millis()<$writeUntil,'Redriven or expired write Task'); \"${spot_smoke_document_name}\") %}",
-        "DocumentVersion": "1",
+        "DocumentVersion": "2",
         "InstanceIds": [
           "{% $target %}"
         ],
@@ -5667,7 +5656,7 @@
       "Resource": "arn:aws:states:::aws-sdk:ssm:sendCommand",
       "Arguments": {
         "DocumentName": "{% ($assert(($exists($states.context.Execution.RedriveCount) ? $states.context.Execution.RedriveCount : 0)=0 and $millis()<$writeUntil,'Redriven or expired write Task'); \"${spot_smoke_document_name}\") %}",
-        "DocumentVersion": "1",
+        "DocumentVersion": "2",
         "InstanceIds": [
           "{% $target %}"
         ],
@@ -6443,7 +6432,7 @@
       "Resource": "arn:aws:states:::aws-sdk:ssm:sendCommand",
       "Arguments": {
         "DocumentName": "{% ($assert(($exists($states.context.Execution.RedriveCount) ? $states.context.Execution.RedriveCount : 0)=0 and $millis()<$writeUntil,'Redriven or expired write Task'); \"${spot_smoke_document_name}\") %}",
-        "DocumentVersion": "1",
+        "DocumentVersion": "2",
         "InstanceIds": [
           "{% $target %}"
         ],
@@ -8679,7 +8668,7 @@
       "Resource": "arn:aws:states:::aws-sdk:ssm:sendCommand",
       "Arguments": {
         "DocumentName": "{% ($assert(($exists($states.context.Execution.RedriveCount) ? $states.context.Execution.RedriveCount : 0)=0 and $millis()<$writeUntil,'Redriven or expired write Task'); \"${od_readiness_document_name}\") %}",
-        "DocumentVersion": "1",
+        "DocumentVersion": "2",
         "InstanceIds": [
           "{% '${od_instance_id}' %}"
         ],
@@ -9247,7 +9236,7 @@
       "Resource": "arn:aws:states:::aws-sdk:ssm:sendCommand",
       "Arguments": {
         "DocumentName": "{% ($assert(($exists($states.context.Execution.RedriveCount) ? $states.context.Execution.RedriveCount : 0)=0 and $millis()<$writeUntil,'Redriven or expired write Task'); \"${od_readiness_document_name}\") %}",
-        "DocumentVersion": "1",
+        "DocumentVersion": "2",
         "InstanceIds": [
           "{% '${od_instance_id}' %}"
         ],
@@ -9588,6 +9577,50 @@
         }
       ],
       "Default": "Failure"
+    },
+    "OdReadinessRecheck": {
+      "Type": "Pass",
+      "Assign": {
+        "odReadinessRechecks": "{% $odReadinessRechecks+1 %}"
+      },
+      "Next": "OdReadinessRecheckWait"
+    },
+    "OdReadinessRecheckWait": {
+      "Type": "Wait",
+      "Seconds": 30,
+      "Next": "OdReadinessRecheckGate"
+    },
+    "OdReadinessRecheckGate": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Condition": "{% $millis()<$odBootAt+1200000 %}",
+          "Next": "FenceOdReadiness"
+        }
+      ],
+      "Default": "Failure"
+    },
+    "OdReadinessLeaseRetry": {
+      "Type": "Pass",
+      "Assign": {
+        "odReadinessLeaseRetries": "{% $odReadinessLeaseRetries+1 %}"
+      },
+      "Next": "OdReadinessLeaseRetryChoice"
+    },
+    "OdReadinessLeaseRetryChoice": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Condition": "{% $odReadinessLeaseRetries<6 and $millis()<$odBootAt+1200000 %}",
+          "Next": "OdReadinessLeaseWait"
+        }
+      ],
+      "Default": "Failure"
+    },
+    "OdReadinessLeaseWait": {
+      "Type": "Wait",
+      "Seconds": 20,
+      "Next": "ReacquireReadiness"
     },
     "ReadFailureLease": {
       "Type": "Task",

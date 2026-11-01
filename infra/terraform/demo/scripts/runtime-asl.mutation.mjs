@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Offline mutations execute real generated JSONata and the strict fixture's atomic DynamoDB condition interpreter.
 import assert from 'node:assert/strict';
-import {readDoc,fixture,transform,evaluate,contract,vars,replay,caughtResponseLossFixture} from './runtime-asl.test.mjs';
+import {readDoc,fixture,transform,evaluate,contract,vars,replay,caughtResponseLossFixture,notReady,readyResult,hostFailure,prepareFixture,prepareInput,sent,afterFirstRead,raceSpot,raceFixture,guardSignal,guardPromote,foreignLease} from './runtime-asl.test.mjs';
 const fixed=Date.parse('2026-10-21T09:00:00.000Z'),SPOT='i-00000000000000002';
 const owner='arn:aws:states:ap-northeast-1:111111111111:execution:MOCK:test',token='MOCK-token',until=fixed+8880000;
 const names=['day-open','ready-check','day-close','origin-guard','od-standby'];
@@ -56,8 +56,8 @@ const req=(extra={})=>({trigger:'manual',scheduledTime:'manual-behavior',...extr
 const td='arn:aws:ecs:ap-northeast-1:111111111111:task-definition/ec-portfolio-demo-api:42';
 const ready=(id)=>({pk:{S:'ready#'+id},instanceId:{S:id},sha:{S:vars.expected_image_sha},taskDefinition:{S:td},validUntil:{N:String(fixed+600000)}});
 async function behavioral(label,name,factory,input,edit,safety){
- const control=factory(),a=await replay(readDoc(name),control,input,400);await safety(a,control,false);controls++;
- const mutant=readDoc(name);edit(mutant);const m=factory(),b=await replay(mutant,m,input,400);await safety(b,m,true);killed++;byType['behavioral-'+label]=1;
+ const control=factory(),a=await replay(readDoc(name),control,input,1500);await safety(a,control,false);controls++;
+ const mutant=readDoc(name);edit(mutant);const m=factory(),b=await replay(mutant,m,input,1500);await safety(b,m,true);killed++;byType['behavioral-'+label]=1;
 }
 await behavioral('close-duplicate','day-close',()=>{const m=fixture({mode:md('off')});m.store.set('run#day-close#manual-behavior',{pk:{S:'run#day-close#manual-behavior'}});return m},req({rdsStop:'self',parkEip:'od'}),doc=>{const tx=doc.States.CloseMode.Arguments.TransactItems;tx.splice(tx.findIndex(x=>x.ConditionCheck?.Key.pk.S.includes('run#day-close')),1)},async(r,m,mut)=>{assert.equal(m.store.get('mode').state.S,mut?'day-close':'off');assert.equal(m.writes.length>0,mut)});
 await behavioral('failure-hotloop','od-standby',()=>fixture({mode:md(),holder:'',failAt:'SetDesiredSha',midHook:async(st,m)=>{if(st==='MarkDegraded')m.store.get('mode').enabled.BOOL=false}}),req({action:'prepare'}),doc=>{doc.States.MarkDegraded.Catch[0].Next='Failure'},async(r,m,mut)=>assert.equal(r.status,mut?'LIMIT':'FAIL'));
@@ -76,5 +76,54 @@ await behavioral('approval-reset-no-write','origin-guard',()=>fixture({mode:md()
 {
  const a=await caughtResponseLossFixture(),n=a.calls.length;await replay(readDoc('od-standby'),a,req({action:'supervise',reason:'observed-holder-proof-expired'}));assert.ok(a.calls.slice(n).some(x=>x.state==='SuperviseOdReadiness'&&x.args.Parameters.checkMode[0]==='endToEnd'));controls++;
  const doc=readDoc('od-standby');doc.States.SuperviseOdReadiness.Arguments.Parameters.checkMode=['local'];const b=await caughtResponseLossFixture(),before=b.calls.length;await replay(doc,b,req({action:'supervise',reason:'observed-holder-proof-expired'}));assert.ok(!b.calls.slice(before).some(x=>x.state==='SuperviseOdReadiness'&&x.args.Parameters.checkMode[0]==='endToEnd'));killed++;byType['behavioral-caught-loss-e2e-proof']=1;
+}
+// The On-Demand boot race: each safety condition of the bounded recheck, removed alone, must change a real replay.
+{
+ const OD=vars.od_instance_id,recheck=doc=>doc.States.OdReadinessChoice.Choices.find(c=>c.Next==='OdReadinessRecheck');
+ const drop=(doc,part)=>{const c=recheck(doc);assert.ok(c.Condition.includes(part),part);c.Condition=c.Condition.replace(part,'')};
+ const STATUS="$commandStatus='Failed' and ",CODE="$commandCode=75 and ",OUTPUT="$commandOutput in ['NOT_READY convergence-in-progress','NOT_READY convergence-start-queued'] and ",COUNT="$odReadinessRechecks<24 and ",WALL=" and $millis()<$odBootAt+1200000";
+ const once=(r,m,mut)=>assert.equal(sent(m)>1,mut,'re-send '+sent(m));
+ await behavioral('recheck-any-failure','od-standby',()=>prepareFixture([hostFailure()]),prepareInput(),d=>{drop(d,STATUS);drop(d,CODE);drop(d,OUTPUT)},once);
+ await behavioral('recheck-status','od-standby',()=>prepareFixture([{...notReady(),Status:'TimedOut'},readyResult()]),prepareInput(),d=>drop(d,STATUS),once);
+ await behavioral('recheck-exit-code','od-standby',()=>prepareFixture([hostFailure(1,'NOT_READY convergence-in-progress'),readyResult()]),prepareInput(),d=>drop(d,CODE),once);
+ await behavioral('recheck-output','od-standby',()=>prepareFixture([hostFailure(75,'other'),readyResult()]),prepareInput(),d=>drop(d,OUTPUT),once);
+ await behavioral('recheck-count-limit','od-standby',()=>prepareFixture([notReady()]),prepareInput(),d=>drop(d,COUNT),async(r,m,mut)=>assert.equal(sent(m)>25,mut));
+ await behavioral('recheck-counter-frozen','od-standby',()=>prepareFixture([notReady()]),prepareInput(),d=>{d.States.OdReadinessRecheck.Assign.odReadinessRechecks=0},async(r,m,mut)=>assert.equal(sent(m)>25,mut));
+ const atDeadline=(offset)=>{let boot,reads=0;return async(state,m)=>{if(state==='StartOd')boot=m.now;if(state==='OdReadinessRead'&&++reads===1)m.now=boot+1200000+offset}};
+ await behavioral('recheck-absolute-deadline','od-standby',()=>prepareFixture([notReady(),readyResult()],{midHook:atDeadline(1)}),prepareInput(),d=>{const c=recheck(d);assert.ok(c.Condition.endsWith(WALL+' %}'));c.Condition=c.Condition.replace(WALL,'')},async(r,m,mut)=>assert.equal(m.trace.includes('OdReadinessRecheck'),mut));
+ await behavioral('recheck-gate-deadline','od-standby',()=>prepareFixture([notReady(),readyResult()],{midHook:atDeadline(-5000)}),prepareInput(),d=>{d.States.OdReadinessRecheckGate.Choices[0].Condition='{% true %}'},once);
+ await behavioral('recheck-skips-fence','od-standby',()=>prepareFixture([notReady(),readyResult()],{midHook:afterFirstRead(m=>{m.store.get('mode').enabled.BOOL=false})}),prepareInput(),d=>{d.States.OdReadinessRecheckGate.Choices[0].Next='OdReadiness'},once);
+ await behavioral('recheck-any-mode','od-standby',()=>prepareFixture([notReady(),readyResult()],{midHook:afterFirstRead(m=>{m.store.get('mode').state.S='degraded'})}),prepareInput(),d=>{const mo=modeOp(d.States.FenceOdReadiness.Arguments.TransactItems);assert.ok(mo.ConditionExpression.includes('#state IN (:s0)'));mo.ConditionExpression=mo.ConditionExpression.replace('#state IN (:s0)','#state IN (:s0, :s1)');mo.ExpressionAttributeValues[':s1']={S:'degraded'}},once);
+ await behavioral('recheck-maintenance','od-standby',()=>prepareFixture([notReady(),readyResult()],{midHook:afterFirstRead(m=>{m.store.set('maintenance',{pk:{S:'maintenance'}})})}),prepareInput(),d=>{const tx=d.States.FenceOdReadiness.Arguments.TransactItems;tx.splice(tx.findIndex(x=>x.ConditionCheck?.Key.pk.S==='maintenance'),1)},once);
+ await behavioral('recheck-lease','od-standby',()=>prepareFixture([notReady(),readyResult()],{midHook:afterFirstRead(m=>{m.store.get('lock#runtime').owner.S='FOREIGN'})}),prepareInput(),d=>{removePart(lockOp(d.States.FenceOdReadiness.Arguments.TransactItems),'#owner = :owner');scrub(d.States.FenceOdReadiness.Arguments.TransactItems)},once);
+ await behavioral('recheck-other-readiness','od-standby',()=>prepareFixture([readyResult()],{invocations:{OdReadinessRead:[readyResult()],OdEndToEndRead:[notReady(),readyResult()]}}),prepareInput(),d=>{d.States.OdEndToEndChoice.Choices.push({Condition:"{% $commandStatus='Failed' and $commandCode=75 %}",Next:'FenceOdEndToEnd'})},async(r,m,mut)=>assert.equal(sent(m,'OdEndToEnd')>1,mut));
+ await behavioral('not-ready-attests','od-standby',()=>prepareFixture([notReady()]),prepareInput(),d=>{d.States.OdReadinessChoice.Choices[0].Condition="{% $commandCode=75 or ($commandStatus='Success' and $commandCode=0) %}"},async(r,m,mut)=>assert.equal(m.store.has('ready#'+OD),mut));
+ await behavioral('recheck-starts-host','od-standby',()=>prepareFixture([notReady(),readyResult()]),prepareInput(),d=>{d.States.OdReadinessRecheckGate.Choices[0].Next='FenceStartOd'},async(r,m,mut)=>assert.equal(m.writes.filter(x=>x.operation==='startInstances').length>1,mut));
+ await behavioral('recheck-counts-a-start','od-standby',()=>prepareFixture([notReady(),readyResult()]),prepareInput(),d=>{d.States.OdReadinessRecheckGate.Choices[0].Next='RecordStart'},async(r,m,mut)=>assert.equal(Number(m.store.get('day#2026-10-21').starts.N)>1,mut));
+ await behavioral('document-latest','od-standby',()=>prepareFixture([readyResult()]),prepareInput(),d=>{d.States.OdReadiness.Arguments.DocumentVersion='$LATEST'},async(r,m,mut)=>assert.equal(r.status,mut?'FAIL':'PASS'));
+ await behavioral('document-stale-pin','od-standby',()=>prepareFixture([readyResult()]),prepareInput(),d=>{d.States.OdReadiness.Arguments.DocumentVersion='1'},async(r,m,mut)=>assert.equal(r.status,mut?'FAIL':'PASS'));
+}
+// Two workflows on one store: the lease held during the wait, and losing the race to take it.
+{
+ const OD=vars.od_instance_id,lockOwner=m=>m.store.get('lock#runtime')?.owner?.S?.split(':').pop(),Interruption='EC2 Spot Instance Interruption Warning';
+ const collision=(ms=5000)=>()=>raceFixture([readyResult()],{ReadSsmOnline:async m=>foreignLease(m,ms),ReadOdPromotion:async m=>{m.o.spotState='shutting-down';await guardPromote(m)}},{holder:''});
+ const leaseCond=d=>d.States.OdReadinessLeaseRetryChoice.Choices[0];
+ await behavioral('collision-ends-the-run','od-standby',collision(),prepareInput(),d=>{d.States.ReacquireReadiness.Catch[0].Next='Failed'},async(r,m,mut)=>assert.equal(r.status,mut?'FAIL':'PASS'));
+ await behavioral('collision-goes-straight-to-failure','od-standby',collision(),prepareInput(),d=>{d.States.ReacquireReadiness.Catch[0].Next='Failure'},async(r,m,mut)=>assert.equal(r.status,mut?'FAIL':'PASS'));
+ await behavioral('collision-retry-limit','od-standby',collision(3600000),prepareInput(),d=>{const c=leaseCond(d);assert.ok(c.Condition.includes('$odReadinessLeaseRetries<6 and '));c.Condition=c.Condition.replace('$odReadinessLeaseRetries<6 and ','')},async(r,m,mut)=>assert.equal(m.trace.filter(x=>x==='OdReadinessLeaseWait').length>5,mut));
+ await behavioral('collision-counter-frozen','od-standby',collision(3600000),prepareInput(),d=>{d.States.OdReadinessLeaseRetry.Assign.odReadinessLeaseRetries=0},async(r,m,mut)=>assert.equal(m.trace.filter(x=>x==='OdReadinessLeaseWait').length>5,mut));
+ await behavioral('collision-deadline','od-standby',()=>raceFixture([readyResult()],{ReadSsmOnline:async m=>foreignLease(m,3600000),ReacquireReadiness:async m=>{m.now+=1300000}},{holder:''}),prepareInput(),d=>{const c=leaseCond(d);assert.ok(c.Condition.includes(' and $millis()<$odBootAt+1200000'));c.Condition=c.Condition.replace(' and $millis()<$odBootAt+1200000','')},async(r,m,mut)=>assert.equal(m.trace.includes('OdReadinessLeaseWait'),mut));
+ await behavioral('collision-skips-reacquire','od-standby',collision(),prepareInput(),d=>{d.States.OdReadinessLeaseWait.Next='FenceOdReadiness'},async(r,m,mut)=>assert.equal(r.status,mut?'FAIL':'PASS'));
+ await behavioral('collision-steals-the-lease','od-standby',collision(3600000),prepareInput(),d=>{const put=d.States.ReacquireReadiness.Arguments.TransactItems.find(x=>x.Put?.Item.pk.S==='lock#runtime').Put;delete put.ConditionExpression;delete put.ExpressionAttributeValues},async(r,m,mut)=>assert.equal(lockOwner(m)==='guard',!mut));
+ await behavioral('collision-any-mode','od-standby',()=>raceFixture([readyResult()],{ReadSsmOnline:async m=>{m.store.get('mode').state.S='degraded'}},{holder:''}),prepareInput(),d=>{const mo=modeOp(d.States.ReacquireReadiness.Arguments.TransactItems);assert.ok(mo.ConditionExpression.includes('#state IN (:s0)'));mo.ConditionExpression=mo.ConditionExpression.replace('#state IN (:s0)','#state IN (:s0, :s1)');mo.ExpressionAttributeValues[':s1']={S:'degraded'}},async(r,m,mut)=>assert.equal(m.trace.includes('FenceOdReadiness'),mut));
+ await behavioral('collision-maintenance','od-standby',()=>raceFixture([readyResult()],{ReadSsmOnline:async m=>{m.store.set('maintenance',{pk:{S:'maintenance'}})}},{holder:''}),prepareInput(),d=>{const tx=d.States.ReacquireReadiness.Arguments.TransactItems;tx.splice(tx.findIndex(x=>x.ConditionCheck?.Key.pk.S==='maintenance'),1)},async(r,m,mut)=>assert.equal(m.trace.includes('FenceOdReadiness'),mut));
+ {
+  const mutant=readDoc('origin-guard'),put=mutant.States.Bootstrap.Arguments.TransactItems.find(x=>x.Put?.Item.pk.S==='lock#runtime').Put;delete put.ConditionExpression;delete put.ExpressionAttributeValues;
+  const lease=async(doc)=>{const m=raceFixture([notReady(),readyResult()],{OdReadinessRead:async m=>{const now=m.now;await replay(doc,m,guardSignal(m,Interruption),1500,'guard');m.now=now}},{holder:raceSpot});await replay(readDoc('od-standby'),m,prepareInput(),1500);return m};
+  const control=await lease(readDoc('origin-guard'));assert.equal(sent(control),2);controls++;
+  const bad=await lease(mutant);assert.equal(sent(bad),1,'a stolen lease stops the wait');killed++;byType['behavioral-guard-steals-the-held-lease-proof']=1;
+ }
+ await behavioral('recovered-ignores-interruption','origin-guard',()=>{const m=raceFixture([readyResult()]);m.store.get('mode').state.S='failover-prep';m.o.odState='running';m.store.set('ready#'+OD,{pk:{S:'ready#'+OD},instanceId:{S:OD},sha:{S:vars.expected_image_sha},taskDefinition:{S:td},validUntil:{N:String(fixed+600000)}});m.store.get('instance#'+raceSpot).interruptionAt={N:String(fixed)};return m},{trigger:'manual',scheduledTime:'manual-recovered',intent:'promote-od'},d=>{const c=d.States.StablePromotionPolicy.Choices[0];assert.ok(c.Condition.includes('$not($exists($holderRecord.interruptionAt))'));c.Condition=c.Condition.replace('$not($exists($holderRecord.interruptionAt))','true')},async(r,m,mut)=>assert.equal(m.calls.filter(x=>x.state==='Associate').length,mut?0:1));
+ await behavioral('duplicate-prepare-gate','od-standby',()=>{const m=raceFixture([notReady()]);m.store.get('mode').state.S='failover-prep';m.o.odState='running';return m},{trigger:'manual',scheduledTime:'manual-dup',action:'prepare'},d=>{const c=d.States.PrepareGate.Choices[0];c.Condition='{% true %}';const up=d.States.FailoverMode.Arguments.TransactItems.map(x=>x.Update??x.ConditionCheck).find(x=>x?.Key?.pk?.S==='mode');up.ConditionExpression=up.ConditionExpression.replace('#state IN (:s0, :s1)','#state IN (:s0, :s1, :s2)');up.ExpressionAttributeValues[':s2']={S:'failover-prep'}},async(r,m,mut)=>assert.equal(m.writes.some(x=>x.operation==='startInstances'),mut));
 }
 console.log('RESULT: ASL MUTATION PASS '+killed+'/'+killed+' killed; unmutated controls='+controls+'; '+JSON.stringify(byType)+'; real AWS calls=0');

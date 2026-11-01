@@ -1627,7 +1627,7 @@
       "Resource": "arn:aws:states:::aws-sdk:ssm:sendCommand",
       "Arguments": {
         "DocumentName": "{% ($assert(($exists($states.context.Execution.RedriveCount) ? $states.context.Execution.RedriveCount : 0)=0 and $millis()<$writeUntil,'Redriven or expired write Task'); \"${spot_smoke_document_name}\") %}",
-        "DocumentVersion": "1",
+        "DocumentVersion": "2",
         "InstanceIds": [
           "{% $target %}"
         ],
@@ -2483,7 +2483,7 @@
       "Resource": "arn:aws:states:::aws-sdk:ssm:sendCommand",
       "Arguments": {
         "DocumentName": "{% ($assert(($exists($states.context.Execution.RedriveCount) ? $states.context.Execution.RedriveCount : 0)=0 and $millis()<$writeUntil,'Redriven or expired write Task'); \"${spot_smoke_document_name}\") %}",
-        "DocumentVersion": "1",
+        "DocumentVersion": "2",
         "InstanceIds": [
           "{% $target %}"
         ],
@@ -3588,7 +3588,7 @@
       "Resource": "arn:aws:states:::aws-sdk:ssm:sendCommand",
       "Arguments": {
         "DocumentName": "{% ($assert(($exists($states.context.Execution.RedriveCount) ? $states.context.Execution.RedriveCount : 0)=0 and $millis()<$writeUntil,'Redriven or expired write Task'); \"${spot_smoke_document_name}\") %}",
-        "DocumentVersion": "1",
+        "DocumentVersion": "2",
         "InstanceIds": [
           "{% $target %}"
         ],
@@ -4312,7 +4312,7 @@
       "Resource": "arn:aws:states:::aws-sdk:ssm:sendCommand",
       "Arguments": {
         "DocumentName": "{% ($assert(($exists($states.context.Execution.RedriveCount) ? $states.context.Execution.RedriveCount : 0)=0 and $millis()<$writeUntil,'Redriven or expired write Task'); \"${od_readiness_document_name}\") %}",
-        "DocumentVersion": "1",
+        "DocumentVersion": "2",
         "InstanceIds": [
           "{% '${od_instance_id}' %}"
         ],

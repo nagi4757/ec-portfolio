@@ -1066,6 +1066,90 @@ The Apply permission set covers every call through `ECPortfolioTerraformApplySpo
 
 A revert and an apply: a further template version with the allocation, `capacity_rebalance = true` and the policy again. Nothing runs on the group at desired 0, so neither direction touches the service. It is not expected to be needed: it brings back the 2026-10-13 failure and the second writer.
 
+## Phase 6C-5c P3-a3: On-Demand readiness boot race
+
+`od-standby` sends `od-readiness` as soon as SSM reports the host Online. Boot convergence can still be running then, and the document answered that the same way as a broken host: exit 1, `Failure`, mode `degraded`, then the next tick stops the host. Each cycle spends one of the three daily starts. A healthy cold boot could therefore fail the failover and repeat until the cap. The real timing is NOT VERIFIED; the offline replay on `c0f4156` reproduces the path once the document answers that way.
+
+### The change
+
+The document reports a boot still converging as its own result (see [the contract](scripts/ssm/ssm-contract.md)), and `OdReadiness` alone waits for it:
+
+```
+OdReadinessRead
+  Success, 0, in time                       -> AttestOd
+  Pending/InProgress/Delayed, polls < 36    -> OdReadinessWait
+  Failed, 75, NOT_READY line, rechecks < 24,
+    before odBootAt + 20 min                -> OdReadinessRecheck (rechecks + 1)
+                                                 -> Wait 30 s
+                                                 -> OdReadinessRecheckGate: before odBootAt + 20 min
+                                                 -> FenceOdReadiness -> SendCommand
+  anything else                             -> Failure
+```
+
+- **Bounds:** at most 24 re-sends, each cycle at least 40 s, so the limit is reached after 16 minutes at the earliest, and the existing absolute deadline of `odBootAt` + 20 minutes applies to every step. A success after it is still a failure. The unit's own `TimeoutStartSec` is also 20 minutes, so a slower boot fails here.
+- **Workflow timeout:** the deadline is not extended. From `StartOd` the worst case stays 20 minutes to the proof, 7 to see the promotion and 6 for `OdEndToEnd`; with up to 7 minutes before `StartOd` that stays inside the 45-minute `od-standby` timeout.
+- **Fences:** every re-send passes `FenceOdReadiness`: no `maintenance` item, current arming and approval, mode exactly `failover-prep`, this execution's lease and the write window. Any of them gone means `Failure`, with no further command.
+- **Lease:** it stays held while waiting, so a run that started a host keeps the only right to act on it. `origin-guard` runs that need the lease give up after their 2-minute wait with no write, as they already do during a long readiness poll; see below for what that costs.
+- **Taking the lease:** the first `ReacquireReadiness` can lose to a guard signal holding the lease for seconds. It now waits (up to 6 attempts, 20 s apart, before the same deadline) and each attempt re-checks arming, maintenance and mode. If it stays busy it takes `Failure`, which never adopts a live lease. Before, this ended the run with no cleanup.
+- **Unchanged:** `StartOd` and `RecordStart` are not on the path, so no second start and no extra daily count. `OdEndToEnd`, `SuperviseOdReadiness`, `RefreshOdReadiness`, `RestoreOdEndToEnd`, `MorningOdReadiness` and every Spot command treat exit 75 as a failure, because the host has proved convergence or is not an On-Demand boot. No new EIP writer; only `origin-guard` associates the address.
+
+### Signals during the wait
+
+Replayed offline with both workflows on one store (`leaseRaceTests`), final state for a prepare already running:
+
+| While the lease is held | `origin-guard` | Outcome |
+| --- | --- | --- |
+| Interruption warning | gives up, no write, not recorded | the host is gone 2 minutes after the warning, so the promotion sees it and OD takes the EIP. A signal within the guard's 2-minute wait of the release is recorded |
+| The same, with the host still `InService` at the promotion | gives up | `origin-guard` treats the host as recovered, keeps it and stops OD; when the host goes, its ECS task event or at the latest the next tick requests `prepare`. It costs a start and up to 30 minutes, and needs AWS to terminate more than 60 s late. The group has no terminate lifecycle hook, so no other signal fires |
+| Rebalance | gives up, not recorded | advisory only: nothing boots or stops. A failback within 30 minutes cannot see it |
+| Replacement launch | gives up, not counted | OD still promotes; the launch loop breaker counts later than it would |
+| Tick | read-only with no holder; gives up with an attested holder | no write |
+| Failing host holding the EIP | no write | the EIP moves only after the OD proof, through `origin-guard` |
+
+Recovery does not depend on the lost signals: `Reconcile` works from the holder and the instance states it reads.
+
+Re-acquiring on every cycle was replayed too. It records those signals, but adds 2 lease transactions per cycle and lets `origin-guard` flip the mode to `spot-active` and stop OD in the middle of a boot, which the promotion check otherwise does once at the end, with the proof available.
+
+**Known gap, not changed here (same on `c0f4156`):** a run that ends without `Failure` leaves `failover-prep`, and no tick acts on it (`Reconcile` ends in `Done`), so OD keeps running without the EIP until the day closes. It takes `SsmOnlineChoice` or `BootChoice` running out, a timed-out execution, a lease busy past the retry above, or maintenance or disarming during the run (the operator's case; the lease stays until it expires). Separately, a failure of `od-standby` during `day-close` overwrites that mode with `degraded`. Both need their own change before production arming.
+
+### Plan delta
+
+```
+Plan: 0 to add, 4 to change, 0 to destroy.
+```
+
+| Address | Change |
+| --- | --- |
+| `aws_ssm_document.od_readiness` | `content`; new version |
+| `aws_ssm_document.spot_smoke` | `content`; new version. It embeds the same source; its checks do not change |
+| `aws_sfn_state_machine.runtime["od_standby"]` | `definition`: the recheck, the lease retry, and `DocumentVersion` 2 on its 8 commands |
+| `aws_sfn_state_machine.runtime["day_open"]` | `definition`: `DocumentVersion` 2 on its 4 commands |
+
+`day_close`, `origin_guard` and `ready_check` send no command and do not change. No IAM changes: `ssm:SendCommand` names the document without a version, `ssm:GetCommandInvocation` already returns stdout, `ECPortfolioTerraformApplyColdStandby` already allows `ssm:UpdateDocument` and `ssm:UpdateDocumentDefaultVersion` on these two documents, and `ECPortfolioTerraformApplyRuntimeOrchestration` allows `states:UpdateStateMachine` on these machines.
+
+`aws_sfn_state_machine.runtime` now depends on both documents. A failed document update leaves the definitions pinned to version 1, which still exists, and a definition pinned to 2 cannot be written before version 2 exists. If it did run first, `SendCommand` is refused and the run fails closed. Nothing runs either way while `mode` is unarmed. The new `depends_on` is not a resource change.
+
+### Plans and the gate
+
+Same flow as P3-a2, with the mode `p3a3`:
+
+```sh
+scripts/cold-standby-plan-gate.sh p3a3 "$PRIVATE_DIR/p3a3.tfplan" "$PRIVATE_DIR/p3a3.plan.json" <sha256 of the 12-digit account id>
+scripts/cold-standby-plan-gate.sh verify "$PRIVATE_DIR/p3a3.tfplan" <saved_plan_sha256> <source_commit>
+```
+
+The gate accepts exactly those four updates and every other resource and output unchanged. Each document must be stored at version 1 with `content` equal to the reviewed source, and only `default_version`, `document_version`, `hash`, `latest_version` and `parameter` unknown, as AWS provider 6.62.0 plans them. Each definition must equal the reviewed render, pin version 2 on all its commands, and name both documents. The source must order the definitions after the documents.
+
+The convergence after P3-a2 was never applied, so the stored `aws_iam_role.ecs_spot` still lists the deleted `origin-eip-promotion` and each plan reports it in `resource_drift`. Only this mode accepts that drift, and only when the single removed policy has that name, every other policy is identical, and the separate policy exists nowhere in state or source. The backstop `start_time` keeps its existing rule.
+
+### After the apply
+
+Read back both documents at version 2 and `Active`, with the content's SHA-256 equal to the source, then run a convergence plan and expect `No changes`. A real boot through this path is verified only by a rehearsal.
+
+### Rollback
+
+A revert and an apply: the definitions pin version 1 again, which still exists, and the documents move on to version 3 with the old content. No host runs either during the change.
+
 ## Local validation
 
 Run static checks in the isolated code worktree without AWS credentials or runtime input files:

@@ -15,6 +15,16 @@ ARM = "$exists($mode.pk.S) and $mode.enabled.BOOL = true and $mode.scope.S in ['
 ARM_COND = 'attribute_exists(enabled) AND enabled = :yes AND #scope = :scope AND approvalRef = :approval AND (#scope = :production OR (#scope = :rehearsal AND armedUntil = :armedUntil AND armedUntil > :nowUtc)) AND #state IN ('
 LEASE_COND = '#owner = :owner AND lockToken = :token AND expiresAt > :minExpiry AND writeUntil = :writeUntil AND writeUntil > :now AND redriveCount = :zero'
 READ_RETRY = [{'ErrorEquals':['States.TaskFailed'],'IntervalSeconds':2,'MaxAttempts':2,'BackoffRate':2}]
+# The exact document version each command runs, kept per document because they can diverge. Never $LATEST or $DEFAULT.
+DOCUMENT_VERSIONS = {'${od_readiness_document_name}':'2','${spot_smoke_document_name}':'2'}
+# The On-Demand boot race: the contract of ssm_runtime.py main() for a boot that is still converging.
+NOT_READY_EXIT = 75
+NOT_READY_OUTPUT = "['NOT_READY convergence-in-progress','NOT_READY convergence-start-queued']"
+OD_BOOT_DEADLINE = '$odBootAt+1200000'
+OD_READINESS_RECHECKS = 24
+OD_READINESS_RECHECK_SECONDS = 30
+OD_READINESS_LEASE_RETRIES = 6
+OD_READINESS_LEASE_RETRY_SECONDS = 20
 class Build:
  def __init__(self,name):
   self.name=name; self.s={}
@@ -114,8 +124,8 @@ class Build:
   self.read(a('ReadTaskDefinition'),'ecs','describeTaskDefinition',{'TaskDefinition':E('$tdArn')},a('SnapshotGate'),{'liveSha':E("($images := $states.result.TaskDefinition.ContainerDefinitions[Name='api'].Image; $count($images)=1 and $substringBefore($images[0], ':') = '${expected_image_repository}' ? $substringAfter($images[0], ':') : '')")})
   valid="$group.AutoScalingGroupName = '${asg_name}' and $group.MinSize = 0 and $group.MaxSize = 2 and $group.CapacityRebalance = false and $count($group.Instances) <= 2 and $count($addresses) = 1 and $addresses[0].AllocationId = '${eip_allocation_id}' and ($holder = '' or $holder = '${od_instance_id}' or $holder in $group.Instances.InstanceId or ($holderRecord.asg.S='${asg_name}' and $instances[InstanceId=$holder][0].IamInstanceProfile.Arn='${spot_instance_profile_arn}' and $instances[InstanceId=$holder][0].InstanceLifecycle='spot' and $instances[InstanceId=$holder][0].State.Name in ['terminated','shutting-down','stopped'])) and $count($instances[InstanceId='${od_instance_id}' and IamInstanceProfile.Arn='${od_instance_profile_arn}'])=1 and $db.DbInstanceIdentifier = '${db_instance_identifier}' and $service.ServiceName = '${ecs_service_name}' and $contains($liveSha, /^[a-f0-9]{40}$/)"
   self.choice(a('SnapshotGate'),[(valid,nxt)],'Failed')
- def local_smoke(self,n,target,doc,nxt,mode='local'):
-  self.write(n,'ssm','sendCommand',{'DocumentName':doc,'DocumentVersion':'1','InstanceIds':[E(target)],'TimeoutSeconds':300,'Parameters':{'expectedImageSha':[E('$liveSha')],'expectedImageRepository':['${expected_image_repository}'],'expectedTaskDefinitionArn':[E('$tdArn')],'checkMode':[mode],'cloudFrontDomain':['${cloudfront_domain}']}},n+'Wait',assign={'commandId':E('$states.result.Command.CommandId'),'polls':0})
+ def local_smoke(self,n,target,doc,nxt,mode='local',modes=MODE_STATES):
+  self.write(n,'ssm','sendCommand',{'DocumentName':doc,'DocumentVersion':DOCUMENT_VERSIONS[doc],'InstanceIds':[E(target)],'TimeoutSeconds':300,'Parameters':{'expectedImageSha':[E('$liveSha')],'expectedImageRepository':['${expected_image_repository}'],'expectedTaskDefinitionArn':[E('$tdArn')],'checkMode':[mode],'cloudFrontDomain':['${cloudfront_domain}']}},n+'Wait',modes,assign={'commandId':E('$states.result.Command.CommandId'),'polls':0})
   self.wait(n+'Wait',10,n+'Read')
   self.read(n+'Read','ssm','getCommandInvocation',{'CommandId':E('$commandId'),'InstanceId':E(target)},n+'Choice',{'commandStatus':E('$states.result.Status'),'commandCode':E('$states.result.ResponseCode'),'polls':E('$polls+1')})
   self.choice(n+'Choice',[("$commandStatus = 'Success' and $commandCode = 0",nxt),("$commandStatus in ['Pending','InProgress','Delayed'] and $polls < 36",n+'Wait')],'Failure')
@@ -353,10 +363,24 @@ def harden(b):
   s['RdsAvailable']['Choices'][0]['Condition']=E("$dbStatus='available' and $millis()<=$rdsWaitUntil")
   s['RdsAvailable']['Choices'][1]['Condition']=E("$dbStatus in ['starting','stopped'] and $polls<40 and $millis()<$rdsWaitUntil")
  if b.name=='od-standby':
-  s['StartOd']['Assign']={'odBootAt':E('$odBootAt=0 ? $millis() : $odBootAt'),'polls':0,'attempts':0}
-  s['SsmOnlineChoice']['Choices'][1]['Condition']=E('$attempts<40 and $millis()<$odBootAt+1200000')
-  s['OdReadinessChoice']['Choices'][0]['Condition']=E("$commandStatus='Success' and $commandCode=0 and $millis()<=$odBootAt+1200000")
-  s['OdReadinessChoice']['Choices'][1]['Condition']=E("$commandStatus in ['Pending','InProgress','Delayed'] and $polls<36 and $millis()<$odBootAt+1200000")
+  s['StartOd']['Assign']={'odBootAt':E('$odBootAt=0 ? $millis() : $odBootAt'),'polls':0,'attempts':0,'odReadinessRechecks':0,'odReadinessLeaseRetries':0}
+  s['SsmOnlineChoice']['Choices'][1]['Condition']=E('$attempts<40 and $millis()<'+OD_BOOT_DEADLINE)
+  s['OdReadinessChoice']['Choices'][0]['Condition']=E("$commandStatus='Success' and $commandCode=0 and $millis()<="+OD_BOOT_DEADLINE)
+  s['OdReadinessChoice']['Choices'][1]['Condition']=E("$commandStatus in ['Pending','InProgress','Delayed'] and $polls<36 and $millis()<"+OD_BOOT_DEADLINE)
+  # SSM can be Online while boot convergence is still running. Only this first proof of a cold boot may wait for it,
+  # and only on the document's exact contract; every other failure, and every other readiness state, fails at once.
+  # The lease stays held: a re-acquire losing to a guard tick ends the run with no cleanup. Each re-send passes its fence.
+  s['OdReadinessRead']['Assign']['commandOutput']=E("$exists($states.result.StandardOutputContent) ? $trim($states.result.StandardOutputContent) : ''")
+  s['OdReadinessChoice']['Choices'].append({'Condition':E(f"$commandStatus='Failed' and $commandCode={NOT_READY_EXIT} and $commandOutput in {NOT_READY_OUTPUT} and $odReadinessRechecks<{OD_READINESS_RECHECKS} and $millis()<{OD_BOOT_DEADLINE}"),'Next':'OdReadinessRecheck'})
+  b.add('OdReadinessRecheck',{'Type':'Pass','Assign':{'odReadinessRechecks':E('$odReadinessRechecks+1')},'Next':'OdReadinessRecheckWait'})
+  b.wait('OdReadinessRecheckWait',OD_READINESS_RECHECK_SECONDS,'OdReadinessRecheckGate')
+  b.choice('OdReadinessRecheckGate',[('$millis()<'+OD_BOOT_DEADLINE,'OdReadiness')],'Failure')
+  # A guard signal can hold the lease for seconds as the host comes Online. Losing that race must not end the run with no
+  # cleanup: wait like BootstrapBusy, then take the Failure path. Each attempt re-checks arming, maintenance and mode.
+  s['ReacquireReadiness']['Catch']=[{'ErrorEquals':['States.ALL'],'Next':'OdReadinessLeaseRetry'}]
+  b.add('OdReadinessLeaseRetry',{'Type':'Pass','Assign':{'odReadinessLeaseRetries':E('$odReadinessLeaseRetries+1')},'Next':'OdReadinessLeaseRetryChoice'})
+  b.choice('OdReadinessLeaseRetryChoice',[(f'$odReadinessLeaseRetries<{OD_READINESS_LEASE_RETRIES} and $millis()<{OD_BOOT_DEADLINE}','OdReadinessLeaseWait')],'Failure')
+  b.wait('OdReadinessLeaseWait',OD_READINESS_LEASE_RETRY_SECONDS,'ReacquireReadiness')
  if b.name=='day-close':
   deadline="$toMillis($fromMillis($toMillis($states.context.Execution.StartTime),'[Y0001]-[M01]-[D01]','+0900') & 'T22:45:00+09:00')"
   s['NightRdsChoice']['Choices'][0]['Condition']=E("$dbStatus in ['stopping','stopped'] and ($mode.scope.S='rehearsal' or $millis()<="+deadline+")")
@@ -526,7 +550,7 @@ def od_standby():
  b.choice('BootChoice',[("$od.InstanceId='${od_instance_id}' and $od.State.Name='running' and ($exists($od.PublicIpAddress) or $holder='${od_instance_id}')",'ReadSsmOnline'),("$polls<20",'WaitBoot')],'Failed')
  b.read('ReadSsmOnline','ssm','describeInstanceInformation',{'Filters':[{'Key':'InstanceIds','Values':['${od_instance_id}']}]},'SsmOnlineChoice',{'ssmOnline':E("$count($states.result.InstanceInformationList[InstanceId='${od_instance_id}' and PingStatus='Online'])=1"),'attempts':E('$attempts+1')})
  b.choice('SsmOnlineChoice',[("$ssmOnline",'ReacquireReadiness'),("$attempts<40",'WaitSsm')],'Failed');b.wait('WaitSsm',15,'ReadSsmOnline');b.reacquire('ReacquireReadiness','OdReadiness',['failover-prep'])
- b.local_smoke('OdReadiness',"'${od_instance_id}'",'${od_readiness_document_name}','AttestOd');b.attest('AttestOd','PromoteOd')
+ b.local_smoke('OdReadiness',"'${od_instance_id}'",'${od_readiness_document_name}','AttestOd',modes=['failover-prep']);b.attest('AttestOd','PromoteOd')
  b.child('PromoteOd','${origin_guard_arn}',{'intent':'promote-od'},'ReleasePromoteOd',['failover-prep']);b.release('ReleasePromoteOd','WaitOdPromotion')
  b.wait('WaitOdPromotion',15,'ReadOdPromotion');b.read('ReadOdPromotion','ec2','describeAddresses',{'AllocationIds':['${eip_allocation_id}']},'OdPromoted',{'newHolder':E('$states.result.Addresses[0].InstanceId'),'polls':E('$polls+1')})
  b.choice('OdPromoted',[("$newHolder='${od_instance_id}'",'ReacquireE2e'),("$polls<28",'WaitOdPromotion')],'Failed');b.reacquire('ReacquireE2e','OdEndToEnd',['od-active'])
