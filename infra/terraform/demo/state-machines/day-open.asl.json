@@ -88,7 +88,9 @@
         "commandId": "",
         "event": "{% $exists($request.event) ? $request.event : {} %}",
         "nowJst": "{% $fromMillis($millis(), '[Y0001]-[M01]-[D01]T[H01]:[m01]:[s01]', '+0900') %}",
-        "dayKey": "{% 'day#' & $fromMillis($millis(), '[Y0001]-[M01]-[D01]', '+0900') %}"
+        "dayKey": "{% 'day#' & $fromMillis($millis(), '[Y0001]-[M01]-[D01]', '+0900') %}",
+        "childArn": "",
+        "reacquireSmokeLeaseWaits": 0
       },
       "Next": "ValidateInput"
     },
@@ -2027,7 +2029,10 @@
           "Next": "Failure"
         }
       ],
-      "TimeoutSeconds": 60
+      "TimeoutSeconds": 60,
+      "Assign": {
+        "childArn": "{% $states.result.ExecutionArn %}"
+      }
     },
     "ReleasePromotion": {
       "Type": "Task",
@@ -2326,6 +2331,12 @@
         ]
       },
       "Catch": [
+        {
+          "ErrorEquals": [
+            "DynamoDb.TransactionCanceledException"
+          ],
+          "Next": "ReacquireSmokeLeaseRead"
+        },
         {
           "ErrorEquals": [
             "States.ALL"
@@ -4886,6 +4897,136 @@
       ],
       "Next": "MarkDegraded",
       "TimeoutSeconds": 60
+    },
+    "ReacquireSmokeLeaseRead": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:getItem",
+      "Arguments": {
+        "TableName": "${table_name}",
+        "Key": {
+          "pk": {
+            "S": "lock#runtime"
+          }
+        },
+        "ConsistentRead": true
+      },
+      "Next": "ReacquireSmokeModeRead",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "leaseNow": "{% $exists($states.result.Item) ? $states.result.Item : {} %}"
+      },
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failed"
+        }
+      ]
+    },
+    "ReacquireSmokeModeRead": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:getItem",
+      "Arguments": {
+        "TableName": "${table_name}",
+        "Key": {
+          "pk": {
+            "S": "mode"
+          }
+        },
+        "ConsistentRead": true
+      },
+      "Next": "ReacquireSmokeMaintenanceRead",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "modeNow": "{% $exists($states.result.Item) ? $states.result.Item : {} %}"
+      },
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failed"
+        }
+      ]
+    },
+    "ReacquireSmokeMaintenanceRead": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:getItem",
+      "Arguments": {
+        "TableName": "${table_name}",
+        "Key": {
+          "pk": {
+            "S": "maintenance"
+          }
+        },
+        "ConsistentRead": true
+      },
+      "Next": "ReacquireSmokeLeaseWaitChoice",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "maintenanceNow": "{% $exists($states.result.Item.pk.S) %}"
+      },
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failed"
+        }
+      ]
+    },
+    "ReacquireSmokeLeaseWaitChoice": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Condition": "{% $reacquireSmokeLeaseWaits<6 and $redrive=0 and $millis()+20000+${write_margin_ms}<$writeUntil and $maintenanceNow=false and ($not($exists($leaseNow.pk.S)) or ($childArn!='' and $leaseNow.owner.S=$childArn and $number($leaseNow.expiresAt.N)>$millis())) and $modeNow.enabled.BOOL=true and $modeNow.scope.S=$mode.scope.S and $modeNow.approvalRef.S=$mode.approvalRef.S and $modeNow.state.S in [\"spot-active\"] and ($mode.scope.S='production' or ($modeNow.armedUntil.S=$mode.armedUntil.S and $toMillis($modeNow.armedUntil.S)>$millis()+20000)) %}",
+          "Next": "ReacquireSmokeLeaseWaitCount"
+        }
+      ],
+      "Default": "Failed"
+    },
+    "ReacquireSmokeLeaseWaitCount": {
+      "Type": "Pass",
+      "Assign": {
+        "reacquireSmokeLeaseWaits": "{% $reacquireSmokeLeaseWaits+1 %}"
+      },
+      "Next": "ReacquireSmokeLeaseWait"
+    },
+    "ReacquireSmokeLeaseWait": {
+      "Type": "Wait",
+      "Seconds": 20,
+      "Next": "ReacquireSmoke"
     }
   }
 }

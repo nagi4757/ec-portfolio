@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Offline mutations execute real generated JSONata and the strict fixture's atomic DynamoDB condition interpreter.
 import assert from 'node:assert/strict';
-import {readDoc,fixture,transform,evaluate,contract,vars,replay,caughtResponseLossFixture,notReady,readyResult,hostFailure,prepareFixture,prepareInput,sent,afterFirstRead,raceSpot,raceFixture,guardSignal,guardPromote,foreignLease,QUIESCE,orphanFixture,reconcile,awsWrites,crossedClose,failingRun,racingPrepares,closeFixture,closeInput,runClose,closing,lostResponse} from './runtime-asl.test.mjs';
+import {readDoc,fixture,transform,evaluate,contract,vars,replay,caughtResponseLossFixture,notReady,readyResult,hostFailure,prepareFixture,prepareInput,sent,afterFirstRead,raceSpot,raceFixture,guardSignal,guardPromote,foreignLease,QUIESCE,orphanFixture,reconcile,awsWrites,crossedClose,failingRun,racingPrepares,closeFixture,closeInput,runClose,closing,lostResponse,handoff,odHeldClose,closeHandoff,handoffDecisions,LEASE_HANDOFF} from './runtime-asl.test.mjs';
 const fixed=Date.parse('2026-10-21T09:00:00.000Z'),SPOT='i-00000000000000002';
 const owner='arn:aws:states:ap-northeast-1:111111111111:execution:MOCK:test',token='MOCK-token',until=fixed+8880000;
 const names=['day-open','ready-check','day-close','origin-guard','od-standby'];
@@ -183,9 +183,57 @@ await behavioral('approval-reset-no-write','origin-guard',()=>fixture({mode:md()
  await closeBehavior('final-invariant-skipped',()=>closing(closeFixture({childNoChange:false}),async(s,x)=>{if(s==='FinalReadAddress'&&!x.moved){x.moved=true;x.o.holder=''}}),d=>{d.States.FinalInvariant.Choices[0].Condition='{% true %}'},async(r,m,mut)=>assert.equal(cMode(m),mut?'off':'degraded'));
  await closeBehavior('park-limit-no-cleanup',()=>closing(closeFixture({childNoChange:true})),d=>{d.States.ParkChoice.Default='Failed'},async(r,m,mut)=>assert.equal(cMode(m),mut?'day-close':'degraded'));
  await closeBehavior('busy-limit-no-cleanup',()=>{const m=closeFixture({midHook:async(s,x)=>{if(s==='ReadFailureLease'||s==='Failure')x.store.delete('lock#runtime')}});foreignLease(m,9000000);return m},d=>{d.States.BootstrapBusy.Default='Failed'},async(r,m,mut)=>assert.equal(cMode(m),mut?'day-close':'degraded'));
- await closeBehavior('reacquire-no-cleanup',()=>closing(closeFixture({childNoChange:false,failAt:'ReacquireFinal'})),d=>{d.States.ReacquireFinal.Catch[0].Next='Failed'},async(r,m,mut)=>assert.equal(cMode(m),mut?'day-close':'degraded'));
+ await closeBehavior('reacquire-no-cleanup',()=>closing(closeFixture({childNoChange:false,failAt:'ReacquireFinal'})),d=>{d.States.ReacquireFinal.Catch.find(c=>c.ErrorEquals.includes('States.ALL')).Next='Failed'},async(r,m,mut)=>assert.equal(cMode(m),mut?'day-close':'degraded'));
  await closeBehavior('foreign-lease-deleted',()=>{const m=closing(closeFixture({childNoChange:false}),async(s,x)=>{if(s==='ReacquireFinal'&&!x.taken){x.taken=true;foreignLease(x,9000000)}});return m},d=>{d.States.FailureLeaseChoice.Default='ReacquireFailure';const put=d.States.ReacquireFailure.Arguments.TransactItems.find(x=>x.Put?.Item.pk.S==='lock#runtime').Put;delete put.ConditionExpression;delete put.ExpressionAttributeValues},async(r,m,mut)=>assert.equal(cLease(m)==='guard',!mut));
  await closeBehavior('failed-release-is-success',()=>closing(closeFixture({childNoChange:false}),async(s,x)=>{if(s==='OffMode')x.off=true;if(s==='Release'&&x.off&&!x.gone){x.gone=true;x.store.set('maintenance',{pk:{S:'maintenance'}})}}),d=>{d.States.Release.Catch[0].Next='EndChoice'},async(r,m,mut)=>assert.equal(r.status,mut?'PASS':'FAIL'));
  await closeBehavior('failure-tx-accepts-prepare','x'.length?()=>{const m=closing(closeFixture({childNoChange:false,failAt:'ScaleZero',midHook:async(s,x)=>{if(s==='MarkDegraded')x.store.get('mode').state.S='failover-prep'}}));return m}:null,d=>{const up=d.States.MarkDegraded.Arguments.TransactItems.find(x=>x.Update?.Key.pk.S==='mode').Update;up.ConditionExpression=up.ConditionExpression.replace('#state IN (:s0)','#state IN (:s0, :s1)');up.ExpressionAttributeValues[':s1']={S:'failover-prep'}},async(r,m,mut)=>assert.equal(cMode(m),mut?'degraded':'failover-prep'));
+}
+// P3-a6 lease hand-off. Decision mutants: every clause of every wait decision, one at a time, must let a refused case wait.
+{
+ const clauses=n=>{const w=n[0].toLowerCase()+n.slice(1)+'LeaseWaits';return ['$'+w+'<6','$redrive=0','$millis()+20000+120000<$writeUntil','$maintenanceNow=false',"$childArn!=''",'$leaseNow.owner.S=$childArn','$number($leaseNow.expiresAt.N)>$millis()',
+  '$modeNow.enabled.BOOL=true','$modeNow.scope.S=$mode.scope.S','$modeNow.approvalRef.S=$mode.approvalRef.S','$modeNow.armedUntil.S=$mode.armedUntil.S','$toMillis($modeNow.armedUntil.S)>$millis()+20000']};
+ for(const[name,table]of Object.entries(LEASE_HANDOFF))for(const n of Object.keys(table)){
+  const own=[...clauses(n),...(name==='day-close'?['$modeNow.closeOwner.S=$states.context.Execution.Id']:[])];
+  const unmutated=handoffDecisions(readDoc(name),name,n);for(const[label,edit]of unmutated.refused)assert.equal(await unmutated.decide(edit),false,n+' control '+label);controls++;
+  for(const part of [...own,'MODE_STATE']){const doc=readDoc(name),c=doc.States[n+'LeaseWaitChoice'].Choices[0];
+   const target=part==='MODE_STATE'?c.Condition.match(/\$modeNow\.state\.S in \[[^\]]*\]/)[0]:part;assert.ok(c.Condition.includes(target),n+' '+target);c.Condition=c.Condition.replace(target,'true');
+   const d=handoffDecisions(doc,name,n);const flipped=[];for(const[label,edit]of d.refused)if(await d.decide(edit))flipped.push(label);
+   assert.ok(flipped.length>0,'decision mutant survived: '+n+' without '+target);killed++;byType['handoff-decision']=(byType['handoff-decision']??0)+1}
+ }
+ // Behavioural mutants on concurrent runs: the scenario each one is aimed at must notice it.
+ const hb=async(label,name,scenario,edit,safety)=>{const a=await scenario(readDoc(name));await safety(a,false);controls++;const doc=readDoc(name);edit(doc);const b=await scenario(doc);await safety(b,true);killed++;byType['handoff-'+label]=1};
+ const weaken=(d,n,part)=>{const c=d.States[n+'LeaseWaitChoice'].Choices[0];assert.ok(c.Condition.includes(part),part);c.Condition=c.Condition.replace(part,'true')};
+ const run=(m,over)=>closeHandoff(m,over).then(r=>({...r,m}));
+ const atRead=(doc,edit,extra={})=>{let done=false;return run(odHeldClose(extra),{doc,release:(s,c,x)=>{if(s==='ReacquireCloseLeaseRead'&&!done){done=true;edit(x)}return false}})};
+ const held=doc=>run(odHeldClose(),{doc,release:(s,c)=>s==='ReacquireClose'&&c===2});
+ const never=doc=>run(odHeldClose(),{doc});
+ const foreign=doc=>run(odHeldClose({midHook:async(s,x)=>{if(s==='ReadPark'&&!x.taken){x.taken=true;foreignLease(x,600000)}}}),{doc,start:'never'});
+ const childFails=doc=>{const m=odHeldClose();let f=false;const before=m.o.midHook;m.o.midHook=async(s,x)=>{if(before)await before(s,x);if(s==='StableReadRds'&&!f){f=true;throw Object.assign(Error('mock child read failure'),{awsError:'States.TaskFailed'})}};return run(m,{doc,release:(s,c)=>s==='ReacquireClose'&&c===2})};
+ const access=doc=>run(odHeldClose({failAt:'ReacquireClose',error:'DynamoDb.AccessDeniedException'}),{doc,start:'never'});
+ const readFails=doc=>run(odHeldClose({failAt:'ReacquireCloseLeaseRead'}),{doc});
+ const waited=(r,mut)=>assert.equal(r.waits('ReacquireClose')>0,mut);
+ const C='ReacquireClose',T0=Date.parse('2026-10-21T09:00:00.000Z');
+ await hb('catches-every-error','day-close',access,d=>{d.States[C].Catch[0].ErrorEquals=['States.ALL']},async(r,mut)=>assert.equal(r.m.calls.some(x=>x.state===C+'LeaseRead'),mut));
+ await hb('ignores-owner','day-close',foreign,d=>weaken(d,C,'$leaseNow.owner.S=$childArn'),waited);
+ await hb('ignores-expiry','day-close',doc=>atRead(doc,x=>{x.store.get('lock#runtime').expiresAt.N=String(x.now-1)}),d=>weaken(d,C,'$number($leaseNow.expiresAt.N)>$millis()'),waited);
+ await hb('ignores-maintenance','day-close',doc=>atRead(doc,x=>{x.store.set('maintenance',{pk:{S:'maintenance'}})}),d=>weaken(d,C,'$maintenanceNow=false'),waited);
+ await hb('ignores-arming','day-close',doc=>atRead(doc,x=>{x.now=Date.parse(x.store.get('mode').armedUntil.S)-10000},{armedForMs:3600000}),d=>weaken(d,C,'$toMillis($modeNow.armedUntil.S)>$millis()+20000'),waited);
+ await hb('ignores-re-arming','day-close',doc=>atRead(doc,x=>{x.store.get('mode').armedUntil.S=new Date(x.now+7200000).toISOString()}),d=>weaken(d,C,'$modeNow.armedUntil.S=$mode.armedUntil.S'),waited);
+ await hb('ignores-approval','day-close',doc=>atRead(doc,x=>{x.store.get('mode').approvalRef.S='ANOTHER-APPROVAL'}),d=>weaken(d,C,'$modeNow.approvalRef.S=$mode.approvalRef.S'),waited);
+ await hb('ignores-close-owner','day-close',doc=>atRead(doc,x=>{x.store.get('mode').closeOwner.S='arn:x:execution:MOCK:other-close'}),d=>weaken(d,C,'$modeNow.closeOwner.S=$states.context.Execution.Id'),waited);
+ await hb('ignores-window','day-close',doc=>atRead(doc,x=>{x.now=T0+vars.write_window_ms-30000}),d=>weaken(d,C,'$millis()+20000+120000<$writeUntil'),waited);
+ await hb('unbounded','day-close',never,d=>weaken(d,C,'$reacquireCloseLeaseWaits<6'),async(r,mut)=>assert.equal(r.waits(C)===6,!mut));
+ await hb('exhaustion-skips-failure','day-close',never,d=>{d.States[C+'LeaseWaitChoice'].Default='Failed'},async(r,mut)=>assert.equal(r.m.trace.slice(r.m.trace.lastIndexOf(C+'LeaseWaitChoice')).includes('ReadFailureMode'),!mut));
+ await hb('ignores-mode-state','day-close',childFails,d=>weaken(d,C,'$modeNow.state.S in ["day-close"]'),async(r,mut)=>assert.equal(r.waits(C)>1,mut));
+ await hb('read-error-waits','day-close',readFails,d=>{d.States[C+'LeaseRead'].Catch[0].Next=C+'LeaseWaitCount'},waited);
+ await hb('no-child-arn','day-close',held,d=>{delete d.States.ParkEip.Assign},async(r,mut)=>assert.equal(r.parent.status,mut?'FAIL':'PASS'));
+ await hb('final-not-waiting','day-close',doc=>run(odHeldClose(),{doc,start:'ReadNightRds',release:(s,c)=>s==='ReacquireFinal'&&c===2}),d=>{d.States.ReacquireFinal.Catch=[d.States.ReacquireFinal.Catch[1]]},async(r,mut)=>assert.equal(r.parent.status,mut?'FAIL':'PASS'));
+ const open=doc=>{const m=fixture({childNoChange:true});return handoff({doc,m,input:{trigger:'manual',scheduledTime:'manual-open'},start:'PollPromotion',childInput:{trigger:'manual',scheduledTime:'manual-open-PromoteSpot',intent:'promote-spot',target:'i-00000000000000002'},hold:'VerifyAddress',release:(s,c)=>s==='ReacquireSmoke'&&c===2}).then(r=>({...r,m}))};
+ await hb('open-no-child-arn','day-open',open,d=>{delete d.States.PromoteSpot.Assign},async(r,mut)=>assert.equal(r.parent.status,mut?'FAIL':'PASS'));
+ await hb('open-not-waiting','day-open',open,d=>{d.States.ReacquireSmoke.Catch=[d.States.ReacquireSmoke.Catch[1]]},async(r,mut)=>assert.equal(r.parent.status,mut?'FAIL':'PASS'));
+ const standby=doc=>{const m=raceFixture([readyResult()],{ReadOdPromotion:async m=>{m.o.spotState='shutting-down'}},{holder:raceSpot});return handoff({doc,m,input:prepareInput(),start:'ReadOdPromotion',childInput:{trigger:'manual',scheduledTime:'manual-standby-PromoteOd',intent:'promote-od'},hold:'VerifyAddress',release:(s,c)=>s==='ReacquireE2e'&&c===2}).then(r=>({...r,m}))};
+ await hb('standby-no-child-arn','od-standby',standby,d=>{delete d.States.PromoteOd.Assign},async(r,mut)=>assert.equal(r.parent.status,mut?'FAIL':'PASS'));
+ await hb('standby-not-waiting','od-standby',standby,d=>{d.States.ReacquireE2e.Catch=[d.States.ReacquireE2e.Catch[1]]},async(r,mut)=>assert.equal(r.parent.status,mut?'FAIL':'PASS'));
+ await hb('standby-mode-before-child','od-standby',standby,d=>{const c=d.States.ReacquireE2eLeaseWaitChoice.Choices[0];assert.ok(c.Condition.includes('["failover-prep","od-active"]'));c.Condition=c.Condition.replace('["failover-prep","od-active"]','["od-active"]')},async(r,mut)=>assert.equal(r.parent.status,mut?'FAIL':'PASS'));
 }
 console.log('RESULT: ASL MUTATION PASS '+killed+'/'+killed+' killed; unmutated controls='+controls+'; '+JSON.stringify(byType)+'; real AWS calls=0');

@@ -158,6 +158,7 @@ export async function main(){
  await recoveryTests(test);
  await ownershipTests(test);
  await dayCloseTests(test);
+ await leaseHandoffTests(test);
  console.log('RESULT: ASL STATIC/FIXTURE/MOCK PASS tests='+tests+' parsedExpressions='+expressionCount+'; real AWS calls=0; child outcomes are fixture simulations, not AWS verification');
 }
 
@@ -381,7 +382,7 @@ async function ownershipTests(test){
  await test('ownership: the owner still cleans up after its own failure',async()=>{const m=raceFixture([readyResult()],{},{holder:'',spots:[],desired:0,failAt:'SetDesiredSha'});const r=await replay(readDoc('od-standby'),m,prepareInput(),3000);assert.equal(r.error,'Runtime.Failed');assert.equal(m.store.get('mode').state.S,'degraded');assert.equal(m.store.has('lock#runtime'),false)});
  await test('ownership: a promotion that fails still marks degraded and the next tick can recover',async()=>{const m=raceFixture([readyResult()],{ReadOdPromotion:async m=>{await failingRun(m,'ReReadTarget',()=>guardPromote(m))}},{holder:'',spots:[],desired:0});const r=await replay(readDoc('od-standby'),m,prepareInput(),3000);if(m.hookError)throw m.hookError;assert.equal(r.status,'FAIL');assert.equal(m.store.get('mode').state.S,'degraded');assert.equal(m.calls.filter(x=>x.state==='Associate').length,0);const before=m.writes.length;m.now+=60000;await tick(m,'after-promote');assert.ok(m.writes.slice(before).some(x=>x.operation==='startExecution'))});
  await test('ownership: a failed failback still marks degraded',async()=>{const m=raceFixture([readyResult()],{},{holder:od,odState:'running',odPublic:true,spots:[raceSpot],desired:1,day:{pk:{S:dayKey},odDeadline:{N:String(fixed+7200000)},odStartedAt:{N:String(fixed-3600001)},starts:{N:'1'},failbacks:{N:'0'}},failAt:'DisableOdPublic',error:'Ec2.UnauthorizedOperation',instanceRecord:{pk:{S:'instance#'+raceSpot},firstInServiceAt:{N:String(fixed-900001)}}});m.store.get('mode').state.S='od-active';const r=await replay(readDoc('od-standby'),m,{trigger:'manual',scheduledTime:'manual-failback',action:'supervise'},3000);assert.equal(r.status,'FAIL',m.trace.slice(-5).join(','));assert.equal(m.store.get('mode').state.S,'degraded')});
- await test('ownership: no lease-holding read ends a run in Failed',async()=>{for(const name of ['day-open','origin-guard','od-standby'])for(const[n,st]of Object.entries(readDoc(name).States)){if(st.Type!=='Task'||!/:(get|describe)[A-Za-z]*$/.test(st.Resource)||['ReadMode','ReadMaintenance','ReadFailureMode','ReadFailureLease'].includes(n))continue;for(const c of st.Catch)assert.notEqual(c.Next,'Failed',name+'/'+n)}});
+ await test('ownership: no lease-holding read ends a run in Failed',async()=>{for(const name of ['day-open','origin-guard','od-standby'])for(const[n,st]of Object.entries(readDoc(name).States)){if(st.Type!=='Task'||!/:(get|describe)[A-Za-z]*$/.test(st.Resource)||['ReadMode','ReadMaintenance','ReadFailureMode','ReadFailureLease'].includes(n)||/^Reacquire[A-Za-z0-9]+(LeaseRead|ModeRead|MaintenanceRead)$/.test(n))continue;for(const c of st.Catch)assert.notEqual(c.Next,'Failed',name+'/'+n)}});
  await test('quiet time: only a prepare can return to failover-prep after waiting without the lease',async()=>{const found=[];for(const name of names)for(const[n,st]of Object.entries(readDoc(name).States)){if(!st.Resource?.endsWith(':transactWriteItems'))continue;const tx=st.Arguments.TransactItems;if(!tx.some(x=>x.Put?.Item.pk.S==='lock#runtime'))continue;const mode=tx.map(x=>x.ConditionCheck).find(x=>x?.Key?.pk?.S==='mode');const values=Object.entries(mode.ExpressionAttributeValues).filter(([k])=>/^:s\d+$/.test(k)).map(([,v])=>v.S);if(n!=='Bootstrap'&&n!=='ReacquireFailure'&&values.includes('failover-prep'))found.push(name+'/'+n)}assert.deepEqual(found.sort(),['od-standby/ReacquireA1','od-standby/ReacquireEarly','od-standby/ReacquireReadiness'])});
  await test('quiet time: the path from each of those re-acquires starts at a prepare that wrote odStartedAt',async()=>{const d=readDoc('od-standby').States,seen=new Set(),queue=['RecordStart'];while(queue.length){const n=queue.pop();if(seen.has(n)||!d[n])continue;seen.add(n);const s=d[n];queue.push(s.Next,s.Default,...(s.Choices??[]).map(c=>c.Next),...(s.Catch??[]).map(c=>c.Next))}for(const n of ['ReacquireReadiness','ReacquireEarly','ReacquireA1'])assert.ok(seen.has(n),n);const before=new Set();const back=(target)=>{for(const[n,s]of Object.entries(d))if([s.Next,s.Default,...(s.Choices??[]).map(c=>c.Next),...(s.Catch??[]).map(c=>c.Next)].includes(target)&&!before.has(n)){before.add(n);if(n!=='RecordStart'&&n!=='FenceStartOd')back(n)}};back('ReacquireReadiness');assert.ok(!before.has('PathChoice'))});
  await test('ticks: the schedule is every 30 minutes, 08:00 to 21:30 JST, weekdays',async()=>{const tf=fs.readFileSync(path.join(here,'../runtime_orchestration.tf'),'utf8');assert.match(tf,/origin_guard_tick = \{[\s\S]*?schedule_expression = "cron\(0\/30 8-21 \? \* MON-FRI \*\)"/);assert.match(tf,/schedule_expression_timezone = "Asia\/Tokyo"/)});
@@ -429,7 +430,7 @@ async function dayCloseTests(test){
  await test('day-close: a failed release on the normal path is never a success',async()=>{const m=closing(closeFixture({childNoChange:false}),async(s,x)=>{if(s==='OffMode'&&!x.set){x.set=true}if(s==='Release'&&x.set&&!x.gone){x.gone=true;x.store.set('maintenance',{pk:{S:'maintenance'}})}});const r=await runClose(m);assert.equal(r.error,'Runtime.ReleaseFailed');assert.notEqual(r.status,'PASS');assert.equal(mode(m),'off')});
  await test('day-close: past its write window nothing more is written',async()=>{const seconds=workflowWindow('day-close'),real={write_window_ms:seconds*1000,lease_ms:(seconds+600)*1000};const m=closeFixture({midHook:async(s,x)=>{if(s==='ReadDrain'&&!x.late){x.late=true;x.now+=seconds*1000;x.o.spots=[];x.o.odState='stopped'}}});const r=await runClose(m,'late',undefined,readDoc('day-close',real));assert.equal(r.status,'FAIL');assert.ok(!m.writes.some(x=>x.operation==='modifyNetworkInterfaceAttribute'));assert.ok(!m.trace.includes('OffMode'));assert.equal(lease(m),'late')});
  await test('day-close: the mode transactions accept only day-close',async()=>{const d=readDoc('day-close').States;for(const n of ['MarkDegraded','ReacquireFailure']){const mode=d[n].Arguments.TransactItems.map(x=>x.Update??x.ConditionCheck).find(x=>x?.Key?.pk?.S==='mode');const values=Object.entries(mode.ExpressionAttributeValues).filter(([k])=>/^:s\d+$/.test(k)).map(([,v])=>v.S);assert.deepEqual(values,['day-close'],n)}assert.ok(!JSON.stringify(d.FailureModeChoice).includes('failover-prep'))});
- await test('day-close: no edge ends in Failed with its lease held, except the failure path itself',async()=>{const d=readDoc('day-close').States;for(const n of ['FinalSnapshotGate','ParkChoice','BootstrapBusy','FinalInvariant','NightRdsChoice','DrainChoice'])assert.equal(d[n].Default,'Failure',n);for(const n of ['ReacquireClose','ReacquireFinal'])assert.equal(d[n].Catch[0].Next,'Failure',n);for(const n of ['Release','ReleasePark','ReleaseNightWait'])assert.equal(d[n].Catch[0].Next,'ReleaseFailed',n)});
+ await test('day-close: no edge ends in Failed with its lease held, except the failure path itself',async()=>{const d=readDoc('day-close').States;for(const n of ['FinalSnapshotGate','ParkChoice','BootstrapBusy','FinalInvariant','NightRdsChoice','DrainChoice'])assert.equal(d[n].Default,'Failure',n);for(const n of ['ReacquireClose','ReacquireFinal']){assert.deepEqual(d[n].Catch.map(c=>c.Next),[n+'LeaseRead','Failure'],n);assert.deepEqual(d[n].Catch[1].ErrorEquals,['States.ALL'],n);for(const r of ['LeaseRead','ModeRead','MaintenanceRead'])assert.deepEqual(d[n+r].Catch.map(c=>c.Next),['Failure'],n+r);assert.equal(d[n+'LeaseWaitChoice'].Default,'Failure',n)}for(const n of ['Release','ReleasePark','ReleaseNightWait'])assert.equal(d[n].Catch[0].Next,'ReleaseFailed',n)});
 }
 
 // Four-phase same-store recovery fixture: the first API write took effect, but its response was lost and Failure recorded degraded.
@@ -438,5 +439,152 @@ export async function caughtResponseLossFixture(){
  const m=fixture({mode:md,holder:'',odState:'running',odPublic:true,day:{pk:{S:'day#2026-10-21'},odDeadline:{N:String(fixed+7200000)},odStartedAt:{N:String(fixed-60000)},starts:{N:'1'}},ready:{[od]:{pk:{S:'ready#'+od},instanceId:{S:od},sha:{S:vars.expected_image_sha},taskDefinition:{S:td},validUntil:{N:String(fixed+600000)}}},failAt:'Associate',error:'Ec2.MockResponseLostException',midHook:async(st,m)=>{if(st==='Associate')m.o.holder=od}});
  const first=await replay(readDoc('origin-guard'),m,{trigger:'manual',scheduledTime:'manual-response-lost-first',intent:'promote-od'});assert.equal(first.status,'FAIL');assert.equal(m.o.holder,od);assert.equal(m.store.get('mode').state.S,'degraded');
  delete m.o.failAt;delete m.o.midHook;m.now+=1800000;assert.ok(Number(m.store.get('day#2026-10-21').odDeadline.N)>m.now);assert.ok(Number(m.store.get('ready#'+od).validUntil.N)<m.now);return m;
+}
+
+// P3-a6. A parent and its origin-guard child run CONCURRENTLY on one store: the child is started by the parent's call of `start`
+// and blocked inside its own call of `hold`, holding the lease it took at Bootstrap, until `release(state, count)` is true for a
+// parent call; the child then runs to its end before that call proceeds. Earlier tests ran a child inside a single parent call,
+// so its lease was always gone when the parent re-acquired. Time spent by either run is shared, as in the other race tests.
+export const CHILD_ARN='arn:aws:states:ap-northeast-1:111111111111:execution:MOCK:child';
+export const LEASE_HANDOFF={'day-open':{ReacquireSmoke:'PromoteSpot'},'od-standby':{ReacquireEarly:'EarlyParking',ReacquireE2e:'PromoteOd',ReacquireFailback:'RequestFailback',ReacquireRestore:'RestoreRequest'},'day-close':{ReacquireClose:'ParkEip',ReacquireFinal:'ParkEip'}};
+const deferred=()=>{let resolve;const promise=new Promise(r=>{resolve=r});return {promise,resolve}};
+export async function handoff({doc,m,input,start,childInput,hold,release=()=>false,parentName='parent'}){
+ const reached=deferred(),gate=deferred();let child=null,started=false,held=false,released=false,leaseAtHold=null;const calls={};
+ const before=m.o.midHook;
+ m.o.midHook=async(state,x)=>{
+  if(before)await before(state,x);
+  calls[state]=(calls[state]??0)+1;
+  if(held&&!released&&release(state,calls[state],x)){released=true;gate.resolve();await child}
+  if(state===hold&&started&&!held){held=true;leaseAtHold=x.store.get('lock#runtime')?.owner?.S?.split(':').pop()??null;reached.resolve();await gate.promise}
+  if(state===start&&!started){started=true;child=replay(readDoc('origin-guard'),x,childInput,1500,'child');await Promise.race([reached.promise,child])}
+ };
+ const parent=await replay(doc,m,input,3000,parentName);
+ gate.resolve();const childResult=child?await child:null;m.o.midHook=before;
+ return {parent,child:childResult,leaseAtHold,waits:n=>m.trace.filter(s=>s===n+'LeaseWait').length,calls};
+}
+const rehearsalMode=(state,armedForMs=3*3600000)=>{const md=fixture().store.get('mode');md.state.S=state;md.armedUntil.S=new Date(fixed+armedForMs).toISOString();return md};
+export const parkInput=(parent='parent')=>({trigger:'manual',scheduledTime:'manual-arn:aws:states:ap-northeast-1:111111111111:execution:MOCK:'+parent+'-ParkEip',intent:'park-od'});
+const selfClose={trigger:'manual',scheduledTime:'manual-rehearsal-close',rdsStop:'self',parkEip:'od'};
+// The rehearsal's close: the failover left the EIP on OD, so the child's park moves nothing and only holds the lease.
+export const odHeldClose=(extra={})=>{const m=fixture({mode:rehearsalMode('od-active',extra.armedForMs),holder:vars.od_instance_id,odState:'running',odPublic:true,desired:1,spots:['i-00000000000000002'],childNoChange:true,...extra});const before=m.o.midHook;m.o.midHook=async(s,x)=>{if(before)await before(s,x);if(s==='ReadNightRds')x.o.dbStatus='stopping'};return m};
+export const closeHandoff=(m,over={})=>handoff({doc:readDoc('day-close'),m,input:selfClose,start:'ReadPark',childInput:parkInput(),hold:'ReReadTarget',...over});
+// The wait decision of one hand-off as a table: a base where the expected child holds an unexpired lease, the cases that
+// must still wait and the cases that must not, each changing one input. The mutation run reuses it.
+export function handoffDecisions(doc,name,n){
+ const choice=doc.States[n+'LeaseWaitChoice'],waits=n[0].toLowerCase()+n.slice(1)+'LeaseWaits',me='arn:aws:states:ap-northeast-1:111111111111:execution:MOCK:parent';
+ const states=JSON.parse(readDoc(name).States[n+'LeaseWaitChoice'].Choices[0].Condition.match(/\$modeNow\.state\.S in (\[[^\]]*\])/)[1]);
+ const mode={pk:{S:'mode'},enabled:{BOOL:true},scope:{S:'rehearsal'},approvalRef:{S:'MOCK-offline'},armedUntil:{S:new Date(fixed+3600000).toISOString()},state:{S:states[0]},closeOwner:{S:me}};
+ const base=()=>({[waits]:0,redrive:0,writeUntil:fixed+3600000,maintenanceNow:false,childArn:CHILD_ARN,leaseNow:{pk:{S:'lock#runtime'},owner:{S:CHILD_ARN},expiresAt:{N:String(fixed+2400000)}},modeNow:structuredClone(mode),mode:structuredClone(mode),states:{context:{Execution:{Id:me}}}});
+ const decide=async(edit,now=fixed)=>{const b=base();edit(b);return evaluate(choice.Choices[0].Condition,b,now)};
+ const accepted=[['the expected child holds',()=>{}],['the lease is already free',b=>{b.leaseNow={}}],['writeUntil just far enough',b=>{b.writeUntil=fixed+20001+vars.write_margin_ms}],
+  ...states.map(st=>['mode '+st,b=>{b.modeNow.state.S=st}])];
+ const refused=[['another execution',b=>{b.leaseNow.owner.S='arn:aws:states:ap-northeast-1:111111111111:execution:MOCK:other'}],['the child lease expired',b=>{b.leaseNow.expiresAt.N=String(fixed-1)}],['no child started',b=>{b.childArn='';b.leaseNow.owner.S=''}],
+  ['maintenance',b=>{b.maintenanceNow=true}],['six waits done',b=>{b[waits]=6}],['redriven',b=>{b.redrive=1}],['writeUntil too near',b=>{b.writeUntil=fixed+20000+vars.write_margin_ms}],
+  ['mode gone',b=>{b.modeNow={}}],['disabled',b=>{b.modeNow.enabled.BOOL=false}],['another approval',b=>{b.modeNow.approvalRef.S='OTHER'}],['another scope',b=>{b.modeNow.scope.S='production'}],
+  ['another state',b=>{b.modeNow.state.S='degraded'}],['re-armed',b=>{b.modeNow.armedUntil.S=new Date(fixed+7200000).toISOString()}],['arming ends inside the wait',b=>{b.modeNow.armedUntil.S=b.mode.armedUntil.S=new Date(fixed+19999).toISOString()}]];
+ if(name==='day-close')refused.push(['another close owns the mode',b=>{b.modeNow.closeOwner.S='arn:x:execution:MOCK:other-close'}]);
+ return {decide,accepted,refused};
+}
+async function leaseHandoffTests(test){
+ const od=vars.od_instance_id,spot='i-00000000000000002',mode=m=>m.store.get('mode').state.S,owner=m=>m.store.get('lock#runtime')?.owner?.S?.split(':').pop();
+ const passed=(r,label)=>{assert.equal(r.parent.status,'PASS',label+' '+JSON.stringify(r.parent.error));assert.equal(r.child.status,'PASS',label+' child');assert.equal(r.leaseAtHold,'child',label+' the child held the lease')};
+ const off=m=>{assert.equal(mode(m),'off');assert.equal(m.o.desired,0);assert.equal(m.o.odState,'stopped');assert.equal(m.o.odPublic,false);assert.equal(m.o.holder,od);assert.equal(owner(m),undefined)};
+ await test('lease hand-off: each re-acquire after an origin-guard child waits for that child, and only on a refused transaction',async()=>{
+  for(const[name,table]of Object.entries(LEASE_HANDOFF)){const s=readDoc(name).States;
+   for(const[n,child]of Object.entries(table)){
+    assert.deepEqual(s[child].Assign,{childArn:'{% $states.result.ExecutionArn %}'},n);
+    assert.equal(s[n].Catch.length,2,n);assert.deepEqual(s[n].Catch[0],{ErrorEquals:['DynamoDb.TransactionCanceledException'],Next:n+'LeaseRead'},n);assert.deepEqual(s[n].Catch[1].ErrorEquals,['States.ALL'],n);
+    const failure=s[n].Catch[1].Next;assert.equal(failure,name==='day-close'?'Failure':'Failed',n);
+    for(const r of ['LeaseRead','ModeRead','MaintenanceRead']){assert.equal(s[n+r].Resource,'arn:aws:states:::dynamodb:getItem',n+r);assert.deepEqual(s[n+r].Catch,[{ErrorEquals:['States.ALL'],Next:failure}],n+r)}
+    assert.deepEqual([s[n+'LeaseRead'].Arguments.Key.pk.S,s[n+'ModeRead'].Arguments.Key.pk.S,s[n+'MaintenanceRead'].Arguments.Key.pk.S],['lock#runtime','mode','maintenance'],n);
+    assert.equal(s[n+'LeaseWaitChoice'].Choices.length,1,n);assert.equal(s[n+'LeaseWaitChoice'].Choices[0].Next,n+'LeaseWaitCount',n);assert.equal(s[n+'LeaseWaitChoice'].Default,failure,n);
+    assert.equal(s[n+'LeaseWait'].Seconds,20,n);assert.equal(s[n+'LeaseWait'].Next,n,n);
+    // the wait path writes nothing: reads, a choice, a counter and a wait, then the same re-acquire transaction
+    assert.deepEqual(['LeaseRead','ModeRead','MaintenanceRead','LeaseWaitChoice','LeaseWaitCount','LeaseWait'].map(x=>s[n+x].Type),['Task','Task','Task','Choice','Pass','Wait'],n);
+   }
+   assert.deepEqual(Object.keys(s).filter(x=>/^Reacquire[A-Za-z0-9]+$/.test(x)&&(s[x].Catch??[]).some(c=>c.Next===x+'LeaseRead')).sort(),Object.keys(table).sort(),name+': no other re-acquire waits');
+  }
+  for(const name of ['origin-guard','ready-check'])assert.ok(!Object.keys(readDoc(name).States).some(x=>/LeaseWait/.test(x)),name);
+  // the address keeps one writer
+  for(const name of names)assert.equal(Object.values(readDoc(name).States).some(x=>(x.Resource??'').endsWith(':associateAddress')),name==='origin-guard',name);
+ });
+ // The wait decision on the real JSONata of every hand-off, one condition at a time.
+ await test('lease hand-off: the wait decision waits only for an absent lease or the unexpired lease of the expected child',async()=>{
+  for(const[name,table]of Object.entries(LEASE_HANDOFF))for(const n of Object.keys(table)){
+   const d=handoffDecisions(readDoc(name),name,n);
+   for(const[label,edit]of d.accepted)assert.equal(await d.decide(edit),true,n+' '+label);
+   for(const[label,edit]of d.refused)assert.equal(await d.decide(edit),false,n+' '+label);
+  }
+ });
+ await test('lease hand-off: the rehearsal close waits while the child holds the lease through WaitStable, then closes',async()=>{
+  const m=odHeldClose();const r=await closeHandoff(m,{release:(s,c)=>s==='ReacquireClose'&&c===4});
+  passed(r,'close');off(m);assert.equal(r.waits('ReacquireClose'),3);assert.equal(r.calls.ReacquireClose,4);assert.equal(m.o.dbStatus,'stopping');assert.ok(m.trace.includes('OffMode'));
+ });
+ await test('lease hand-off: the parent re-acquires first, the child takes the lease during NightWait, ReacquireFinal waits for it',async()=>{
+  const m=odHeldClose();const r=await closeHandoff(m,{start:'ReadNightRds',release:(s,c)=>s==='ReacquireFinal'&&c===2});
+  passed(r,'late child');off(m);assert.equal(r.waits('ReacquireClose'),0);assert.equal(r.waits('ReacquireFinal'),1);
+ });
+ await test('lease hand-off: a child whose Bootstrap meets the parent lease waits, takes it after ReleaseNightWait, and the close still ends off',async()=>{
+  const m=odHeldClose();const parked=deferred(),freed=deferred(),atHold=deferred(),gate=deferred();let child,boots=0;const before=m.o.midHook;
+  m.o.midHook=async(s,x)=>{if(before)await before(s,x);
+   if(s==='ReadRdsBeforeStop'&&!child){child=replay(readDoc('origin-guard'),x,parkInput(),1500,'child');await Promise.race([parked.promise,child])}
+   else if(s==='Bootstrap'&&child&&++boots===2){parked.resolve();await freed.promise}
+   else if(s==='ReadNightRds'&&boots===2&&!m.freed){m.freed=true;freed.resolve();await atHold.promise}
+   else if(s==='ReReadTarget'){m.ownerAtHold=owner(x);atHold.resolve();await gate.promise}
+   else if(s==='ReacquireFinal'&&m.freed&&!m.let){m.seen=(m.seen??0)+1;if(m.seen===2){m.let=true;gate.resolve();await child}}};
+  const r=await replay(readDoc('day-close'),m,selfClose,3000,'parent');gate.resolve();const c=await child;
+  assert.equal(r.status,'PASS',JSON.stringify(r.error));assert.equal(c.status,'PASS');assert.equal(m.ownerAtHold,'child');assert.ok(m.trace.includes('BootstrapBusy'));assert.equal(m.trace.filter(x=>x==='ReacquireFinalLeaseWait').length,1);off(m);
+ });
+ await test('lease hand-off: a close that moves the EIP waits through the child WaitAddress',async()=>{
+  const m=fixture({mode:rehearsalMode('spot-active'),holder:spot,odState:'stopped',desired:1,spots:[spot],childNoChange:true,midHook:async(s,x)=>{if(s==='ReadDrain'&&x.o.spots.length===0)x.o.holder='';if(s==='ReadNightRds')x.o.dbStatus='stopping'}});
+  const r=await closeHandoff(m,{hold:'VerifyAddress',release:(s,c)=>s==='ReacquireClose'&&c===2});
+  passed(r,'move');off(m);assert.equal(m.calls.filter(x=>x.state==='Associate').length,1);assert.equal(r.waits('ReacquireClose'),1);
+ });
+ await test('lease hand-off: day-open waits for PromoteSpot to finish, then runs its end-to-end smoke',async()=>{
+  const m=fixture({childNoChange:true});const r=await handoff({doc:readDoc('day-open'),m,input:{trigger:'manual',scheduledTime:'manual-open'},start:'PollPromotion',childInput:{trigger:'manual',scheduledTime:'manual-open-PromoteSpot',intent:'promote-spot',target:spot},hold:'VerifyAddress',release:(s,c)=>s==='ReacquireSmoke'&&c===2});
+  passed(r,'open');assert.equal(mode(m),'spot-active');assert.equal(m.o.holder,spot);assert.equal(r.waits('ReacquireSmoke'),1);assert.ok(m.calls.some(x=>x.state==='SpotEndToEnd'));assert.equal(owner(m),undefined);
+ });
+ await test('lease hand-off: od-standby waits for PromoteOd to finish, then runs its end-to-end proof',async()=>{
+  // as in the lease race tests, the Spot holder is ending, so the child promotes OD
+  const m=raceFixture([readyResult()],{ReadOdPromotion:async m=>{m.o.spotState='shutting-down'}},{holder:raceSpot});const r=await handoff({doc:readDoc('od-standby'),m,input:prepareInput(),start:'ReadOdPromotion',childInput:{trigger:'manual',scheduledTime:'manual-standby-PromoteOd',intent:'promote-od'},hold:'VerifyAddress',release:(s,c)=>s==='ReacquireE2e'&&c===2});
+  passed(r,'standby');assert.equal(mode(m),'od-active');assert.equal(m.o.holder,od);assert.equal(r.waits('ReacquireE2e'),1);assert.ok(m.calls.some(x=>x.state==='OdEndToEnd'));assert.equal(owner(m),undefined);
+ });
+ await test('lease hand-off: a child that already ended costs no wait',async()=>{
+  const m=odHeldClose();const r=await closeHandoff(m,{hold:'never'});
+  assert.equal(r.parent.status,'PASS');assert.equal(r.child.status,'PASS');assert.equal(r.waits('ReacquireClose'),0);off(m);
+ });
+ const stopped=(r,m,label)=>{assert.equal(r.parent.status,'FAIL',label);assert.equal(r.waits('ReacquireClose'),0,label+' no wait');assert.ok(!m.trace.includes('OffMode'),label);assert.notEqual(mode(m),'off',label)};
+ await test('lease hand-off: a lease of any other execution is never waited for or touched',async()=>{
+  // control: with no other run the close takes its lease back at once
+  const m=odHeldClose();const r=await closeHandoff(m,{start:'never'});
+  // a foreign run takes the lease right after ReleasePark
+  const m2=odHeldClose({midHook:async(s,x)=>{if(s==='ReadPark'&&!x.taken){x.taken=true;foreignLease(x,600000)}}});
+  const r2=await closeHandoff(m2,{start:'never'});
+  stopped(r2,m2,'foreign');assert.equal(owner(m2),'guard');assert.equal(mode(m2),'day-close');assert.equal(r.parent.status,'PASS');
+ });
+ await test('lease hand-off: a child that never lets go is waited for six times, then the close fails as before',async()=>{
+  const m=odHeldClose();const r=await closeHandoff(m);
+  assert.equal(r.parent.status,'FAIL');assert.equal(r.parent.error,'Runtime.Failed');assert.equal(r.waits('ReacquireClose'),6);assert.equal(r.calls.ReacquireClose,7);
+  assert.equal(r.child.status,'PASS');assert.equal(mode(m),'day-close');assert.ok(!m.trace.includes('OffMode'));assert.ok(!m.writes.some(x=>x.operation==='stopDBInstance'));
+ });
+ await test('lease hand-off: a child failing during the wait marks the close degraded and the parent stops without a wait more',async()=>{
+  const m2=odHeldClose();let failing=false;const before=m2.o.midHook;m2.o.midHook=async(s,x)=>{if(before)await before(s,x);if(s==='StableReadRds'&&!failing){failing=true;throw Object.assign(Error('mock child read failure'),{awsError:'States.TaskFailed'})}};
+  const r2=await closeHandoff(m2,{release:(s,c)=>s==='ReacquireClose'&&c===2});
+  assert.equal(r2.child.status,'FAIL');assert.equal(mode(m2),'degraded');assert.equal(r2.parent.status,'FAIL');assert.equal(r2.waits('ReacquireClose'),1);assert.equal(owner(m2),undefined);
+ });
+ for(const[label,edit,armedForMs]of[
+  ['the arming ends inside the wait',(x)=>{x.now=Date.parse(x.store.get('mode').armedUntil.S)-10000},3600000],
+  ['maintenance starts',(x)=>{x.store.set('maintenance',{pk:{S:'maintenance'}})}],
+  ['the approval changes',(x)=>{x.store.get('mode').approvalRef.S='ANOTHER-APPROVAL'}],
+  ['another close takes the mode',(x)=>{x.store.get('mode').closeOwner.S='arn:aws:states:ap-northeast-1:111111111111:execution:MOCK:other-close'}],
+  ['writeUntil comes near',(x)=>{x.now=fixed+vars.write_window_ms-30000}]])
+  await test('lease hand-off: '+label+' while the child holds the lease: the close stops at once',async()=>{
+   const m=odHeldClose({armedForMs});let done=false;const r=await closeHandoff(m,{release:(s,c,x)=>{if(s==='ReacquireCloseLeaseRead'&&!done){done=true;edit(x)}return false}});
+   stopped(r,m,label);assert.equal(r.calls.ReacquireClose,1);
+  });
+ await test('lease hand-off: an access error at the re-acquire never reads or waits',async()=>{
+  const m=odHeldClose({failAt:'ReacquireClose',error:'DynamoDb.AccessDeniedException'});const r=await closeHandoff(m,{start:'never'});
+  stopped(r,m,'access');assert.ok(!m.calls.some(x=>x.state==='ReacquireCloseLeaseRead'));
+ });
 }
 if(process.argv[1]===fileURLToPath(import.meta.url))await main();

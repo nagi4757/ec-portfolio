@@ -39,6 +39,18 @@ LEASE_HELD_GATES = {'origin-guard':['StableSnapshotGate'],'od-standby':['A1Snaps
 # No write can come from a prepare this long after it recorded odStartedAt: od-standby's 2700 s window, the 1800 s window of
 # the origin-guard child it may have started last, and a margin. Every fence refuses a write past its own run's window.
 ORPHAN_QUIESCE_MS = 4800000
+# The lease hand-off with an origin-guard child (P3-a6). The parent releases its lease, the child takes it at Bootstrap and keeps
+# it through WaitStable (60 s) and, when it moves the address, WaitAddress (10 s); the parent sees the holder before the child
+# releases. Each re-acquire below then waits for that child only: (re-acquire, the state that started the child).
+LEASE_HANDOFF = {
+ 'day-open':[('ReacquireSmoke','PromoteSpot')],
+ 'od-standby':[('ReacquireEarly','EarlyParking'),('ReacquireE2e','PromoteOd'),('ReacquireFailback','RequestFailback'),('ReacquireRestore','RestoreRequest')],
+ 'day-close':[('ReacquireClose','ParkEip'),('ReacquireFinal','ParkEip')],
+}
+LEASE_HANDOFF_WAITS = 6
+LEASE_HANDOFF_WAIT_SECONDS = 20
+# A refused transaction. Every other error, an access error included, keeps the re-acquire's own failure path.
+LEASE_HANDOFF_ERRORS = ['DynamoDb.TransactionCanceledException']
 class Build:
  def __init__(self,name):
   self.name=name; self.s={}
@@ -479,6 +491,43 @@ def harden(b):
     for catch in state.get('Catch',[]):
      if catch['Next']=='Failed':catch['Next']='Failure'
   for n in LEASE_HELD_GATES.get(b.name,[]):s[n]['Default']='Failure'
+ # Last, so that no rewrite above changes where these new states fail to.
+ lease_handoff(b)
+
+def mode_states(item):
+ values=(item.get('ConditionCheck') or item.get('Update'))['ExpressionAttributeValues']
+ return [values[k]['S'] for k in sorted(values) if k[:2]==':s' and k[2:].isdigit()]
+
+def lease_handoff(b):
+ # A refused re-acquire is tried again only while nothing but the expected hand-off can explain it, read fresh before every
+ # wait: the lease is free or held, unexpired, by the child this run started; the approval, scope, arming and mode are still
+ # this run's, maintenance is off, and the wait and a write margin fit inside writeUntil. Anything else takes the
+ # re-acquire's own failure path at once. Each attempt is the same transaction, so a live lease is never taken from anyone.
+ s=b.s
+ for reacquire,child in LEASE_HANDOFF.get(b.name,[]):
+  failure=s[reacquire]['Catch'][0]['Next']
+  assert s[reacquire]['Catch']==[{'ErrorEquals':['States.ALL'],'Next':failure}],reacquire
+  assert s[child].get('Assign',{'childArn':E('$states.result.ExecutionArn')})=={'childArn':E('$states.result.ExecutionArn')},child
+  s[child]['Assign']={'childArn':E('$states.result.ExecutionArn')}
+  s['Init']['Assign']['childArn']=''
+  modes=mode_states(s['Fence'+child]['Arguments']['TransactItems'][1])+mode_states(s[reacquire]['Arguments']['TransactItems'][1])
+  modes=list(dict.fromkeys(modes))
+  waits=reacquire[0].lower()+reacquire[1:]+'LeaseWaits'
+  s['Init']['Assign'][waits]=0
+  s[reacquire]['Catch']=[{'ErrorEquals':LEASE_HANDOFF_ERRORS,'Next':reacquire+'LeaseRead'},{'ErrorEquals':['States.ALL'],'Next':failure}]
+  b.read(reacquire+'LeaseRead','dynamodb','getItem',{'TableName':TABLE,'Key':{'pk':S('lock#runtime')},'ConsistentRead':True},reacquire+'ModeRead',{'leaseNow':E('$exists($states.result.Item) ? $states.result.Item : {}')})
+  b.read(reacquire+'ModeRead','dynamodb','getItem',{'TableName':TABLE,'Key':{'pk':S('mode')},'ConsistentRead':True},reacquire+'MaintenanceRead',{'modeNow':E('$exists($states.result.Item) ? $states.result.Item : {}')})
+  b.read(reacquire+'MaintenanceRead','dynamodb','getItem',{'TableName':TABLE,'Key':{'pk':S('maintenance')},'ConsistentRead':True},reacquire+'LeaseWaitChoice',{'maintenanceNow':E('$exists($states.result.Item.pk.S)')})
+  for n in ['LeaseRead','ModeRead','MaintenanceRead']:s[reacquire+n]['Catch']=[{'ErrorEquals':['States.ALL'],'Next':failure}]
+  wait_ms=LEASE_HANDOFF_WAIT_SECONDS*1000
+  lease=f"($not($exists($leaseNow.pk.S)) or ($childArn!='' and $leaseNow.owner.S=$childArn and $number($leaseNow.expiresAt.N)>$millis()))"
+  mode=(f"$modeNow.enabled.BOOL=true and $modeNow.scope.S=$mode.scope.S and $modeNow.approvalRef.S=$mode.approvalRef.S and $modeNow.state.S in {json.dumps(modes,separators=(',',':'))}"
+        f" and ($mode.scope.S='production' or ($modeNow.armedUntil.S=$mode.armedUntil.S and $toMillis($modeNow.armedUntil.S)>$millis()+{wait_ms}))")
+  if b.name=='day-close':mode+=" and $modeNow.closeOwner.S=$states.context.Execution.Id"
+  bound=f"${waits}<{LEASE_HANDOFF_WAITS} and $redrive=0 and $millis()+{wait_ms}+${{write_margin_ms}}<$writeUntil"
+  b.choice(reacquire+'LeaseWaitChoice',[(f"{bound} and $maintenanceNow=false and {lease} and {mode}",reacquire+'LeaseWaitCount')],failure)
+  b.add(reacquire+'LeaseWaitCount',{'Type':'Pass','Assign':{waits:E(f'${waits}+1')},'Next':reacquire+'LeaseWait'})
+  b.wait(reacquire+'LeaseWait',LEASE_HANDOFF_WAIT_SECONDS,reacquire)
 
 def close_ownership(b):
  # A close owns the mode from the moment its CloseMode commits, and only then: it holds no lease and no transition before that.
