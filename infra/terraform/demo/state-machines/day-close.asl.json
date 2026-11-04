@@ -89,7 +89,10 @@
         "event": "{% $exists($request.event) ? $request.event : {} %}",
         "nowJst": "{% $fromMillis($millis(), '[Y0001]-[M01]-[D01]T[H01]:[m01]:[s01]', '+0900') %}",
         "dayKey": "{% 'day#' & $fromMillis($millis(), '[Y0001]-[M01]-[D01]', '+0900') %}",
-        "ownsClose": false
+        "ownsClose": false,
+        "childArn": "",
+        "reacquireCloseLeaseWaits": 0,
+        "reacquireFinalLeaseWaits": 0
       },
       "Next": "ValidateInput"
     },
@@ -1676,7 +1679,10 @@
           "Next": "Failure"
         }
       ],
-      "TimeoutSeconds": 60
+      "TimeoutSeconds": 60,
+      "Assign": {
+        "childArn": "{% $states.result.ExecutionArn %}"
+      }
     },
     "ReleasePark": {
       "Type": "Task",
@@ -1975,6 +1981,12 @@
         ]
       },
       "Catch": [
+        {
+          "ErrorEquals": [
+            "DynamoDb.TransactionCanceledException"
+          ],
+          "Next": "ReacquireCloseLeaseRead"
+        },
         {
           "ErrorEquals": [
             "States.ALL"
@@ -2475,6 +2487,12 @@
         ]
       },
       "Catch": [
+        {
+          "ErrorEquals": [
+            "DynamoDb.TransactionCanceledException"
+          ],
+          "Next": "ReacquireFinalLeaseRead"
+        },
         {
           "ErrorEquals": [
             "States.ALL"
@@ -3327,6 +3345,266 @@
       "Type": "Fail",
       "Error": "Runtime.ReleaseFailed",
       "Cause": "The lease of this close could not be released, for example under maintenance, without arming or past its window. It stays until it expires. See the README."
+    },
+    "ReacquireCloseLeaseRead": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:getItem",
+      "Arguments": {
+        "TableName": "${table_name}",
+        "Key": {
+          "pk": {
+            "S": "lock#runtime"
+          }
+        },
+        "ConsistentRead": true
+      },
+      "Next": "ReacquireCloseModeRead",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "leaseNow": "{% $exists($states.result.Item) ? $states.result.Item : {} %}"
+      },
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failure"
+        }
+      ]
+    },
+    "ReacquireCloseModeRead": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:getItem",
+      "Arguments": {
+        "TableName": "${table_name}",
+        "Key": {
+          "pk": {
+            "S": "mode"
+          }
+        },
+        "ConsistentRead": true
+      },
+      "Next": "ReacquireCloseMaintenanceRead",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "modeNow": "{% $exists($states.result.Item) ? $states.result.Item : {} %}"
+      },
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failure"
+        }
+      ]
+    },
+    "ReacquireCloseMaintenanceRead": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:getItem",
+      "Arguments": {
+        "TableName": "${table_name}",
+        "Key": {
+          "pk": {
+            "S": "maintenance"
+          }
+        },
+        "ConsistentRead": true
+      },
+      "Next": "ReacquireCloseLeaseWaitChoice",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "maintenanceNow": "{% $exists($states.result.Item.pk.S) %}"
+      },
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failure"
+        }
+      ]
+    },
+    "ReacquireCloseLeaseWaitChoice": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Condition": "{% $reacquireCloseLeaseWaits<6 and $redrive=0 and $millis()+20000+${write_margin_ms}<$writeUntil and $maintenanceNow=false and ($not($exists($leaseNow.pk.S)) or ($childArn!='' and $leaseNow.owner.S=$childArn and $number($leaseNow.expiresAt.N)>$millis())) and $modeNow.enabled.BOOL=true and $modeNow.scope.S=$mode.scope.S and $modeNow.approvalRef.S=$mode.approvalRef.S and $modeNow.state.S in [\"day-close\"] and ($mode.scope.S='production' or ($modeNow.armedUntil.S=$mode.armedUntil.S and $toMillis($modeNow.armedUntil.S)>$millis()+20000)) and $modeNow.closeOwner.S=$states.context.Execution.Id %}",
+          "Next": "ReacquireCloseLeaseWaitCount"
+        }
+      ],
+      "Default": "Failure"
+    },
+    "ReacquireCloseLeaseWaitCount": {
+      "Type": "Pass",
+      "Assign": {
+        "reacquireCloseLeaseWaits": "{% $reacquireCloseLeaseWaits+1 %}"
+      },
+      "Next": "ReacquireCloseLeaseWait"
+    },
+    "ReacquireCloseLeaseWait": {
+      "Type": "Wait",
+      "Seconds": 20,
+      "Next": "ReacquireClose"
+    },
+    "ReacquireFinalLeaseRead": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:getItem",
+      "Arguments": {
+        "TableName": "${table_name}",
+        "Key": {
+          "pk": {
+            "S": "lock#runtime"
+          }
+        },
+        "ConsistentRead": true
+      },
+      "Next": "ReacquireFinalModeRead",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "leaseNow": "{% $exists($states.result.Item) ? $states.result.Item : {} %}"
+      },
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failure"
+        }
+      ]
+    },
+    "ReacquireFinalModeRead": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:getItem",
+      "Arguments": {
+        "TableName": "${table_name}",
+        "Key": {
+          "pk": {
+            "S": "mode"
+          }
+        },
+        "ConsistentRead": true
+      },
+      "Next": "ReacquireFinalMaintenanceRead",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "modeNow": "{% $exists($states.result.Item) ? $states.result.Item : {} %}"
+      },
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failure"
+        }
+      ]
+    },
+    "ReacquireFinalMaintenanceRead": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:getItem",
+      "Arguments": {
+        "TableName": "${table_name}",
+        "Key": {
+          "pk": {
+            "S": "maintenance"
+          }
+        },
+        "ConsistentRead": true
+      },
+      "Next": "ReacquireFinalLeaseWaitChoice",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Assign": {
+        "maintenanceNow": "{% $exists($states.result.Item.pk.S) %}"
+      },
+      "TimeoutSeconds": 60,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failure"
+        }
+      ]
+    },
+    "ReacquireFinalLeaseWaitChoice": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Condition": "{% $reacquireFinalLeaseWaits<6 and $redrive=0 and $millis()+20000+${write_margin_ms}<$writeUntil and $maintenanceNow=false and ($not($exists($leaseNow.pk.S)) or ($childArn!='' and $leaseNow.owner.S=$childArn and $number($leaseNow.expiresAt.N)>$millis())) and $modeNow.enabled.BOOL=true and $modeNow.scope.S=$mode.scope.S and $modeNow.approvalRef.S=$mode.approvalRef.S and $modeNow.state.S in [\"day-close\"] and ($mode.scope.S='production' or ($modeNow.armedUntil.S=$mode.armedUntil.S and $toMillis($modeNow.armedUntil.S)>$millis()+20000)) and $modeNow.closeOwner.S=$states.context.Execution.Id %}",
+          "Next": "ReacquireFinalLeaseWaitCount"
+        }
+      ],
+      "Default": "Failure"
+    },
+    "ReacquireFinalLeaseWaitCount": {
+      "Type": "Pass",
+      "Assign": {
+        "reacquireFinalLeaseWaits": "{% $reacquireFinalLeaseWaits+1 %}"
+      },
+      "Next": "ReacquireFinalLeaseWait"
+    },
+    "ReacquireFinalLeaseWait": {
+      "Type": "Wait",
+      "Seconds": 20,
+      "Next": "ReacquireFinal"
     }
   }
 }

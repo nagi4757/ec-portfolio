@@ -1607,6 +1607,162 @@ class P3a5Tests(unittest.TestCase):
                 self.assertIn("REJECT P3A3 exact updates", err)
 
 
+def p3a6_plan():
+    """P3-a6 on the converged P3-a5 state: the documents are at version 2, origin_guard and ready_check
+    are no-op, and day_open, od_standby and day_close update their definitions only."""
+    plan = p3a5_plan()
+    for address, name in ORIGINAL.P3A3_DOCUMENTS.items():
+        content = RENDERED["resources"][address]["content"]
+        stored = {"name": name, "content": content, "default_version": "2", "document_version": "2", "latest_version": "2",
+                  "hash": "MOCK-hash-2", "parameter": [{"name": "checkMode"}], "permissions": {}, "tags": {"Name": name}}
+        bind_refreshed(plan, address, stored)
+        resource(plan, address)["change"].update(actions=["no-op"], after=copy.deepcopy(stored), after_unknown={})
+    for address in sorted(ORIGINAL.P3A3_MACHINES | ORIGINAL.P3A5_COMMANDLESS):
+        definition = RENDERED["resources"][address]["definition"]
+        if address in ORIGINAL.P3A6_MACHINES:
+            stored = {**after(plan, address), "definition": definition.replace("P3-a real", "P3-a old")}
+            bind_refreshed(plan, address, stored)
+            resource(plan, address)["change"].update(actions=["update"], after={**stored, "definition": definition}, after_unknown={"tags_all": {}})
+        else:
+            stored = {**after(plan, address), "definition": definition}
+            bind_refreshed(plan, address, stored)
+            resource(plan, address)["change"].update(actions=["no-op"], after=copy.deepcopy(stored), after_unknown={})
+    p3a3_sync(plan)
+    return plan
+
+
+class P3a6Tests(unittest.TestCase):
+    """validate_p3a6 on the exact 0 / 3 / 0 plan over the converged P3-a5 state."""
+    OPEN = 'aws_sfn_state_machine.runtime["day_open"]'
+    STANDBY = 'aws_sfn_state_machine.runtime["od_standby"]'
+    CLOSE = 'aws_sfn_state_machine.runtime["day_close"]'
+    GUARD = 'aws_sfn_state_machine.runtime["origin_guard"]'
+
+    def reject(self, mutate, prefix, rendered=None, plan_factory=p3a6_plan, sync=True):
+        global FIXTURE_CHECKS
+        FIXTURE_CHECKS += 1
+        plan = plan_factory()
+        mutate(plan)
+        if sync:
+            p3a3_sync(plan)
+        with self.assertRaises(G.Rejected) as caught:
+            G.validate_p3a6(plan, rendered or RENDERED)
+        self.assertTrue(str(caught.exception).startswith(prefix), str(caught.exception))
+
+    def change(self, plan, address):
+        return resource(plan, address)["change"]
+
+    def test_exact_plan_passes(self):
+        result = G.validate_p3a6(p3a6_plan(), RENDERED)
+        self.assertEqual((result["mode"], result["creates"], result["changes"], result["destroys"]), ("p3a6", 0, 3, 0))
+
+    def test_every_mode_stays_exact(self):
+        for plan_factory in (p3a5_plan, p3a4_plan, p3a3_plan):
+            self.reject(lambda p: None, "P3A6 exact updates", plan_factory=plan_factory)
+        for validate in (G.validate_p3a3, G.validate_p3a4, G.validate_p3a5):
+            with self.assertRaises(G.Rejected) as caught:
+                validate(p3a6_plan(), RENDERED)
+            self.assertEqual(str(caught.exception), "P3A3 exact updates")
+
+    def test_unexpected_changes(self):
+        for other in (self.GUARD, 'aws_sfn_state_machine.runtime["ready_check"]', "aws_ssm_document.od_readiness", "aws_ssm_document.spot_smoke", "aws_iam_role_policy.runtime_orchestrator",
+                      "aws_iam_role_policy.runtime_eip_writer", ORIGINAL.P3A2_GROUP, ORIGINAL.P3A2_TEMPLATE, 'aws_scheduler_schedule.runtime_orchestration["day_close"]', "aws_instance.demo"):
+            self.reject(lambda p, a=other: self.change(p, a).update(actions=["update"]), "P3A6 exact updates")
+        for address in sorted(G.P3A6_MACHINES):
+            self.reject(lambda p, a=address: self.change(p, a).update(actions=["no-op"]), "P3A6 exact updates")
+        self.reject(lambda p: self.change(p, self.GUARD)["after"].update(definition="{}"), "P3A6 existing changed")
+        self.reject(lambda p: self.change(p, self.GUARD).update(after_unknown={"definition": True}), "P3A6 existing unknown/moved")
+        self.reject(lambda p: p["output_changes"]["ecs_spot_launch_template_version"].update(actions=["update"]), "P3A6 output changed")
+        def snapshot(p):
+            p3a3_sync(p)
+            p["planned_values"]["outputs"]["ecs_spot_launch_template_version"] = {"value": 6}
+        self.reject(snapshot, "P3A6 output snapshot changed", sync=False)
+        self.reject(p3a3_stale_role, "PG4 unexpected drift")
+
+    def test_root_and_existing_resources(self):
+        def remove_prior(p, address):
+            p["prior_state"]["values"]["root_module"]["resources"] = [r for r in p["prior_state"]["values"]["root_module"]["resources"] if r["address"] != address]
+        self.reject(lambda p: remove_prior(p, "aws_instance.demo"), "P3A6 wrong/incomplete root")
+        self.reject(lambda p: p["resource_changes"].append({"address": "aws_x.unknown", "mode": "managed", "type": "aws_x", "change": {"actions": ["no-op"], "before": {}, "after": {}, "after_unknown": {}}}), "P3A6 all prior resources represented")
+        self.reject(lambda p: p["resource_changes"].remove(resource(p, "aws_instance.demo")), "P3A6 all prior resources represented")
+        self.reject(lambda p: resource(p, "aws_instance.demo").update(previous_address="aws_instance.old"), "P3A6 existing unknown/moved")
+        def returned(p):
+            values = {"name": "origin-eip-promotion"}
+            p["prior_state"]["values"]["root_module"]["resources"].append({"address": ORIGINAL.P3A2_POLICY, "mode": "managed", "type": "aws_iam_role_policy", "values": values})
+            p["resource_changes"].append({"address": ORIGINAL.P3A2_POLICY, "mode": "managed", "type": "aws_iam_role_policy", "change": {"actions": ["no-op"], "before": values, "after": values, "after_unknown": {}}})
+        self.reject(returned, "P3A6 promotion policy returned")
+
+    def test_documents_are_the_pinned_version(self):
+        for address in G.P3A3_DOCUMENTS:
+            for key in ("default_version", "document_version", "latest_version"):
+                self.reject(lambda p, a=address, k=key: bind_refreshed(p, a, {**after(p, a), k: "1"}), "P3A6 document version " + address)
+            self.reject(lambda p, a=address: bind_refreshed(p, a, {**after(p, a), "name": "other"}), "P3A6 document version " + address)
+            self.reject(lambda p, a=address: bind_refreshed(p, a, {**after(p, a), "content": "OTHER"}), "P3A6 document reviewed content " + address)
+
+    def test_machines(self):
+        for address in sorted(G.P3A6_MACHINES):
+            self.reject(lambda p, a=address: self.change(p, a).update(actions=["delete", "create"]), "P3A3 update action")
+            self.reject(lambda p, a=address: self.change(p, a)["before"].update(name="stale"), "P3A3 update not bound")
+            self.reject(lambda p, a=address: self.change(p, a)["after_unknown"].update(revision_id=True), "P3A3 update unknown")
+            self.reject(lambda p, a=address: self.change(p, a)["after"].update(publish=True), "P3A6 machine changed fields " + address)
+            self.reject(lambda p, a=address: self.change(p, a)["after"].update(definition=json.dumps({"States": {}})), "P3A6 machine reviewed definition " + address)
+        for address in (self.OPEN, self.STANDBY):
+            definition = json.loads(RENDERED["resources"][address]["definition"])
+            for state in definition["States"].values():
+                if state.get("Resource", "").endswith(":sendCommand"):
+                    state["Arguments"]["DocumentVersion"] = "1"
+            source = copy.deepcopy(RENDERED)
+            source["resources"][address]["definition"] = json.dumps(definition)
+            self.reject(lambda p, a=address, s=source: self.change(p, a)["after"].update(definition=s["resources"][a]["definition"]), "P3A6 machine document pin " + address, rendered=source)
+            definition = json.loads(RENDERED["resources"][address]["definition"])
+            definition["States"] = {k: v for k, v in definition["States"].items() if not (v.get("Resource", "").endswith(":sendCommand") and "spot-smoke" in json.dumps(v["Arguments"]))}
+            source = copy.deepcopy(RENDERED)
+            source["resources"][address]["definition"] = json.dumps(definition)
+            self.reject(lambda p, a=address, s=source: self.change(p, a)["after"].update(definition=s["resources"][a]["definition"]), "P3A6 machine document coverage " + address, rendered=source)
+            definition = json.loads(RENDERED["resources"][address]["definition"])
+            definition["States"] = {k: v for k, v in definition["States"].items() if not v.get("Resource", "").endswith(":sendCommand")}
+            source = copy.deepcopy(RENDERED)
+            source["resources"][address]["definition"] = json.dumps(definition)
+            self.reject(lambda p, a=address, s=source: self.change(p, a)["after"].update(definition=s["resources"][a]["definition"]), "P3A6 machine document pin " + address, rendered=source)
+        definition = json.loads(RENDERED["resources"][self.CLOSE]["definition"])
+        definition["States"]["Extra"] = {"Type": "Task", "Resource": "arn:aws:states:::aws-sdk:ssm:sendCommand", "Arguments": {"DocumentName": '{% "ec-portfolio-demo-od-readiness" %}', "DocumentVersion": "2"}}
+        source = copy.deepcopy(RENDERED)
+        source["resources"][self.CLOSE]["definition"] = json.dumps(definition)
+        self.reject(lambda p: self.change(p, self.CLOSE)["after"].update(definition=source["resources"][self.CLOSE]["definition"]), "P3A6 commandless machine sends a command", rendered=source)
+
+    def test_planned_values(self):
+        def remove_planned(p):
+            p3a3_sync(p)
+            p["planned_values"]["root_module"]["resources"] = [r for r in p["planned_values"]["root_module"]["resources"] if r["address"] != "aws_instance.demo"]
+        self.reject(remove_planned, "P3A6 planned resource coverage", sync=False)
+        def inconsistent(p):
+            p3a3_sync(p)
+            planned = next(r for r in p["planned_values"]["root_module"]["resources"] if r["address"] == self.GUARD)
+            planned["values"] = {**planned["values"], "definition": "{}"}
+        self.reject(inconsistent, "P3A6 planned value inconsistency", sync=False)
+
+    def test_the_real_source_waits_in_exactly_these_machines(self):
+        for address, definition in ((a, json.loads(RENDERED["resources"][a]["definition"])) for a in sorted(G.P3A3_MACHINES | G.P3A5_COMMANDLESS | {'aws_sfn_state_machine.runtime["ready_check"]'})):
+            waits = sorted(n for n in definition["States"] if n.endswith("LeaseWaitChoice"))
+            self.assertEqual(bool(waits), address in G.P3A6_MACHINES, address)
+        self.assertEqual(G.p3a3_pins(json.loads(RENDERED["resources"][self.CLOSE]["definition"])), [])
+
+    def test_entry_point(self):
+        entry = EntryTests("test_p3a3_mode_runs_its_own_validation")
+        entry.setUp()
+        with tempfile.TemporaryDirectory() as temporary:
+            plan = p3a6_plan()
+            entry.show_plan = plan
+            saved, path = entry.files(temporary, plan)
+            code, out, err = entry.call("p3a6", str(saved), str(path), ACCOUNT_SHA)
+            self.assertEqual(code, 0, err)
+            self.assertEqual((json.loads(out)["mode"], json.loads(out)["changes"]), ("p3a6", 3))
+            for other in ("p3a3", "p3a4", "p3a5"):
+                code, out, err = entry.call(other, str(saved), str(path), ACCOUNT_SHA)
+                self.assertEqual(code, 1)
+                self.assertIn("REJECT P3A3 exact updates", err)
+
+
 def suite():
     return unittest.TestSuite([unittest.defaultTestLoader.loadTestsFromTestCase(FixtureTests),
                                unittest.defaultTestLoader.loadTestsFromTestCase(RevisionTests),
@@ -1615,6 +1771,7 @@ def suite():
                                unittest.defaultTestLoader.loadTestsFromTestCase(P3a3Tests),
                                unittest.defaultTestLoader.loadTestsFromTestCase(P3a4Tests),
                                unittest.defaultTestLoader.loadTestsFromTestCase(P3a5Tests),
+                               unittest.defaultTestLoader.loadTestsFromTestCase(P3a6Tests),
                                unittest.defaultTestLoader.loadTestsFromTestCase(EntryTests)])
 
 
@@ -1641,6 +1798,13 @@ SCOPE_MUTATIONS = [
     ("document: any name", 'and after.get("name") == rule["empty_permissions_document"], "PG4 document permissions")', ', "PG4 document permissions")'),
     ("the p3a5 entry runs the p3a4 check", 'result = validate_p3a5(plan, exporter.export(context))', 'result = validate_p3a4(plan, exporter.export(context))'),
     ("the p3a5 mode has no entry", 'elif mode == "p3a5":', 'elif mode == "never":'),
+    ("p3a6: any machine pin", '{version for _, version in pins} == {P3A3_VERSION_AFTER}', 'bool(pins)'),
+    ("p3a6: machine coverage subset", 'sorted({name for name, _ in pins}) == sorted(P3A3_DOCUMENTS.values())', '{name for name, _ in pins} <= set(P3A3_DOCUMENTS.values())'),
+    ("p3a6: only latest_version read", 'versions == [P3A3_VERSION_AFTER] * 3', 'versions[-1:] == [P3A3_VERSION_AFTER]'),
+    ("the p3a6 mode accepts the stale role drift", '    drift_check(plan, {})\n', '    drift_check(plan, P3A3_DRIFT_RULES)\n'),
+    ("the p3a6 entry runs the p3a5 check", 'result = validate_p3a6(plan, exporter.export(context))', 'result = validate_p3a5(plan, exporter.export(context))'),
+    ("the p3a6 mode has no entry", 'elif mode == "p3a6":', 'elif mode == "never":'),
+    ("the p3a6 mode lets day_close send a command", "P3A6_COMMANDLESS = {'aws_sfn_state_machine.runtime[\"day_close\"]'}", "P3A6_COMMANDLESS = set()"),
     ("the p3a5 mode omits day_close", 'P3A5_COMMANDLESS = P3A4_COMMANDLESS | {\'aws_sfn_state_machine.runtime["day_close"]\'}', 'P3A5_COMMANDLESS = P3A4_COMMANDLESS'),
     ("the p3a5 mode omits the guard", 'return validate_p3a3(plan, rendered, P3A5_COMMANDLESS, "p3a5")', 'return validate_p3a3(plan, rendered, P3A5_COMMANDLESS - P3A4_COMMANDLESS, "p3a5")'),
     ("the p3a4 mode accepts day_close", 'return validate_p3a3(plan, rendered, P3A4_COMMANDLESS, "p3a4")', 'return validate_p3a3(plan, rendered, P3A5_COMMANDLESS, "p3a4")'),
@@ -1706,7 +1870,7 @@ def mutations():
             continue
         message = call.args[1]
         code = message.value if isinstance(message, ast.Constant) else message.left.value if isinstance(message, ast.BinOp) and isinstance(message.left, ast.Constant) else None
-        if code in selected or code in prefixes or (code or "").startswith(("P3A2 ", "P3A3 ", "PG4 removed inline")):
+        if code in selected or code in prefixes or (code or "").startswith(("P3A2 ", "P3A3 ", "P3A6 ", "PG4 removed inline")):
             chosen.append((call, code))
     revision_codes = {"PG0 refreshed caller account mismatch", "PG0 caller provider binding", "PG0 provider credential override",
                       "PG4 unexpected drift", "PG4 document permissions", "PG4 configured document permissions",

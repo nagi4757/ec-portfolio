@@ -1303,6 +1303,65 @@ scripts/cold-standby-plan-gate.sh verify "$PRIVATE_DIR/p3a5.tfplan" <saved_plan_
 
 A revert and an apply of the definitions. The extra `closeOwner` and `closeUntil` attributes on `mode` are not read by earlier definitions.
 
+## Phase 6C-5c P3-a6: lease hand-off with an origin-guard child
+
+Applied on top of the converged P3-a5 state. One defect, found by the rehearsal safety review and reproduced by running a parent and its child concurrently on the replay of `df63613` (the earlier tests ran a child inside a single parent call, so its lease was always gone):
+
+| Parent | After the child starts | Before |
+| --- | --- | --- |
+| `day-open` | `PromoteSpot` → `ReleasePromotion` → wait 15 s → holder is the target → `ReacquireSmoke` | refused while the child holds the lease: `Failed` |
+| `od-standby` | `PromoteOd` → … → `ReacquireE2e`; also `EarlyParking`, `RequestFailback` and `RestoreRequest` | the same |
+| `day-close` | `ParkEip` → … → `ReacquireClose`, later `ReacquireFinal` | the same, then `Failure`; mode stays `day-close`, RDS can stay available |
+
+The child takes the lease at `Bootstrap` and keeps it through `WaitStable` (60 s) and, when it moves the address, `WaitAddress` (10 s). The parent decides on the holder alone. When the address is already on the target, as on a rehearsal close after a failover, the parent re-acquires while the child is still in `WaitStable`, whatever the latencies.
+
+### The wait
+
+Each of the seven re-acquires waits for its own child, and only for it:
+
+```
+Reacquire* --DynamoDb.TransactionCanceledException--> read lock#runtime, mode, maintenance (consistent)
+           --any other error, an access error included--> its own failure path, as before
+
+wait 20 s and run the same transaction again, at most 6 times, only if all hold:
+  the lease is free, or held unexpired by the execution this run started (childArn, from StartExecution)
+  maintenance is off
+  the mode is this run's: enabled, same scope, same approval, same armedUntil with more than the wait left,
+    state one of the parent's or the child's; for day-close, closeOwner is this execution
+  redrive 0, and the wait plus the write margin fit inside writeUntil
+otherwise, or after the sixth wait: the re-acquire's own failure path (Failed; Failure for day-close)
+```
+
+Every attempt is the unchanged re-acquire transaction, so it still checks maintenance, arming, mode and redrive, and it takes only an absent or expired lease. Nothing is deleted, adopted or taken from a live owner. The reads run without a lease and fail to the same path as the re-acquire. The address keeps one writer, `origin-guard`. IAM does not change: the reads are `dynamodb:GetItem` on items the role already reads.
+
+The bound is 120 s of waiting per re-acquire. A child that never lets go, fails or loses its approval ends the parent on its existing failure path.
+
+### Plan delta
+
+Expected, not from a real plan:
+
+```
+Plan: 0 to add, 3 to change, 0 to destroy.
+```
+
+`aws_sfn_state_machine.runtime["day_open"]`, `["od_standby"]` and `["day_close"]`, in `definition` only. `origin_guard`, `ready_check`, the documents (already at version 2), `*.tf` and IAM do not change.
+
+The gate mode is `p3a6`. It expects exactly those three updates on the converged state: the documents stored at the pinned version 2 with the reviewed content, the definitions equal to the reviewed render, `day_close` sending no command, every other resource and output no-op, and no drift beyond the existing allow-list. `p3a3` to `p3a5` reject this plan.
+
+```sh
+scripts/cold-standby-plan-gate.sh p3a6 "$PRIVATE_DIR/p3a6.tfplan" "$PRIVATE_DIR/p3a6.plan.json" <sha256 of the 12-digit account id>
+scripts/cold-standby-plan-gate.sh verify "$PRIVATE_DIR/p3a6.tfplan" <saved_plan_sha256> <source_commit>
+```
+
+### Not verified
+
+- The error name `DynamoDb.TransactionCanceledException` for a refused `transactWriteItems` in a real execution. If AWS names it otherwise, the re-acquire takes its old failure path: no wait, as before this change.
+- Real latencies, which only change how many of the six waits are used.
+
+### Rollback
+
+A revert and an apply of the three definitions. The added variables (`childArn`, the wait counters) are not stored anywhere.
+
 ## Local validation
 
 Run static checks in the isolated code worktree without AWS credentials or runtime input files:

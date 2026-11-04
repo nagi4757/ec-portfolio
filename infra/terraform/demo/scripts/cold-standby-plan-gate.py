@@ -83,11 +83,16 @@ P3A3_DRIFT_RULES = ADDRESSES["P3A3_DRIFT_RULES"]
 P3A4_COMMANDLESS = {'aws_sfn_state_machine.runtime["origin_guard"]'}
 # P3-a5 joins them with day_close, which sends no command either.
 P3A5_COMMANDLESS = P3A4_COMMANDLESS | {'aws_sfn_state_machine.runtime["day_close"]'}
+# P3-a6 is applied on the converged P3-a5 state: only the three workflows whose re-acquire waits for
+# an origin-guard child change. The documents are already at the pinned version and stay as they are.
+P3A6_MACHINES = {'aws_sfn_state_machine.runtime["day_open"]', 'aws_sfn_state_machine.runtime["od_standby"]', 'aws_sfn_state_machine.runtime["day_close"]'}
+P3A6_COMMANDLESS = {'aws_sfn_state_machine.runtime["day_close"]'}
 USAGE = ("usage: cold-standby-plan-gate.sh p3a <saved.tfplan> <plan.json> <approved-account-sha256>\n"
          "       cold-standby-plan-gate.sh p3a2 <saved.tfplan> <plan.json> <approved-account-sha256>\n"
          "       cold-standby-plan-gate.sh p3a3 <saved.tfplan> <plan.json> <approved-account-sha256>\n"
          "       cold-standby-plan-gate.sh p3a4 <saved.tfplan> <plan.json> <approved-account-sha256>\n"
          "       cold-standby-plan-gate.sh p3a5 <saved.tfplan> <plan.json> <approved-account-sha256>\n"
+         "       cold-standby-plan-gate.sh p3a6 <saved.tfplan> <plan.json> <approved-account-sha256>\n"
          "       cold-standby-plan-gate.sh verify <saved.tfplan> <saved-plan-sha256> <source-commit>")
 
 
@@ -629,6 +634,59 @@ def validate_p3a5(plan, rendered):
     return validate_p3a3(plan, rendered, P3A5_COMMANDLESS, "p3a5")
 
 
+def validate_p3a6(plan, rendered):
+    """Exactly three definition updates on the converged P3-a5 state, every other resource no-op and no drift."""
+    plan_format_check(plan)
+    changes = indexed(plan.get("resource_changes", []), "P3A6 changes")
+    managed = {address: value for address, value in changes.items() if value.get("mode") == "managed"}
+    changed = {address for address, value in managed.items() if value.get("change", {}).get("actions") != ["no-op"]}
+    check(changed == P3A6_MACHINES, "P3A6 exact updates")
+    prior = indexed(resources(plan.get("prior_state", {}).get("values", {}).get("root_module", {})), "P3A6 prior")
+    prior_managed = {address: value for address, value in prior.items() if value.get("mode") == "managed"}
+    check((EXISTING | NEW) - {P3A2_POLICY} <= set(prior_managed), "P3A6 wrong/incomplete root")
+    check(set(managed) == set(prior_managed), "P3A6 all prior resources represented")
+    check(P3A2_POLICY not in prior_managed, "P3A6 promotion policy returned")
+    for address, resource in prior_managed.items():
+        if address in changed:
+            continue
+        change = managed[address]["change"]
+        check(change.get("before") == change.get("after") == resource.get("values"), "P3A6 existing changed " + address)
+        check(not change.get("after_unknown") and not managed[address].get("previous_address") and not change.get("importing"), "P3A6 existing unknown/moved")
+    # The definitions pin version 2: the stored documents must already be at it, with the reviewed content.
+    for address, name in P3A3_DOCUMENTS.items():
+        stored = prior_managed[address].get("values", {})
+        versions = [stored.get("default_version"), stored.get("document_version"), stored.get("latest_version")]
+        check(stored.get("name") == name and versions == [P3A3_VERSION_AFTER] * 3, "P3A6 document version " + address)
+        check(stored.get("content") == rendered["resources"][address]["content"], "P3A6 document reviewed content " + address)
+    for address in P3A6_MACHINES:
+        before, after = p3a3_update(managed, prior, address, set())
+        check(p3a2_changed_keys(before, after) == {"definition"}, "P3A6 machine changed fields " + address)
+        definition = strict_json(after["definition"])
+        check(definition == strict_json(rendered["resources"][address]["definition"]), "P3A6 machine reviewed definition " + address)
+        pins = p3a3_pins(definition)
+        if address in P3A6_COMMANDLESS:
+            check(pins == [], "P3A6 commandless machine sends a command " + address)
+        else:
+            # A set comparison: a machine sending no command has no version and fails it too.
+            check({version for _, version in pins} == {P3A3_VERSION_AFTER}, "P3A6 machine document pin " + address)
+            check(sorted({name for name, _ in pins}) == sorted(P3A3_DOCUMENTS.values()), "P3A6 machine document coverage " + address)
+
+    planned = indexed(resources(plan.get("planned_values", {}).get("root_module", {})), "P3A6 planned")
+    check({a for a, r in planned.items() if r.get("mode") == "managed"} == set(managed), "P3A6 planned resource coverage")
+    for address, resource in planned.items():
+        if resource.get("mode") == "managed":
+            unknown = managed[address]["change"].get("after_unknown", {})
+            check(normalize_unknown(resource.get("values"), unknown) == normalize_unknown(managed[address]["change"].get("after"), unknown), "P3A6 planned value inconsistency")
+
+    outputs = plan.get("output_changes")
+    check(isinstance(outputs, dict) and all(value.get("actions") == ["no-op"] and value.get("before") == value.get("after") and not value.get("after_unknown") for value in outputs.values()), "P3A6 output changed")
+    check(plan.get("planned_values", {}).get("outputs", {}) == plan.get("prior_state", {}).get("values", {}).get("outputs", {}), "P3A6 output snapshot changed")
+    # The P3-a5 convergence showed no drift; no first-refresh rule is accepted beyond the existing allow-list.
+    drift_check(plan, {})
+    return {"result": "PASS", "mode": "p3a6", "creates": 0, "changes": len(changed), "destroys": 0,
+            "scope": "saved-plan gate only; apply still requires separate approval"}
+
+
 def regular_file(value, code):
     path = Path(value)
     check(path.is_file() and not path.is_symlink(), code)
@@ -677,6 +735,8 @@ def gate(saved_value, plan_value, approved_account_sha, mode="p3a"):
         result = validate_p3a4(plan, exporter.export(context))
     elif mode == "p3a5":
         result = validate_p3a5(plan, exporter.export(context))
+    elif mode == "p3a6":
+        result = validate_p3a6(plan, exporter.export(context))
     else:
         result = validate(plan, exporter.export(context))
     check(sha(saved) == saved_sha and sha(path) == plan_sha, "PG0 plan changed during the gate")
@@ -697,7 +757,7 @@ def verify(saved_value, saved_sha, commit):
 
 
 def main(argv):
-    if len(argv) != 5 or argv[1] not in ("p3a", "p3a2", "p3a3", "p3a4", "p3a5", "verify"):
+    if len(argv) != 5 or argv[1] not in ("p3a", "p3a2", "p3a3", "p3a4", "p3a5", "p3a6", "verify"):
         print(USAGE, file=sys.stderr)
         return 2
     try:
