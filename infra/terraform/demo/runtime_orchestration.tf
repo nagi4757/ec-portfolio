@@ -5,8 +5,10 @@
 # This file creates them, their roles, the control table, the EventBridge rules
 # and the new schedules. Execution stays inert until separately approved arming:
 #
-#   - every new schedule and every new rule is DISABLED, and the scheduler role
-#     keeps runtime-start-stop as it is (no states:StartExecution until P3-c0);
+#   - every new schedule and every new rule is DISABLED. Since P3-c0 the
+#     scheduler role may start exactly the four scheduled workflows and the
+#     alert topic accepts the two notification rules (scheduler.tf, alerts.tf);
+#     nothing uses either grant until P3-c enables the schedules and rules;
 #   - every definition starts at ArmGate: it reads the control table's `mode`
 #     and `maintenance` items and fails NotArmed unless an operator armed the
 #     runtime (mode.enabled, scope, approvalRef, armedUntil for a rehearsal) and
@@ -17,8 +19,9 @@
 #     in runtime_iam.tf; only origin-guard can associate the EIP.
 #
 # Existing resources are not changed: the On-Demand host, the database, the
-# origin EIP, the Spot group and template, the four legacy schedules, the
-# scheduler role and its policy, and the alert topic and its policy.
+# origin EIP, the Spot group and template and the four legacy schedules. P3-c0
+# adds one statement each to the scheduler role policy and the alert topic
+# policy and keeps their existing statements as they are.
 #
 # The names are the ones the Access IaC grants (Phase 6C-5c cold standby runtime
 # permissions in infra/terraform/access/README.md). A different name fails
@@ -108,6 +111,9 @@ locals {
       schedule_expression = "cron(0/30 8-21 ? * MON-FRI *)"
     }
   }
+
+  # The workflows a schedule starts: the only ones the scheduler role may start (P3-c0).
+  runtime_scheduled_workflows = distinct([for schedule in values(local.runtime_orchestration_schedules) : schedule.workflow])
 
   # A rehearsal arming may last at most this long (design 13.3).
   runtime_rehearsal_arming_max_ms = 4 * 3600 * 1000
@@ -406,8 +412,8 @@ resource "aws_cloudwatch_event_target" "origin_guard_signals_od_standby" {
   depends_on = [aws_iam_role_policy.runtime_events]
 }
 
-# Notification only. The topic policy gains its events statement in P3-c0,
-# before this rule is enabled in P3-c.
+# Notification only. The topic policy accepts this rule since P3-c0; the rule
+# is enabled in P3-c.
 resource "aws_cloudwatch_event_rule" "spot_capacity_unavailable" {
   name        = "${local.name_prefix}-spot-capacity-unavailable"
   description = "A production Spot launch failed"
@@ -477,9 +483,10 @@ resource "aws_cloudwatch_event_target" "runtime_orchestration_failed" {
 }
 
 # Created DISABLED, with the existing scheduler role: its trust names the
-# schedule group, which these share with the legacy schedules. That role has no
-# states:StartExecution until P3-c0, so an enabled schedule could not start a
-# workflow either. The scheduled time is the run's identity.
+# schedule group, which these share with the legacy schedules. Since P3-c0 that
+# role may start exactly these four schedules' workflows; until P3-c they stay
+# DISABLED and every workflow still stops at ArmGate. The scheduled time is the
+# run's identity.
 resource "aws_scheduler_schedule" "runtime_orchestration" {
   for_each = local.runtime_orchestration_schedules
 

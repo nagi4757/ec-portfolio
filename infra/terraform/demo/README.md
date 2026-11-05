@@ -1362,6 +1362,37 @@ scripts/cold-standby-plan-gate.sh verify "$PRIVATE_DIR/p3a6.tfplan" <saved_plan_
 
 A revert and an apply of the three definitions. The added variables (`childArn`, the wait counters) are not stored anywhere.
 
+## Phase 6C-5c P3-c0: scheduler start and alert delivery grants
+
+P3-c0 is the step before the cutover (design 12.5 and 13.4). It grants the two permissions the cutover needs, and nothing uses either grant yet: the four new schedules and the three new rules stay `DISABLED`, and every workflow still stops at `ArmGate` without an armed `mode` item.
+
+| Resource | Change |
+|---|---|
+| `aws_iam_role_policy.scheduler_runtime_control` | adds `StartRuntimeWorkflows`: `states:StartExecution` on exactly the four workflows a runtime schedule starts (`day-open`, `ready-check`, `day-close`, `origin-guard`), from `local.runtime_scheduled_workflows`. `od-standby` is never started by a schedule. `ControlDemoEc2` and `ControlDemoRds` stay as they are |
+| `aws_sns_topic_policy.alerts` | adds `AllowRuntimeOrchestrationNotifications`: `events.amazonaws.com` may publish to the alert topic only from the two notification rules (`spot-capacity-unavailable`, `runtime-orchestration-failed`), with `aws:SourceAccount`. The budget and scheduler-alarm statements stay as they are |
+
+Both documents are replaced as a whole by these resources, so a mistake would silently break the legacy schedules (EC2 and RDS start/stop) or the budget and drop-alarm mail. That is why P3-c0 is applied on its own, days before the cutover, and the legacy runs prove the documents before anything depends on the new statements.
+
+### Plan delta
+
+`Plan: 0 to add, 2 to change, 0 to destroy.` with no output change. Gate mode `p3c0` (on the converged P3-a6 state) requires:
+
+- exactly the two updates, each changing `policy` only, each equal to the provider-free render of the reviewed HCL (`cold-standby-plan-export.py export_grants`);
+- every existing statement unchanged and in place, exactly one new statement with the reviewed Sid, and by content: `states:StartExecution` alone on exactly the four scheduled workflow ARNs (no wildcard, no `od-standby`, no condition), and `sns:Publish` by `events.amazonaws.com` on the topic with `aws:SourceAccount` and `ArnEquals aws:SourceArn` exactly the two notifying rules, each rule's target being the topic;
+- every other resource a no-op, all five definitions the reviewed source, both documents at version 2, the four legacy schedules `ENABLED` with their current cron, the four new schedules and three rules `DISABLED`, and no drift beyond the allow-list.
+
+`scripts/runtime-iam.test.py` checks the same grants against the rendered schedule targets and the rules that target the topic, and refuses ten widenings of either grant.
+
+### After the apply (at least one business day, read-only)
+
+- the legacy runs at 09:50, 10:00, 17:00 and 17:10 change their targets, `AWS/Scheduler` `TargetErrorCount` and `InvocationDroppedCount` stay 0, and the drop alarm stays `OK`;
+- `iam get-role-policy` and `sns get-topic-attributes` show the existing statements byte for byte and the one new statement;
+- no schedule or rule became `ENABLED`, and no workflow ran.
+
+### Rollback
+
+Revert the two statements: `0 to add, 2 to change, 0 to destroy`, inert at any time, because nothing uses the grants before P3-c.
+
 ## Local validation
 
 Run static checks in the isolated code worktree without AWS credentials or runtime input files:

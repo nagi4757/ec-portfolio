@@ -105,6 +105,15 @@ resource "aws_iam_role_policy" "scheduler_runtime_control" {
         ]
         Resource = aws_db_instance.demo.arn
       },
+      # P3-c0: the four workflows a runtime schedule starts, and no other. The
+      # schedules stay DISABLED until P3-c; od-standby is started only by
+      # origin-guard and the signals rule, never by a schedule.
+      {
+        Sid      = "StartRuntimeWorkflows"
+        Effect   = "Allow"
+        Action   = "states:StartExecution"
+        Resource = [for key in local.runtime_scheduled_workflows : local.runtime_state_machine_arns[key]]
+      },
     ]
   })
 }
