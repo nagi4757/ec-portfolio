@@ -87,12 +87,26 @@ P3A5_COMMANDLESS = P3A4_COMMANDLESS | {'aws_sfn_state_machine.runtime["day_close
 # an origin-guard child change. The documents are already at the pinned version and stay as they are.
 P3A6_MACHINES = {'aws_sfn_state_machine.runtime["day_open"]', 'aws_sfn_state_machine.runtime["od_standby"]', 'aws_sfn_state_machine.runtime["day_close"]'}
 P3A6_COMMANDLESS = {'aws_sfn_state_machine.runtime["day_close"]'}
+# P3-c0, on the converged P3-a6 state: the scheduler role may start exactly the four scheduled workflows
+# and the alert topic accepts exactly the two notification rules. Both documents keep their statements and
+# gain one; every schedule and rule stays as it is, the new ones DISABLED, so nothing uses either grant.
+P3C0_POLICIES = {"aws_iam_role_policy.scheduler_runtime_control": ("ControlDemoEc2", "ControlDemoRds"),
+                 "aws_sns_topic_policy.alerts": ("AllowBudgetNotifications", "AllowSchedulerAlarmNotifications")}
+P3C0_NEW_SID = {"aws_iam_role_policy.scheduler_runtime_control": "StartRuntimeWorkflows", "aws_sns_topic_policy.alerts": "AllowRuntimeOrchestrationNotifications"}
+P3C0_SCHEDULED = ("day_close", "day_open", "origin_guard", "ready_check")
+P3C0_MACHINES = tuple('aws_sfn_state_machine.runtime["' + key + '"]' for key in ("day_open", "ready_check", "day_close", "origin_guard", "od_standby"))
+P3C0_NOTIFYING_RULES = ("aws_cloudwatch_event_rule.spot_capacity_unavailable", "aws_cloudwatch_event_rule.runtime_orchestration_failed")
+P3C0_NEW_INERT = tuple('aws_scheduler_schedule.runtime_orchestration["' + key + '"]' for key in ("day_open", "ready_check", "day_close", "origin_guard_tick")) + \
+    ("aws_cloudwatch_event_rule.origin_guard_signals",) + P3C0_NOTIFYING_RULES
+P3C0_LEGACY = {'aws_scheduler_schedule.runtime["rds_start"]': "cron(50 9 ? * MON-FRI *)", 'aws_scheduler_schedule.runtime["ec2_start"]': "cron(0 10 ? * MON-FRI *)",
+               'aws_scheduler_schedule.runtime["ec2_stop"]': "cron(0 17 ? * MON-FRI *)", 'aws_scheduler_schedule.runtime["rds_stop"]': "cron(10 17 ? * MON-FRI *)"}
 USAGE = ("usage: cold-standby-plan-gate.sh p3a <saved.tfplan> <plan.json> <approved-account-sha256>\n"
          "       cold-standby-plan-gate.sh p3a2 <saved.tfplan> <plan.json> <approved-account-sha256>\n"
          "       cold-standby-plan-gate.sh p3a3 <saved.tfplan> <plan.json> <approved-account-sha256>\n"
          "       cold-standby-plan-gate.sh p3a4 <saved.tfplan> <plan.json> <approved-account-sha256>\n"
          "       cold-standby-plan-gate.sh p3a5 <saved.tfplan> <plan.json> <approved-account-sha256>\n"
          "       cold-standby-plan-gate.sh p3a6 <saved.tfplan> <plan.json> <approved-account-sha256>\n"
+         "       cold-standby-plan-gate.sh p3c0 <saved.tfplan> <plan.json> <approved-account-sha256>\n"
          "       cold-standby-plan-gate.sh verify <saved.tfplan> <saved-plan-sha256> <source-commit>")
 
 
@@ -687,6 +701,84 @@ def validate_p3a6(plan, rendered):
             "scope": "saved-plan gate only; apply still requires separate approval"}
 
 
+def validate_p3c0(plan, rendered, grants):
+    """Exactly two policy-document updates on the converged P3-a6 state, each keeping its statements and
+    gaining exactly the reviewed one; every other resource no-op, the new schedules and rules DISABLED."""
+    plan_format_check(plan)
+    changes = indexed(plan.get("resource_changes", []), "P3C0 changes")
+    managed = {address: value for address, value in changes.items() if value.get("mode") == "managed"}
+    changed = {address for address, value in managed.items() if value.get("change", {}).get("actions") != ["no-op"]}
+    check(changed == set(P3C0_POLICIES), "P3C0 exact updates")
+    prior = indexed(resources(plan.get("prior_state", {}).get("values", {}).get("root_module", {})), "P3C0 prior")
+    prior_managed = {address: value for address, value in prior.items() if value.get("mode") == "managed"}
+    check((EXISTING | NEW) - {P3A2_POLICY} <= set(prior_managed), "P3C0 wrong/incomplete root")
+    check(set(managed) == set(prior_managed), "P3C0 all prior resources represented")
+    check(P3A2_POLICY not in prior_managed, "P3C0 promotion policy returned")
+    for address, resource in prior_managed.items():
+        if address in changed:
+            continue
+        change = managed[address]["change"]
+        check(change.get("before") == change.get("after") == resource.get("values"), "P3C0 existing changed " + address)
+        check(not change.get("after_unknown") and not managed[address].get("previous_address") and not change.get("importing"), "P3C0 existing unknown/moved")
+    # The state P3-a6 left: documents at the pinned version, all five definitions the reviewed source.
+    for address, name in P3A3_DOCUMENTS.items():
+        stored = prior_managed[address].get("values", {})
+        versions = [stored.get("default_version"), stored.get("document_version"), stored.get("latest_version")]
+        check(stored.get("name") == name and versions == [P3A3_VERSION_AFTER] * 3, "P3C0 document version " + address)
+        check(stored.get("content") == rendered["resources"][address]["content"], "P3C0 document reviewed content " + address)
+    for address in P3C0_MACHINES:
+        stored = prior_managed[address].get("values", {})
+        check(strict_json(stored.get("definition") or "null") == strict_json(rendered["resources"][address]["definition"]), "P3C0 machine definition " + address)
+    # Nothing can use the new grants yet: every new schedule and rule DISABLED, the legacy four as they run today.
+    for address in P3C0_NEW_INERT:
+        check(prior_managed[address].get("values", {}).get("state") == "DISABLED", "P3C0 schedule/rule not DISABLED " + address)
+    for address, expression in P3C0_LEGACY.items():
+        values = prior_managed[address].get("values", {})
+        check(values.get("state") == "ENABLED" and values.get("schedule_expression") == expression and values.get("schedule_expression_timezone") == "Asia/Tokyo", "P3C0 legacy schedule " + address)
+    added = {}
+    for address, kept in P3C0_POLICIES.items():
+        before, after = p3a3_update(managed, prior, address, set())
+        check(p3a2_changed_keys(before, after) == {"policy"}, "P3C0 policy changed fields " + address)
+        old, new = strict_json(before["policy"]), strict_json(after["policy"])
+        check(new == strict_json(grants["resources"][address]["policy"]), "P3C0 reviewed policy " + address)
+        check(set(old) == set(new) == {"Version", "Statement"} and old["Version"] == new["Version"] == "2012-10-17", "P3C0 policy document shape " + address)
+        check(isinstance(old["Statement"], list) and [s.get("Sid") for s in old["Statement"]] == list(kept), "P3C0 existing statements " + address)
+        check(isinstance(new["Statement"], list) and len(new["Statement"]) == len(kept) + 1 and new["Statement"][:len(kept)] == old["Statement"], "P3C0 existing statements kept " + address)
+        added[address] = new["Statement"][-1]
+        check(added[address].get("Sid") == P3C0_NEW_SID[address], "P3C0 new statement id " + address)
+    # The two new statements by content, independent of the render: exact principal, action and scope.
+    start = added["aws_iam_role_policy.scheduler_runtime_control"]
+    workflows = [prior_managed['aws_sfn_state_machine.runtime["' + key + '"]'].get("values", {}).get("arn") for key in P3C0_SCHEDULED]
+    check(set(start) == {"Sid", "Effect", "Action", "Resource"} and start["Effect"] == "Allow" and start["Action"] == "states:StartExecution", "P3C0 start action")
+    check(isinstance(start["Resource"], list) and len(start["Resource"]) == len(set(start["Resource"])) == len(workflows) and set(start["Resource"]) == set(workflows) and None not in workflows, "P3C0 start scope")
+    account = prior.get("data.aws_caller_identity.current", {}).get("values", {}).get("account_id")
+    topic = prior_managed["aws_sns_topic.alerts"].get("values", {}).get("arn")
+    rules = [prior_managed[address].get("values", {}).get("arn") for address in P3C0_NOTIFYING_RULES]
+    notify = added["aws_sns_topic_policy.alerts"]
+    check(set(notify) == {"Sid", "Effect", "Principal", "Action", "Resource", "Condition"} and notify["Effect"] == "Allow" and notify["Principal"] == {"Service": "events.amazonaws.com"}
+          and notify["Action"] == "sns:Publish" and notify["Resource"] == topic and topic, "P3C0 notification principal")
+    condition = notify["Condition"]
+    check(set(condition) == {"StringEquals", "ArnEquals"} and condition["StringEquals"] == {"aws:SourceAccount": account} and account
+          and set(condition["ArnEquals"]) == {"aws:SourceArn"} and isinstance(condition["ArnEquals"]["aws:SourceArn"], list)
+          and sorted(condition["ArnEquals"]["aws:SourceArn"]) == sorted(rules) and None not in rules and len(rules) == 2, "P3C0 notification scope")
+    for address in P3C0_NOTIFYING_RULES:
+        target = prior_managed[address.replace("aws_cloudwatch_event_rule", "aws_cloudwatch_event_target")].get("values", {})
+        check(target.get("arn") == topic, "P3C0 notification target " + address)
+
+    planned = indexed(resources(plan.get("planned_values", {}).get("root_module", {})), "P3C0 planned")
+    check({a for a, r in planned.items() if r.get("mode") == "managed"} == set(managed), "P3C0 planned resource coverage")
+    for address, resource in planned.items():
+        if resource.get("mode") == "managed":
+            unknown = managed[address]["change"].get("after_unknown", {})
+            check(normalize_unknown(resource.get("values"), unknown) == normalize_unknown(managed[address]["change"].get("after"), unknown), "P3C0 planned value inconsistency")
+    outputs = plan.get("output_changes")
+    check(isinstance(outputs, dict) and all(value.get("actions") == ["no-op"] and value.get("before") == value.get("after") and not value.get("after_unknown") for value in outputs.values()), "P3C0 output changed")
+    check(plan.get("planned_values", {}).get("outputs", {}) == plan.get("prior_state", {}).get("values", {}).get("outputs", {}), "P3C0 output snapshot changed")
+    drift_check(plan, {})
+    return {"result": "PASS", "mode": "p3c0", "creates": 0, "changes": len(changed), "destroys": 0,
+            "scope": "saved-plan gate only; apply still requires separate approval"}
+
+
 def regular_file(value, code):
     path = Path(value)
     check(path.is_file() and not path.is_symlink(), code)
@@ -737,6 +829,8 @@ def gate(saved_value, plan_value, approved_account_sha, mode="p3a"):
         result = validate_p3a5(plan, exporter.export(context))
     elif mode == "p3a6":
         result = validate_p3a6(plan, exporter.export(context))
+    elif mode == "p3c0":
+        result = validate_p3c0(plan, exporter.export(context), exporter.export_grants(context))
     else:
         result = validate(plan, exporter.export(context))
     check(sha(saved) == saved_sha and sha(path) == plan_sha, "PG0 plan changed during the gate")
@@ -757,7 +851,7 @@ def verify(saved_value, saved_sha, commit):
 
 
 def main(argv):
-    if len(argv) != 5 or argv[1] not in ("p3a", "p3a2", "p3a3", "p3a4", "p3a5", "p3a6", "verify"):
+    if len(argv) != 5 or argv[1] not in ("p3a", "p3a2", "p3a3", "p3a4", "p3a5", "p3a6", "p3c0", "verify"):
         print(USAGE, file=sys.stderr)
         return 2
     try:

@@ -21,6 +21,10 @@ ROOT = DEMO.parents[2]
 # comparison fail, never pass.
 TF_DEFAULT = os.environ.get("COLD_STANDBY_TERRAFORM") or shutil.which("terraform") or "terraform"
 NEW_FILES = ("runtime_orchestration.tf", "runtime_iam.tf", "runtime_documents.tf")
+# P3-c0: the two existing resources whose policy documents gain one statement each,
+# rendered from their real HCL with the same provider-free console.
+GRANT_RESOURCES = {"scheduler.tf": ("aws_iam_role_policy.scheduler_runtime_control",), "alerts.tf": ("aws_sns_topic_policy.alerts",)}
+GRANT_LOCALS = ("alerts.tf",)
 REF = re.compile(r'(?:data\.[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*|aws_[A-Za-z0-9_]+\.[A-Za-z_][A-Za-z0-9_]*|local\.[A-Za-z_][A-Za-z0-9_]*|each\.(?:value|key)|path\.module)(?:\[(?:"[^"\n]+"|[0-9]+)\]|\.[A-Za-z_][A-Za-z0-9_]*)*')
 
 
@@ -131,6 +135,25 @@ def source():
     return locals_list, resources
 
 
+def grant_source():
+    """The P3-c0 resources and the locals of their own files, nothing else from those files."""
+    locals_list, resources = [], []
+    for name, wanted in GRANT_RESOURCES.items():
+        _, blocks = body((DEMO / name).read_text())
+        found = []
+        for kind, labels, contents in blocks:
+            if kind == "locals" and not labels and name in GRANT_LOCALS:
+                if contents[1]:
+                    raise ValueError("nested locals blocks")
+                locals_list.append(contents[0])
+            elif kind == "resource" and len(labels) == 2 and labels[0] + "." + labels[1] in wanted:
+                found.append(labels[0] + "." + labels[1])
+                resources.append((labels[0] + "." + labels[1], contents))
+        if sorted(found) != sorted(wanted):
+            raise ValueError("missing grant resource in " + name)
+    return locals_list, resources
+
+
 def canonical_refs(refs):
     unique = set(refs)
     return sorted(r for r in unique if not any(other.startswith(r + ".") or other.startswith(r + "[") for other in unique if other != r))
@@ -216,12 +239,24 @@ def complete_context(context):
         context.setdefault("aws_iam_role", {})[key] = {"id": "ec-portfolio-demo-runtime-" + suffix, "arn": "arn:aws:iam::" + account + ":role/ec-portfolio-demo-runtime-" + suffix}
     keys = ("day_open", "ready_check", "day_close", "origin_guard", "od_standby")
     context["aws_sfn_state_machine"] = {"runtime": {key: {"arn": "arn:aws:states:ap-northeast-1:" + account + ":stateMachine:ec-portfolio-demo-" + key.replace("_", "-")} for key in keys}}
-    context["aws_cloudwatch_event_rule"] = {key: {"name": "ec-portfolio-demo-" + key.replace("_", "-")} for key in ("origin_guard_signals", "spot_capacity_unavailable", "runtime_orchestration_failed")}
+    context["aws_cloudwatch_event_rule"] = {key: {"name": "ec-portfolio-demo-" + key.replace("_", "-"), "arn": "arn:aws:events:ap-northeast-1:" + account + ":rule/ec-portfolio-demo-" + key.replace("_", "-")}
+                                            for key in ("origin_guard_signals", "spot_capacity_unavailable", "runtime_orchestration_failed")}
+    context["aws_iam_role"].setdefault("scheduler", {}).setdefault("id", "ec-portfolio-demo-scheduler")
     return context
 
 
 def export(context, terraform=TF_DEFAULT):
-    locals_list, resources = source()
+    return render(context, *source(), terraform)
+
+
+def export_grants(context, terraform=TF_DEFAULT):
+    """P3-c0: the scheduler role policy and the alert topic policy, with the runtime locals they read."""
+    runtime_locals, _ = source()
+    grant_locals, resources = grant_source()
+    return render(context, runtime_locals + grant_locals, resources, terraform)
+
+
+def render(context, locals_list, resources, terraform=TF_DEFAULT):
     # These are the actual existing HCL declarations used by new expressions.
     base = {}
     for filename, wanted in (("locals.tf", {"name_prefix", "aws_region", "ecs_spot_name"}), ("ecs_application.tf", {"ecs_api_image_sha"})):

@@ -56,6 +56,28 @@ resource "aws_sns_topic_policy" "alerts" {
           }
         }
       },
+      # P3-c0: the two notification rules of the cold standby (DISABLED until
+      # P3-c). The origin-guard signals rule targets workflows, not this topic.
+      {
+        Sid    = "AllowRuntimeOrchestrationNotifications"
+        Effect = "Allow"
+        Principal = {
+          Service = "events.amazonaws.com"
+        }
+        Action   = "sns:Publish"
+        Resource = aws_sns_topic.alerts.arn
+        Condition = {
+          StringEquals = {
+            "aws:SourceAccount" = data.aws_caller_identity.current.account_id
+          }
+          ArnEquals = {
+            "aws:SourceArn" = [
+              aws_cloudwatch_event_rule.spot_capacity_unavailable.arn,
+              aws_cloudwatch_event_rule.runtime_orchestration_failed.arn,
+            ]
+          }
+        }
+      },
     ]
   })
 }
