@@ -2662,11 +2662,16 @@ Canonical SHA-256: `740d96e849a4708c68940e9255e7e53e609db3e120cf5d3c660676b46559
 ### `ECPortfolioColdStandbyRehearsal`
 
 Maintained by hand; this root does not manage it. Temporary: attached for the
-pre-cutover rehearsal of the On-Demand public IPv4 and the `TestState` checks of
-the state machine tasks, and removed afterwards (see
+pre-cutover rehearsal of the On-Demand public IPv4, and removed afterwards (see
 [Removing the rehearsal policy](#removing-the-rehearsal-policy)). Nothing in the
 production runbook depends on it: a manual failover moves the Elastic IP first
 and needs no public IPv4 on the On-Demand host.
+
+It grants one action. The rehearsal needs it for the dry runs that prove the
+attachment and for putting the attribute back by hand if a failover fails; the
+state machines change the attribute with their own role. `states:TestState` is
+no longer in it (see
+[Removing `states:TestState` from the rehearsal policy](#removing-statestestate-from-the-rehearsal-policy)).
 
 ```json
 {
@@ -2688,18 +2693,12 @@ and needs no public IPv4 on the On-Demand host.
           ]
         }
       }
-    },
-    {
-      "Sid": "TestRuntimeStates",
-      "Effect": "Allow",
-      "Action": "states:TestState",
-      "Resource": "*"
     }
   ]
 }
 ```
 
-Canonical SHA-256: `022e7348539315e7f5f4a886815ac48beb198687712b2a16a5c50117810951ac`. 490 of 6,144 characters.
+Canonical SHA-256: `cfb235207f62cf0e969781bc919f9fea62852cf079929e12356bb16b76ac4405`. 402 of 6,144 characters.
 
 #### Scope of `ec2:ModifyNetworkInterfaceAttribute`
 
@@ -2730,10 +2729,6 @@ the public IPv4 assignment must return `DryRunOperation`, and source/destination
 check, description, delete-on-termination and security groups must return
 `UnauthorizedOperation`. Any other outcome is a STOP and a change to this
 document, not a wider grant.
-
-`states:TestState` has no resource type; it runs one state of a definition with
-the role passed in the request, for which the caller also needs `iam:PassRole`
-(`ECPortfolioTerraformApplyRuntimeOrchestration`).
 
 ### `ECPortfolioTerraformPlanRuntimeOrchestration`
 
@@ -2936,11 +2931,34 @@ Each step is approved separately; any AccessDenied or unexpected plan is a STOP.
 
 ### Removing the rehearsal policy
 
-After the rehearsal and the `TestState` checks, the administrator detaches
+After the rehearsal, the administrator detaches
 `ECPortfolioColdStandbyRehearsal` from `ECPortfolioTerraformApply`, provisions,
 and deletes it; a change to this README then removes it from
 `CustomerManagedPolicyRead` (25 → 24) and from the test. Discovery shows 17
 Apply references. Keeping it attached longer is a separate, recorded decision.
+
+### Removing `states:TestState` from the rehearsal policy
+
+The first version of `ECPortfolioColdStandbyRehearsal` also allowed
+`states:TestState` on `*`, for single-state checks of the state machine tasks.
+Those checks were dropped and nothing in the rehearsal calls the action. Kept,
+it would let an Apply session run any state of a definition with a role
+`ECPortfolioTerraformApplyRuntimeOrchestration` may pass (the orchestrator or
+the EIP writer), outside the state machines' arming, lease and write-window
+checks. The document above is the first version without that statement and
+nothing else changed.
+
+The policy is not attached outside a rehearsal. Each step is approved
+separately:
+
+1. The administrator creates the new document as a new default version,
+   checking its canonical SHA-256 first, and deletes the previous version so
+   that no version with `states:TestState` can be made the default again. The
+   policy then has one version.
+2. `ECPortfolioAccessAdmin` reads it back: one version, the default one, and
+   the canonical SHA-256 recorded above.
+3. The rehearsal tools that pin this document are re-pinned to it before the
+   rehearsal is approved.
 
 ### Adding the definition check to the Plan policy
 

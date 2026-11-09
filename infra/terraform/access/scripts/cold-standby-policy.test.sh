@@ -33,7 +33,7 @@ readonly GATE_SCRIPT="$SCRIPT_DIRECTORY/policy-gate.sh"
 readonly APPLY_SHA="326e60d18d480c759f259c330aed3ce83e76d09a57c7c10c9afaabbe17d632f7"
 readonly STANDBY_SHA="01f97613658bd6bfefd6ddf605c1dd1766f905f1eeb168ecfa20745c86ee569d"
 readonly OPERATOR_SHA="740d96e849a4708c68940e9255e7e53e609db3e120cf5d3c660676b4655938fe"
-readonly REHEARSAL_SHA="022e7348539315e7f5f4a886815ac48beb198687712b2a16a5c50117810951ac"
+readonly REHEARSAL_SHA="cfb235207f62cf0e969781bc919f9fea62852cf079929e12356bb16b76ac4405"
 readonly PLAN_SHA="0cddfdab77886feef085f7382ab373ff4812ea2f7553cd37729dba482cfda8fd"
 # The Plan document before the definition check, kept in IAM as the rollback version.
 readonly PLAN_PREVIOUS_SHA="f885a264c5798030da5c918b21b594579f5202417cf89a4be8d4134ba8afc84b"
@@ -117,8 +117,7 @@ def action_table: {
     "dynamodb:GetItem": [table_arn], "dynamodb:PutItem": [table_arn], "dynamodb:DeleteItem": [table_arn]
   },
   rehearsal: {
-    "ec2:ModifyNetworkInterfaceAttribute": [standby_interface_arn, standby_instance_arn],
-    "states:TestState": ["*"]
+    "ec2:ModifyNetworkInterfaceAttribute": [standby_interface_arn, standby_instance_arn]
   },
   plan: (
     ([("states:DescribeStateMachine", "states:ListStateMachineVersions", "states:ListTagsForResource",
@@ -510,7 +509,11 @@ expect_rejected rehearsal "any interface" \
 expect_rejected rehearsal "a security group among the resources" \
     'st("ToggleOnDemandPublicIpv4Assignment").Resource += ["arn:aws:ec2:ap-northeast-1:<ACCOUNT_ID>:security-group/*"]'
 expect_rejected rehearsal "ModifyInstanceAttribute added" 'st("ToggleOnDemandPublicIpv4Assignment").Action = ["ec2:ModifyNetworkInterfaceAttribute", "ec2:ModifyInstanceAttribute"]'
-expect_rejected rehearsal "StartExecution through the rehearsal" 'st("TestRuntimeStates").Action = ["states:TestState", "states:StartExecution"]'
+expect_rejected rehearsal "TestState back on *" '.Statement += [{"Sid": "TestRuntimeStates", "Effect": "Allow", "Action": "states:TestState", "Resource": "*"}]'
+expect_rejected rehearsal "TestState next to the interface attribute" 'st("ToggleOnDemandPublicIpv4Assignment").Action = ["ec2:ModifyNetworkInterfaceAttribute", "states:TestState"]'
+expect_rejected rehearsal "StartExecution through the rehearsal" 'st("ToggleOnDemandPublicIpv4Assignment").Action = ["ec2:ModifyNetworkInterfaceAttribute", "states:StartExecution"]'
+expect_rejected rehearsal "any instance instead of the On-Demand host" 'st("ToggleOnDemandPublicIpv4Assignment").Resource = ["arn:aws:ec2:ap-northeast-1:<ACCOUNT_ID>:network-interface/eni-082890a259bcbe151"] | st("ToggleOnDemandPublicIpv4Assignment").Resource |= . + ["arn:aws:ec2:ap-northeast-1:<ACCOUNT_ID>:instance/*"]'
+expect_rejected rehearsal "a third attribute value" 'st("ToggleOnDemandPublicIpv4Assignment").Condition.StringEquals["ec2:Attribute/AssociatePublicIpAddress"] += ["*"]'
 
 expect_rejected plan "a write action" 'st("ReadExactRuntimeStateMachines").Action += ["states:StartExecution"]'
 expect_rejected plan "control item writes" 'st("ReadExactRuntimeControlTable").Action += ["dynamodb:PutItem"]'
