@@ -100,6 +100,15 @@ P3C0_NEW_INERT = tuple('aws_scheduler_schedule.runtime_orchestration["' + key + 
     ("aws_cloudwatch_event_rule.origin_guard_signals",) + P3C0_NOTIFYING_RULES
 P3C0_LEGACY = {'aws_scheduler_schedule.runtime["rds_start"]': "cron(50 9 ? * MON-FRI *)", 'aws_scheduler_schedule.runtime["ec2_start"]': "cron(0 10 ? * MON-FRI *)",
                'aws_scheduler_schedule.runtime["ec2_stop"]': "cron(0 17 ? * MON-FRI *)", 'aws_scheduler_schedule.runtime["rds_stop"]': "cron(10 17 ? * MON-FRI *)"}
+# P3-a7, on the converged P3-c0 state: day_open alone changes, and only in which statuses its wait for the database
+# start reads again (REHEARSAL-20261115 ended at configuring-enhanced-monitoring). The stored definition must be the
+# previous reviewed one: it and the new one differ in that single condition. The bounds of the wait, its one way on
+# (available alone) and its fail-closed default are checked by content, independent of the render.
+P3A7_MACHINE = 'aws_sfn_state_machine.runtime["day_open"]'
+P3A7_STATE = "RdsAvailable"
+P3A7_OPEN = "{% $dbStatus='available' and $millis()<=$rdsWaitUntil %}"
+P3A7_WAIT_BEFORE = "{% $dbStatus in ['starting','stopped'] and $polls<40 and $millis()<$rdsWaitUntil %}"
+P3A7_WAIT_AFTER = "{% $dbStatus in ['starting','stopped','configuring-enhanced-monitoring','backing-up'] and $polls<40 and $millis()<$rdsWaitUntil %}"
 USAGE = ("usage: cold-standby-plan-gate.sh p3a <saved.tfplan> <plan.json> <approved-account-sha256>\n"
          "       cold-standby-plan-gate.sh p3a2 <saved.tfplan> <plan.json> <approved-account-sha256>\n"
          "       cold-standby-plan-gate.sh p3a3 <saved.tfplan> <plan.json> <approved-account-sha256>\n"
@@ -107,6 +116,7 @@ USAGE = ("usage: cold-standby-plan-gate.sh p3a <saved.tfplan> <plan.json> <appro
          "       cold-standby-plan-gate.sh p3a5 <saved.tfplan> <plan.json> <approved-account-sha256>\n"
          "       cold-standby-plan-gate.sh p3a6 <saved.tfplan> <plan.json> <approved-account-sha256>\n"
          "       cold-standby-plan-gate.sh p3c0 <saved.tfplan> <plan.json> <approved-account-sha256>\n"
+         "       cold-standby-plan-gate.sh p3a7 <saved.tfplan> <plan.json> <approved-account-sha256>\n"
          "       cold-standby-plan-gate.sh verify <saved.tfplan> <saved-plan-sha256> <source-commit>")
 
 
@@ -779,6 +789,86 @@ def validate_p3c0(plan, rendered, grants):
             "scope": "saved-plan gate only; apply still requires separate approval"}
 
 
+def p3a7_wait(definition, side):
+    """The condition under which day_open reads the database start again. The choice is checked before it is read:
+    available alone goes on to OpenMode, the wait returns to WaitRds, and every other status is Failure."""
+    choice = definition.get("States", {}).get(P3A7_STATE) if isinstance(definition, dict) else None
+    check(isinstance(choice, dict) and set(choice) == {"Type", "Choices", "Default"} and choice["Type"] == "Choice"
+          and choice["Default"] == "Failure"
+          and isinstance(choice["Choices"], list) and all(isinstance(branch, dict) and set(branch) == {"Condition", "Next"} for branch in choice["Choices"])
+          and [branch["Next"] for branch in choice["Choices"]] == ["OpenMode", "WaitRds"], "P3A7 wait shape " + side)
+    check(choice["Choices"][0]["Condition"] == P3A7_OPEN, "P3A7 open condition " + side)
+    return choice["Choices"][1]["Condition"]
+
+
+def validate_p3a7(plan, rendered, grants):
+    """Exactly one definition update, of day_open, on the converged P3-c0 state: the stored definition and the new
+    one differ only in the statuses its wait for the database start reads again. Every other resource no-op, no drift."""
+    plan_format_check(plan)
+    changes = indexed(plan.get("resource_changes", []), "P3A7 changes")
+    managed = {address: value for address, value in changes.items() if value.get("mode") == "managed"}
+    changed = {address for address, value in managed.items() if value.get("change", {}).get("actions") != ["no-op"]}
+    check(changed == {P3A7_MACHINE}, "P3A7 exact updates")
+    prior = indexed(resources(plan.get("prior_state", {}).get("values", {}).get("root_module", {})), "P3A7 prior")
+    prior_managed = {address: value for address, value in prior.items() if value.get("mode") == "managed"}
+    check((EXISTING | NEW) - {P3A2_POLICY} <= set(prior_managed), "P3A7 wrong/incomplete root")
+    check(set(managed) == set(prior_managed), "P3A7 all prior resources represented")
+    check(P3A2_POLICY not in prior_managed, "P3A7 promotion policy returned")
+    for address, resource in prior_managed.items():
+        if address in changed:
+            continue
+        change = managed[address]["change"]
+        check(change.get("before") == change.get("after") == resource.get("values"), "P3A7 existing changed " + address)
+        check(not change.get("after_unknown") and not managed[address].get("previous_address") and not change.get("importing"), "P3A7 existing unknown/moved")
+    # The state P3-c0 left: documents at the pinned version, the other four definitions and both grants the reviewed source.
+    for address, name in P3A3_DOCUMENTS.items():
+        stored = prior_managed[address].get("values", {})
+        versions = [stored.get("default_version"), stored.get("document_version"), stored.get("latest_version")]
+        check(stored.get("name") == name and versions == [P3A3_VERSION_AFTER] * 3, "P3A7 document version " + address)
+        check(stored.get("content") == rendered["resources"][address]["content"], "P3A7 document reviewed content " + address)
+    for address in P3C0_MACHINES:
+        if address != P3A7_MACHINE:
+            stored = prior_managed[address].get("values", {})
+            check(strict_json(stored.get("definition") or "null") == strict_json(rendered["resources"][address]["definition"]), "P3A7 machine definition " + address)
+    for address in P3C0_POLICIES:
+        stored = prior_managed[address].get("values", {})
+        check(strict_json(stored.get("policy") or "null") == strict_json(grants["resources"][address]["policy"]), "P3A7 reviewed policy " + address)
+    # Nothing starts a workflow while its definition changes: every new schedule and rule DISABLED, the legacy four as they run today.
+    for address in P3C0_NEW_INERT:
+        check(prior_managed[address].get("values", {}).get("state") == "DISABLED", "P3A7 schedule/rule not DISABLED " + address)
+    for address, expression in P3C0_LEGACY.items():
+        values = prior_managed[address].get("values", {})
+        check(values.get("state") == "ENABLED" and values.get("schedule_expression") == expression and values.get("schedule_expression_timezone") == "Asia/Tokyo", "P3A7 legacy schedule " + address)
+
+    before, after = p3a3_update(managed, prior, P3A7_MACHINE, set())
+    check(p3a2_changed_keys(before, after) == {"definition"}, "P3A7 machine changed fields")
+    old, new = strict_json(before["definition"]), strict_json(after["definition"])
+    check(new == strict_json(rendered["resources"][P3A7_MACHINE]["definition"]), "P3A7 machine reviewed definition")
+    pins = p3a3_pins(new)
+    pinned, covered = {version for _, version in pins}, sorted({name for name, _ in pins})
+    check(pinned == {P3A3_VERSION_AFTER}, "P3A7 machine document pin")
+    check(covered == sorted(P3A3_DOCUMENTS.values()), "P3A7 machine document coverage")
+    # The one reviewed change, by content: the wait reads two more statuses again inside the same bounds, and nothing else differs.
+    check(p3a7_wait(old, "before") == P3A7_WAIT_BEFORE, "P3A7 wait condition before")
+    check(p3a7_wait(new, "after") == P3A7_WAIT_AFTER, "P3A7 wait condition after")
+    old["States"][P3A7_STATE]["Choices"][1]["Condition"] = P3A7_WAIT_AFTER
+    check(old == new, "P3A7 definition changes beyond the wait condition")
+
+    planned = indexed(resources(plan.get("planned_values", {}).get("root_module", {})), "P3A7 planned")
+    check({a for a, r in planned.items() if r.get("mode") == "managed"} == set(managed), "P3A7 planned resource coverage")
+    for address, resource in planned.items():
+        if resource.get("mode") == "managed":
+            unknown = managed[address]["change"].get("after_unknown", {})
+            check(normalize_unknown(resource.get("values"), unknown) == normalize_unknown(managed[address]["change"].get("after"), unknown), "P3A7 planned value inconsistency")
+    outputs = plan.get("output_changes")
+    check(isinstance(outputs, dict) and all(value.get("actions") == ["no-op"] and value.get("before") == value.get("after") and not value.get("after_unknown") for value in outputs.values()), "P3A7 output changed")
+    check(plan.get("planned_values", {}).get("outputs", {}) == plan.get("prior_state", {}).get("values", {}).get("outputs", {}), "P3A7 output snapshot changed")
+    # The P3-c0 convergence showed no drift; nothing is accepted beyond the existing allow-list.
+    drift_check(plan, {})
+    return {"result": "PASS", "mode": "p3a7", "creates": 0, "changes": len(changed), "destroys": 0,
+            "scope": "saved-plan gate only; apply still requires separate approval"}
+
+
 def regular_file(value, code):
     path = Path(value)
     check(path.is_file() and not path.is_symlink(), code)
@@ -831,6 +921,8 @@ def gate(saved_value, plan_value, approved_account_sha, mode="p3a"):
         result = validate_p3a6(plan, exporter.export(context))
     elif mode == "p3c0":
         result = validate_p3c0(plan, exporter.export(context), exporter.export_grants(context))
+    elif mode == "p3a7":
+        result = validate_p3a7(plan, exporter.export(context), exporter.export_grants(context))
     else:
         result = validate(plan, exporter.export(context))
     check(sha(saved) == saved_sha and sha(path) == plan_sha, "PG0 plan changed during the gate")
@@ -851,7 +943,7 @@ def verify(saved_value, saved_sha, commit):
 
 
 def main(argv):
-    if len(argv) != 5 or argv[1] not in ("p3a", "p3a2", "p3a3", "p3a4", "p3a5", "p3a6", "p3c0", "verify"):
+    if len(argv) != 5 or argv[1] not in ("p3a", "p3a2", "p3a3", "p3a4", "p3a5", "p3a6", "p3c0", "p3a7", "verify"):
         print(USAGE, file=sys.stderr)
         return 2
     try:

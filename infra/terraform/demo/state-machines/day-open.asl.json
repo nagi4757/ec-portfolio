@@ -1098,7 +1098,7 @@
           "Next": "OpenMode"
         },
         {
-          "Condition": "{% $dbStatus in ['starting','stopped'] and $polls<40 and $millis()<$rdsWaitUntil %}",
+          "Condition": "{% $dbStatus in ['starting','stopped','configuring-enhanced-monitoring','backing-up'] and $polls<40 and $millis()<$rdsWaitUntil %}",
           "Next": "WaitRds"
         }
       ],

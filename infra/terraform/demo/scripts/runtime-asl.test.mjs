@@ -159,6 +159,7 @@ export async function main(){
  await ownershipTests(test);
  await dayCloseTests(test);
  await leaseHandoffTests(test);
+ await rdsStartTests(test);
  console.log('RESULT: ASL STATIC/FIXTURE/MOCK PASS tests='+tests+' parsedExpressions='+expressionCount+'; real AWS calls=0; child outcomes are fixture simulations, not AWS verification');
 }
 
@@ -586,5 +587,57 @@ async function leaseHandoffTests(test){
   const m=odHeldClose({failAt:'ReacquireClose',error:'DynamoDb.AccessDeniedException'});const r=await closeHandoff(m,{start:'never'});
   stopped(r,m,'access');assert.ok(!m.calls.some(x=>x.state==='ReacquireCloseLeaseRead'));
  });
+}
+// The database start as day-open's polls see it: one status per PollRds, then the last one. REHEARSAL-20261115 saw starting
+// six times and then configuring-enhanced-monitoring, where the open ended; three minutes later the database was backing-up.
+export const RDS_START_PENDING=['starting','stopped','configuring-enhanced-monitoring','backing-up'];
+export const rdsStart=(statuses,extra={})=>{let poll=0;return fixture({dbStatus:'stopped',rdsNeverReady:true,...extra,midHook:async(state,m)=>{if(state!=='PollRds'||m.inner)return;const n=++poll;m.o.dbStatus=statuses[Math.min(n,statuses.length)-1];if(extra.onPoll)await extra.onPoll(n,m)}})};
+export const rdsPolls=m=>m.calls.filter(x=>x.state==='PollRds').length;
+async function rdsStartTests(test){
+ const spot='i-00000000000000002',observed=[...Array(6).fill('starting'),'configuring-enhanced-monitoring'];
+ const open=(m,key='manual-rds-start',execution='test')=>replay(readDoc('day-open'),m,{trigger:'manual',scheduledTime:key},1500,execution);
+ const lease=m=>m.store.get('lock#runtime')?.owner?.S?.split(':').pop(),mode=m=>m.store.get('mode').state.S;
+ const starts=m=>m.writes.filter(x=>x.operation==='startDBInstance').length,capacity=m=>m.writes.filter(x=>x.operation==='setDesiredCapacity').length;
+ const opened=(r,m,polls)=>{assert.equal(r.status,'PASS',m.trace.join(','));assert.equal(rdsPolls(m),polls);assert.equal(m.trace.indexOf('OpenMode'),m.trace.lastIndexOf('RdsAvailable')+1);assert.equal(m.o.dbStatus,'available');assert.equal(starts(m),1);assert.equal(m.o.holder,spot);assert.equal(mode(m),'spot-active');assert.equal(lease(m),undefined)};
+ const refused=(r,m,polls,started=1)=>{assert.equal(r.status,'FAIL',m.trace.join(','));assert.equal(r.error,'Runtime.Failed');assert.equal(rdsPolls(m),polls);assert.ok(!m.trace.includes('OpenMode'));assert.equal(capacity(m),0);assert.equal(starts(m),started);assert.equal(mode(m),'off');assert.equal(lease(m),undefined)};
+ await test('RDS start: the statuses of 2026-11-15 are polled again and the open goes on at available',async()=>{const m=rdsStart([...observed,'available']);opened(await open(m),m,8)});
+ await test('RDS start: a backup after the start is polled again, and only available goes on',async()=>{const m=rdsStart([...observed,'backing-up','backing-up','available']);opened(await open(m),m,10)});
+ await test('RDS start: stopped just after the start is still polled again',async()=>{const m=rdsStart(['stopped','starting','available']);opened(await open(m),m,3)});
+ await test('RDS start: the definition waits for exactly the observed statuses, inside the same bounds, and only available opens',async()=>{
+  const s=readDoc('day-open').States,c=s.RdsAvailable;assert.equal(c.Default,'Failure');assert.deepEqual(c.Choices.map(x=>x.Next),['OpenMode','WaitRds']);
+  assert.equal(c.Choices[0].Condition,"{% $dbStatus='available' and $millis()<=$rdsWaitUntil %}");
+  assert.equal(c.Choices[1].Condition,'{% $dbStatus in '+JSON.stringify(RDS_START_PENDING).replaceAll('"',"'")+' and $polls<40 and $millis()<$rdsWaitUntil %}');
+  assert.equal(s.WaitRds.Seconds,30);assert.equal(s.StartRds.Assign.rdsWaitUntil,'{% $millis()+1200000 %}');assert.deepEqual(s.RdsChoice.Choices.map(x=>[x.Condition,x.Next]),[["{% $db.DbInstanceStatus='available' %}",'OpenMode'],["{% $db.DbInstanceStatus='stopped' %}",'FenceStartRds']]);
+  const into=n=>Object.entries(s).filter(([,x])=>[x.Next,x.Default,...(x.Choices??[]).map(y=>y.Next),...(x.Catch??[]).map(y=>y.Next)].includes(n)).map(([k])=>k).sort();
+  assert.deepEqual(into('OpenMode'),['RdsAvailable','RdsChoice']);assert.deepEqual(into('WaitRds'),['RdsAvailable','StartRds']);assert.deepEqual(into('StartRds'),['FenceStartRds']);
+ });
+ for(const status of RDS_START_PENDING)await test('RDS start: '+status+' that never ends stops at the 40 polls with no capacity',async()=>{const m=rdsStart([status]);refused(await open(m),m,40)});
+ await test('RDS start: the last poll inside the 20 minutes may still open',async()=>{const m=rdsStart([...Array(39).fill('configuring-enhanced-monitoring'),'available']);opened(await open(m),m,40)});
+ await test('RDS start: a status that is polled again cannot pass the 20 minutes',async()=>{const m=rdsStart(['configuring-enhanced-monitoring'],{onPoll:async(n,m)=>{m.now+=420000}});refused(await open(m),m,3)});
+ await test('RDS start: available after the 20 minutes is still a failure',async()=>{const m=rdsStart(['configuring-enhanced-monitoring','backing-up','available'],{onPoll:async(n,m)=>{if(n===3)m.now+=1200001}});refused(await open(m),m,3)});
+ for(const status of ['failed','stopping','rebooting','modifying','maintenance','upgrading','storage-full','configuring-log-exports','configuring-iam-database-auth','inaccessible-encryption-credentials','incompatible-restore','deleting','Available','',undefined])
+  await test('RDS start: an unexpected status fails at once: '+JSON.stringify(status),async()=>{const m=rdsStart(['starting',status,'available']);refused(await open(m),m,2)});
+ for(const status of ['starting','configuring-enhanced-monitoring','backing-up','stopping'])
+  await test('RDS start: a database found '+status+' before any start is not waited for',async()=>{const m=fixture({dbStatus:status});const r=await open(m);assert.equal(r.status,'FAIL');assert.equal(m.writes.length,0);assert.equal(rdsPolls(m),0);assert.equal(mode(m),'off')});
+ await test('RDS start: a refused start and a failed poll end the open with no capacity',async()=>{
+  for(const[failAt,error,polls,started]of[['StartRds','Rds.InvalidDbInstanceStateException',0,0],['PollRds','Rds.RdsException',1,1]]){const m=rdsStart(['starting','available'],{failAt,error});refused(await open(m),m,polls,started)}
+ });
+ for(const[label,edit]of[
+  ['the arming is withdrawn',m=>{m.store.get('mode').enabled.BOOL=false}],
+  ['maintenance starts',m=>{m.store.set('maintenance',{pk:{S:'maintenance'}})}],
+  ['the approval changes',m=>{m.store.get('mode').approvalRef.S='ANOTHER-APPROVAL'}],
+  ['the mode leaves off',m=>{m.store.get('mode').state.S='day-close'}],
+  ['the lease is lost',m=>{m.store.get('lock#runtime').owner.S='FOREIGN'}],
+  ['the execution is redriven',m=>{m.o.redrive=1}]])
+  await test('RDS start: '+label+' during the wait: nothing is written after available',async()=>{
+   let at;const m=rdsStart(['starting','configuring-enhanced-monitoring','backing-up','available'],{onPoll:async(n,m)=>{if(n===2){edit(m);at=m.writes.length}}});const r=await open(m);
+   assert.equal(r.status,'FAIL',m.trace.join(','));assert.equal(rdsPolls(m),4);assert.ok(m.trace.includes('OpenMode'));assert.equal(capacity(m),0);assert.equal(starts(m),1);assert.notEqual(mode(m),'spot-active');
+   assert.deepEqual(m.writes.slice(at).filter(x=>!x.operation.startsWith('ddb:')),[]);assert.ok(!m.writes.slice(at).some(x=>x.key==='mode'));
+  });
+ await test('RDS start: a second open during the wait takes no lease and writes nothing',async()=>{
+  const m=rdsStart(['stopped','configuring-enhanced-monitoring','available'],{onPoll:async(n,m)=>{if(n!==1)return;const now=m.now,before=m.writes.length;m.inner=true;const r=await open(m,'manual-rds-second','second');m.inner=false;leaseBusy(r,m);assert.equal(m.writes.length,before);assert.equal(lease(m),'test');assert.ok(!m.store.has('run#day-open#manual-rds-second'));m.now=now}});
+  opened(await open(m),m,3);
+ });
+ await test('RDS start: the same run key never starts the database twice',async()=>{const m=rdsStart([...observed,'available']);m.store.set('run#day-open#manual-rds-start',{pk:{S:'run#day-open#manual-rds-start'}});const r=await open(m);assert.equal(r.status,'FAIL');assert.equal(m.writes.length,0);assert.equal(rdsPolls(m),0)});
 }
 if(process.argv[1]===fileURLToPath(import.meta.url))await main();

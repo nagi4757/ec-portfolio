@@ -1393,6 +1393,55 @@ Both documents are replaced as a whole by these resources, so a mistake would si
 
 Revert the two statements: `0 to add, 2 to change, 0 to destroy`, inert at any time, because nothing uses the grants before P3-c.
 
+## Phase 6C-5c P3-a7: day-open database start wait
+
+Applied on top of the converged P3-c0 state. One defect, found by the rehearsal of 2026-11-15: `day-open` started the stopped database and polled it every 30 s. The poll read `starting` six times and then `configuring-enhanced-monitoring`, which `RdsAvailable` did not list, so the run took its `Default` to `Failure` 3.5 minutes after the start, inside both bounds, before `OpenMode`. No Spot host started and the address did not move. Enhanced Monitoring is off; the start passes through that status all the same. Three minutes later the database was `backing-up`.
+
+| `RdsAvailable` reads | Before | After |
+| --- | --- | --- |
+| `available`, within 20 minutes of the start | `OpenMode` | the same |
+| `starting`, `stopped` | wait 30 s and poll again | the same |
+| `configuring-enhanced-monitoring`, `backing-up` | `Failure` | wait 30 s and poll again |
+| any other status, or none | `Failure` | the same |
+| anything after 40 polls or 20 minutes | `Failure` | the same |
+
+The statuses are `RDS_START_PENDING` in `scripts/runtime-asl-build.py`. Only `available` goes on, the start is still sent once, and nothing is written while the run waits. `NightGate` and `RdsChoice` do not change: a database found in any of these statuses before the start is not waited for. The other four workflows, the documents, `*.tf` and IAM do not change; no new API is called.
+
+`scripts/runtime-asl.test.mjs` replays the statuses of 2026-11-15, each status that never ends, the deadline, unexpected statuses, and a disarm, maintenance, approval change, mode change, lost lease or redrive during the wait. `runtime-asl.mutation.mjs` removes each status and each bound in turn.
+
+### Plan delta
+
+Expected, not from a real plan:
+
+```
+Plan: 0 to add, 1 to change, 0 to destroy.
+```
+
+`aws_sfn_state_machine.runtime["day_open"]`, in `definition` only.
+
+The gate mode is `p3a7`. On the converged P3-c0 state it requires:
+
+- exactly that one update, from the stored definition to the reviewed render;
+- by content, independent of the render: the stored definition and the new one differ only in the wait condition of `RdsAvailable`, which is the previous one before and lists `configuring-enhanced-monitoring` and `backing-up` after, with `$polls<40` and `$millis()<$rdsWaitUntil` kept; the choice goes to `OpenMode` on `available` within the deadline alone, back to `WaitRds` otherwise, and `Failure` by default;
+- both commands still pinned to document version 2;
+- every other resource and output a no-op, the other four definitions and both P3-c0 grants the reviewed source, the documents at version 2, the four legacy schedules `ENABLED` with their current cron, the four new schedules and three rules `DISABLED`, and no drift beyond the allow-list.
+
+`p3c0` and `p3a6` reject this plan, and `p3a7` rejects theirs.
+
+```sh
+scripts/cold-standby-plan-gate.sh p3a7 "$PRIVATE_DIR/p3a7.tfplan" "$PRIVATE_DIR/p3a7.plan.json" <sha256 of the 12-digit account id>
+scripts/cold-standby-plan-gate.sh verify "$PRIVATE_DIR/p3a7.tfplan" <saved_plan_sha256> <source_commit>
+```
+
+### Not verified
+
+- Whether a start that is followed by a backup reports `available` before `backing-up`. If it does, `day-open` goes on at the first `available`, and the later checks that need `available` (the `od-standby` prepare gate and the rehearsal runner) can refuse while the backup runs. This change does not alter them.
+- Real durations: one weekday start reached `available` four minutes after it began; the rehearsal start was still polling at 3.5 minutes.
+
+### Rollback
+
+A revert and an apply of the one definition. Nothing is stored by the change.
+
 ## Local validation
 
 Run static checks in the isolated code worktree without AWS credentials or runtime input files:
