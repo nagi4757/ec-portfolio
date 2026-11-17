@@ -17,6 +17,12 @@ LEASE_COND = '#owner = :owner AND lockToken = :token AND expiresAt > :minExpiry 
 READ_RETRY = [{'ErrorEquals':['States.TaskFailed'],'IntervalSeconds':2,'MaxAttempts':2,'BackoffRate':2}]
 # The exact document version each command runs, kept per document because they can diverge. Never $LATEST or $DEFAULT.
 DOCUMENT_VERSIONS = {'${od_readiness_document_name}':'2','${spot_smoke_document_name}':'2'}
+# What a start of the database reports before it is available. A read just after the request can still return stopped. On
+# 2026-11-15 the start went from starting to configuring-enhanced-monitoring, where day-open ended REHEARSAL-20261115 (Enhanced
+# Monitoring is off: the start passed through that status all the same), and the database was backing-up three minutes
+# later. Only these are polled again, inside the same 40 polls and 20 minutes; only available goes on, and every other
+# status fails at once.
+RDS_START_PENDING = "['starting','stopped','configuring-enhanced-monitoring','backing-up']"
 # The On-Demand boot race: the contract of ssm_runtime.py main() for a boot that is still converging.
 NOT_READY_EXIT = 75
 NOT_READY_OUTPUT = "['NOT_READY convergence-in-progress','NOT_READY convergence-start-queued']"
@@ -387,7 +393,7 @@ def harden(b):
  if b.name=='day-open':
   s['StartRds']['Assign']={'rdsWaitUntil':E('$millis()+1200000')}
   s['RdsAvailable']['Choices'][0]['Condition']=E("$dbStatus='available' and $millis()<=$rdsWaitUntil")
-  s['RdsAvailable']['Choices'][1]['Condition']=E("$dbStatus in ['starting','stopped'] and $polls<40 and $millis()<$rdsWaitUntil")
+  s['RdsAvailable']['Choices'][1]['Condition']=E("$dbStatus in "+RDS_START_PENDING+" and $polls<40 and $millis()<$rdsWaitUntil")
  if b.name=='od-standby':
   s['StartOd']['Assign']={'odBootAt':E('$odBootAt=0 ? $millis() : $odBootAt'),'polls':0,'attempts':0,'odReadinessRechecks':0,'odReadinessLeaseRetries':0}
   s['SsmOnlineChoice']['Choices'][1]['Condition']=E('$attempts<40 and $millis()<'+OD_BOOT_DEADLINE)
@@ -582,7 +588,7 @@ def day_open():
  b.choice('RdsChoice',[("$db.DbInstanceStatus='available'",'OpenMode'),("$db.DbInstanceStatus='stopped'",'StartRds')],'Failure')
  b.write('StartRds','rds','startDBInstance',{'DbInstanceIdentifier':'${db_instance_identifier}'},'WaitRds',['off','degraded'])
  b.wait('WaitRds',30,'PollRds');b.read('PollRds','rds','describeDBInstances',{'DbInstanceIdentifier':'${db_instance_identifier}'},'RdsAvailable',{'dbStatus':E('$states.result.DbInstances[0].DbInstanceStatus'),'polls':E('$polls+1')})
- b.choice('RdsAvailable',[("$dbStatus='available'",'OpenMode'),("$dbStatus in ['starting','stopped'] and $polls<40",'WaitRds')],'Failure')
+ b.choice('RdsAvailable',[("$dbStatus='available'",'OpenMode'),("$dbStatus in "+RDS_START_PENDING+" and $polls<40",'WaitRds')],'Failure')
  b.modewrite('OpenMode','spot-active','SetDesired',['off','degraded'])
  b.write('SetDesired','autoscaling','setDesiredCapacity',{'AutoScalingGroupName':'${asg_name}','DesiredCapacity':1,'HonorCooldown':False},'WaitSpot',['spot-active'])
  b.wait('WaitSpot',20,'ReadSpot');b.read('ReadSpot','autoscaling','describeAutoScalingGroups',{'AutoScalingGroupNames':['${asg_name}']},'SpotChoice',{'group':E('$states.result.AutoScalingGroups[0]'),'polls':E('$polls+1')})

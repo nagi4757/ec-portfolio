@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Offline mutations execute real generated JSONata and the strict fixture's atomic DynamoDB condition interpreter.
 import assert from 'node:assert/strict';
-import {readDoc,fixture,transform,evaluate,contract,vars,replay,caughtResponseLossFixture,notReady,readyResult,hostFailure,prepareFixture,prepareInput,sent,afterFirstRead,raceSpot,raceFixture,guardSignal,guardPromote,foreignLease,QUIESCE,orphanFixture,reconcile,awsWrites,crossedClose,failingRun,racingPrepares,closeFixture,closeInput,runClose,closing,lostResponse,handoff,odHeldClose,closeHandoff,handoffDecisions,LEASE_HANDOFF} from './runtime-asl.test.mjs';
+import {readDoc,fixture,transform,evaluate,contract,vars,replay,caughtResponseLossFixture,notReady,readyResult,hostFailure,prepareFixture,prepareInput,sent,afterFirstRead,raceSpot,raceFixture,guardSignal,guardPromote,foreignLease,QUIESCE,orphanFixture,reconcile,awsWrites,crossedClose,failingRun,racingPrepares,closeFixture,closeInput,runClose,closing,lostResponse,handoff,odHeldClose,closeHandoff,handoffDecisions,LEASE_HANDOFF,RDS_START_PENDING,rdsStart,rdsPolls} from './runtime-asl.test.mjs';
 const fixed=Date.parse('2026-10-21T09:00:00.000Z'),SPOT='i-00000000000000002';
 const owner='arn:aws:states:ap-northeast-1:111111111111:execution:MOCK:test',token='MOCK-token',until=fixed+8880000;
 const names=['day-open','ready-check','day-close','origin-guard','od-standby'];
@@ -235,5 +235,22 @@ await behavioral('approval-reset-no-write','origin-guard',()=>fixture({mode:md()
  await hb('standby-no-child-arn','od-standby',standby,d=>{delete d.States.PromoteOd.Assign},async(r,mut)=>assert.equal(r.parent.status,mut?'FAIL':'PASS'));
  await hb('standby-not-waiting','od-standby',standby,d=>{d.States.ReacquireE2e.Catch=[d.States.ReacquireE2e.Catch[1]]},async(r,mut)=>assert.equal(r.parent.status,mut?'FAIL':'PASS'));
  await hb('standby-mode-before-child','od-standby',standby,d=>{const c=d.States.ReacquireE2eLeaseWaitChoice.Choices[0];assert.ok(c.Condition.includes('["failover-prep","od-active"]'));c.Condition=c.Condition.replace('["failover-prep","od-active"]','["od-active"]')},async(r,mut)=>assert.equal(r.parent.status,mut?'FAIL':'PASS'));
+}
+// The database start (REHEARSAL-20261115): each status polled again and each bound of the wait, removed alone, must change a real replay.
+{
+ const open={trigger:'manual',scheduledTime:'manual-rds-mutation'},wait=d=>d.States.RdsAvailable.Choices[1],go=d=>d.States.RdsAvailable.Choices[0];
+ const cut=(c,part)=>{assert.ok(c.Condition.includes(part),part);c.Condition=c.Condition.replace(part,'')};
+ const LIST='$dbStatus in '+JSON.stringify(RDS_START_PENDING).replaceAll('"',"'")+' and ',COUNT='$polls<40 and ',WALL=' and $millis()<$rdsWaitUntil',LATE=' and $millis()<=$rdsWaitUntil';
+ const observed=[...Array(6).fill('starting'),'configuring-enhanced-monitoring'],opens=async(r,m,mut)=>assert.equal(r.status,mut?'FAIL':'PASS');
+ // Without either status the open ends where REHEARSAL-20261115 did.
+ await behavioral('rds-start-without-monitoring','day-open',()=>rdsStart([...observed,'available']),open,d=>cut(wait(d),",'configuring-enhanced-monitoring'"),opens);
+ await behavioral('rds-start-without-backup','day-open',()=>rdsStart([...observed,'backing-up','available']),open,d=>cut(wait(d),",'backing-up'"),opens);
+ await behavioral('rds-start-any-status','day-open',()=>rdsStart(['starting','failed']),open,d=>cut(wait(d),LIST),async(r,m,mut)=>assert.equal(rdsPolls(m)>2,mut));
+ await behavioral('rds-start-default-waits','day-open',()=>rdsStart(['failed']),open,d=>{d.States.RdsAvailable.Default='WaitRds'},async(r,m,mut)=>assert.equal(r.status,mut?'LIMIT':'FAIL'));
+ for(const status of RDS_START_PENDING)await behavioral('rds-start-opens-at-'+status,'day-open',()=>rdsStart([status]),open,d=>{const c=go(d);assert.ok(c.Condition.includes("$dbStatus='available'"));c.Condition=c.Condition.replace("$dbStatus='available'","$dbStatus in ['available','"+status+"']")},async(r,m,mut)=>assert.equal(m.trace.includes('OpenMode'),mut));
+ await behavioral('rds-start-poll-limit','day-open',()=>rdsStart(['backing-up'],{onPoll:async(n,m)=>{m.now-=30000}}),open,d=>cut(wait(d),COUNT),async(r,m,mut)=>{assert.equal(r.status,mut?'LIMIT':'FAIL');if(!mut)assert.equal(rdsPolls(m),40)});
+ await behavioral('rds-start-deadline','day-open',()=>rdsStart(['configuring-enhanced-monitoring'],{onPoll:async(n,m)=>{m.now+=420000}}),open,d=>cut(wait(d),WALL),async(r,m,mut)=>assert.equal(rdsPolls(m)>3,mut));
+ await behavioral('rds-start-late-available','day-open',()=>rdsStart(['configuring-enhanced-monitoring','available'],{onPoll:async(n,m)=>{if(n===2)m.now+=1200001}}),open,d=>cut(go(d),LATE),async(r,m,mut)=>assert.equal(m.trace.includes('OpenMode'),mut));
+ await behavioral('rds-start-twice','day-open',()=>rdsStart([...observed,'available']),open,d=>{wait(d).Next='FenceStartRds'},async(r,m,mut)=>assert.equal(m.writes.filter(x=>x.operation==='startDBInstance').length>1,mut));
 }
 console.log('RESULT: ASL MUTATION PASS '+killed+'/'+killed+' killed; unmutated controls='+controls+'; '+JSON.stringify(byType)+'; real AWS calls=0');
