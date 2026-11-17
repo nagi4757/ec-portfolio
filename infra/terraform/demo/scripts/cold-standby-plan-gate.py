@@ -109,6 +109,12 @@ P3A7_STATE = "RdsAvailable"
 P3A7_OPEN = "{% $dbStatus='available' and $millis()<=$rdsWaitUntil %}"
 P3A7_WAIT_BEFORE = "{% $dbStatus in ['starting','stopped'] and $polls<40 and $millis()<$rdsWaitUntil %}"
 P3A7_WAIT_AFTER = "{% $dbStatus in ['starting','stopped','configuring-enhanced-monitoring','backing-up'] and $polls<40 and $millis()<$rdsWaitUntil %}"
+# The P3-c0 apply stored both grants, but not the attributes that mirror them: the scheduler role's inline_policy and
+# the alert topic's policy still hold each document without its new statement, and the P3-c0 convergence was a plan,
+# so nothing has stored them since. Its refresh of 2026-11-07 shows both as drift. Only validate_p3a7 passes these
+# rules; drift_check accepts a mirror only by content, as the stored grant before and after its reviewed statement.
+P3A7_DRIFT_RULES = {"aws_iam_role.scheduler": {"fields": ["inline_policy"], "policy_mirror": "aws_iam_role_policy.scheduler_runtime_control"},
+                    "aws_sns_topic.alerts": {"fields": ["policy"], "policy_mirror": "aws_sns_topic_policy.alerts"}}
 USAGE = ("usage: cold-standby-plan-gate.sh p3a <saved.tfplan> <plan.json> <approved-account-sha256>\n"
          "       cold-standby-plan-gate.sh p3a2 <saved.tfplan> <plan.json> <approved-account-sha256>\n"
          "       cold-standby-plan-gate.sh p3a3 <saved.tfplan> <plan.json> <approved-account-sha256>\n"
@@ -371,6 +377,30 @@ def drift_check(plan, first_refresh=None):
                   after.get("permissions") == {} and after.get("name") == rule["empty_permissions_document"], "PG4 document permissions")
             config = indexed(plan.get("configuration", {}).get("root_module", {}).get("resources", []), "PG4 config")
             check("permissions" not in config.get(address, {}).get("expressions", {}), "PG4 configured document permissions")
+        elif "policy_mirror" in rule:
+            # A refreshed copy of a grant in the role or topic it is attached to: now the stored grant, and before it
+            # exactly that grant without the statement P3-c0 added. Any other statement added, removed or changed fails.
+            field, policy_address = rule["fields"][0], rule["policy_mirror"]
+            policy = prior.get(policy_address, {}).get("values", {})
+            policy_change = changes.get(policy_address, {}).get("change", {})
+            check(changed == {field} and policy_change.get("actions") == ["no-op"] and
+                  policy_change.get("before") == policy_change.get("after") == policy, "PG4 mirror separate-policy binding")
+            old, new = before[field], after[field]
+            if field == "inline_policy":
+                check(isinstance(old, list) and isinstance(new, list) and len(old) == len(new) == 1 and
+                      all(isinstance(item, dict) and set(item) == {"name", "policy"} and item["name"] == policy.get("name") for item in old + new) and
+                      policy.get("role") == after.get("name"), "PG4 mirror inline binding")
+                old, new = old[0]["policy"], new[0]["policy"]
+            else:
+                check(policy.get("arn") == after.get("arn"), "PG4 mirror topic binding")
+            check(isinstance(old, str) and isinstance(new, str) and isinstance(policy.get("policy"), str), "PG4 mirror document shape")
+            stored = strict_json(policy["policy"])
+            check(strict_json(new) == stored, "PG4 mirror refreshed value")
+            check(isinstance(stored, dict) and set(stored) == {"Version", "Statement"} and isinstance(stored["Statement"], list) and
+                  [statement.get("Sid") for statement in stored["Statement"]] == [*P3C0_POLICIES[policy_address], P3C0_NEW_SID[policy_address]] and
+                  strict_json(old) == {**stored, "Statement": stored["Statement"][:-1]}, "PG4 mirror previous value")
+            config = indexed(plan.get("configuration", {}).get("root_module", {}).get("resources", []), "PG4 config")
+            check(field not in config.get(address, {}).get("expressions", {}), "PG4 configured mirror")
         else:
             check(changed == {"start_time"} and all(after.get(k) == rule[k] for k in ("recurrence", "time_zone")) and
                   after.get("min_size") == 0 and after.get("max_size") == 1 and after.get("desired_capacity") == 0 and
@@ -863,8 +893,9 @@ def validate_p3a7(plan, rendered, grants):
     outputs = plan.get("output_changes")
     check(isinstance(outputs, dict) and all(value.get("actions") == ["no-op"] and value.get("before") == value.get("after") and not value.get("after_unknown") for value in outputs.values()), "P3A7 output changed")
     check(plan.get("planned_values", {}).get("outputs", {}) == plan.get("prior_state", {}).get("values", {}).get("outputs", {}), "P3A7 output snapshot changed")
-    # The P3-c0 convergence showed no drift; nothing is accepted beyond the existing allow-list.
-    drift_check(plan, {})
+    # The P3-c0 convergence plan (2026-11-07, State serial 55) showed four drifts: the backstop start_time and the
+    # database latest_restorable_time, on the allow-list, and the two grant mirrors of P3A7_DRIFT_RULES. Nothing else.
+    drift_check(plan, P3A7_DRIFT_RULES)
     return {"result": "PASS", "mode": "p3a7", "creates": 0, "changes": len(changed), "destroys": 0,
             "scope": "saved-plan gate only; apply still requires separate approval"}
 

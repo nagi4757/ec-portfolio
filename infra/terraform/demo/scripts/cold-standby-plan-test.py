@@ -2322,10 +2322,12 @@ class P3a7Tests(unittest.TestCase):
         self.reject(snapshot, "P3A7 output snapshot changed", sync=False)
         self.reject(p3a3_stale_role, "PG4 unexpected drift")
         def drift(plan):
+            # The scheduler role may drift in its grant mirror alone (P3a7MirrorTests); any other field fails.
             address = "aws_iam_role.scheduler"
-            values = after(plan, address)
+            values = {**after(plan, address), "description": "y"}
+            bind_refreshed(plan, address, values)
             plan["resource_drift"] = [{"address": address, "mode": "managed", "type": "aws_iam_role", "change": {"actions": ["update"], "before": {**values, "description": "x"}, "after": values, "after_unknown": {}}}]
-        self.reject(drift, "PG4 unexpected drift")
+        self.reject(drift, "PG4 unexpected drift fields")
         def machine_drift(plan):
             values = self.change(plan, self.OPEN)["before"]
             plan["resource_drift"] = [{"address": self.OPEN, "mode": "managed", "type": "aws_sfn_state_machine", "change": {"actions": ["update"], "before": {**values, "definition": "{}"}, "after": values, "after_unknown": {}}}]
@@ -2353,6 +2355,255 @@ class P3a7Tests(unittest.TestCase):
                 self.assertEqual(code, 1); self.assertIn("REJECT P3A7 exact updates", err)
 
 
+P3A7_ROLE, P3A7_TOPIC = "aws_iam_role.scheduler", "aws_sns_topic.alerts"
+P3A7_GRANT = {P3A7_ROLE: "aws_iam_role_policy.scheduler_runtime_control", P3A7_TOPIC: "aws_sns_topic_policy.alerts"}
+
+
+def p3a7_mirrors(plan, only=(P3A7_ROLE, P3A7_TOPIC)):
+    """The grant mirrors as the refresh of the P3-c0 convergence plan (2026-11-07) showed them: the role holds the
+    reviewed grant as its one inline policy and the topic its policy, and before the refresh each held that document
+    without the statement P3-c0 added. The documents are the render; the refreshed side is bound to the State."""
+    for mirror in only:
+        grant = json.loads(GRANTS["resources"][P3A7_GRANT[mirror]]["policy"])
+        new = GRANTS["resources"][P3A7_GRANT[mirror]]["policy"]
+        old = json.dumps({**grant, "Statement": grant["Statement"][:-1]}, separators=(",", ":"))
+        if mirror == P3A7_ROLE:
+            refreshed = {**after(plan, mirror), "name": "ec-portfolio-demo-scheduler", "inline_policy": [{"name": "runtime-start-stop", "policy": new}]}
+            stale = {**refreshed, "inline_policy": [{"name": "runtime-start-stop", "policy": old}]}
+        else:
+            refreshed = {**after(plan, mirror), "policy": new}
+            stale = {**refreshed, "policy": old}
+        bind_refreshed(plan, mirror, refreshed)
+        plan["resource_drift"].append({"address": mirror, "mode": "managed", "type": mirror.split(".")[0], "name": mirror.split(".")[1], "provider_name": "registry.terraform.io/hashicorp/aws",
+                                       "change": {"actions": ["update"], "before": stale, "after": refreshed, "after_unknown": {}, "before_sensitive": {}, "after_sensitive": {}}})
+    p3a3_sync(plan)
+    return plan
+
+
+def p3a7_mirror_plan(only=(P3A7_ROLE, P3A7_TOPIC)):
+    return p3a7_mirrors(p3a7_plan(), only)
+
+
+class P3a7MirrorTests(unittest.TestCase):
+    """The grant mirrors left in State serial 55: accepted by p3a7 only as the stored grant without its reviewed statement."""
+
+    def drift(self, plan, address):
+        return next(r for r in plan["resource_drift"] if r["address"] == address)["change"]
+
+    @staticmethod
+    def document(change, mirror, side):
+        value = change[side]["inline_policy"][0]["policy"] if mirror == P3A7_ROLE else change[side]["policy"]
+        return json.loads(value)
+
+    def put(self, plan, mirror, side, document):
+        """One side of a mirror drift; the refreshed side stays bound to the State and its no-op change."""
+        change = self.drift(plan, mirror)
+        text = json.dumps(document, separators=(",", ":"))
+        if mirror == P3A7_ROLE:
+            change[side] = {**change[side], "inline_policy": [{**change[side]["inline_policy"][0], "policy": text}]}
+        else:
+            change[side] = {**change[side], "policy": text}
+        if side == "after":
+            bind_refreshed(plan, mirror, change["after"])
+
+    def edit(self, mirror, side, edit):
+        def mutate(plan):
+            change = self.drift(plan, mirror)
+            document = self.document(change, mirror, side)
+            edit(document)
+            self.put(plan, mirror, side, document)
+        return mutate
+
+    def accepts(self, plan):
+        try:
+            result = G.validate_p3a7(plan, RENDERED, GRANTS)
+        except G.Rejected as error:
+            self.fail("p3a7 refused the grant mirrors: " + str(error))
+        self.assertEqual((result["mode"], result["creates"], result["changes"], result["destroys"]), ("p3a7", 0, 1, 0))
+
+    def reject(self, mutate, prefix, only=(P3A7_ROLE, P3A7_TOPIC), direct=False):
+        global FIXTURE_CHECKS
+        FIXTURE_CHECKS += 1
+        plan = p3a7_mirror_plan(only)
+        mutate(plan)
+        p3a3_sync(plan)
+        with self.assertRaises(G.Rejected) as caught:
+            G.drift_check(plan, G.P3A7_DRIFT_RULES) if direct else G.validate_p3a7(plan, RENDERED, GRANTS)
+        self.assertTrue(str(caught.exception).startswith(prefix), str(caught.exception))
+
+    def test_the_refresh_of_serial_55_passes(self):
+        self.accepts(p3a7_mirror_plan())
+        for only in ((P3A7_ROLE,), (P3A7_TOPIC,), ()):
+            self.accepts(p3a7_mirror_plan(only))
+        # With the database drift of the same refresh, as on 2026-11-07.
+        plan = p3a7_mirror_plan()
+        values = {**after(plan, "aws_db_instance.demo"), "status": "stopped", "latest_restorable_time": "2026-11-06T08:05:00Z"}
+        bind_refreshed(plan, "aws_db_instance.demo", values)
+        plan["resource_drift"].append({"address": "aws_db_instance.demo", "mode": "managed", "type": "aws_db_instance", "change": {"actions": ["update"], "before": {**values, "latest_restorable_time": "2026-11-05T08:05:00Z"}, "after": values, "after_unknown": {}}})
+        p3a3_sync(plan)
+        self.accepts(plan)
+
+    def test_the_fixture_is_the_shape_of_that_refresh(self):
+        plan = p3a7_mirror_plan()
+        for mirror, (kept, added) in ((P3A7_ROLE, (["ControlDemoEc2", "ControlDemoRds"], "StartRuntimeWorkflows")),
+                                      (P3A7_TOPIC, (["AllowBudgetNotifications", "AllowSchedulerAlarmNotifications"], "AllowRuntimeOrchestrationNotifications"))):
+            change = self.drift(plan, mirror)
+            fields = sorted(k for k in set(change["before"]) | set(change["after"]) if change["before"].get(k) != change["after"].get(k))
+            self.assertEqual(fields, G.P3A7_DRIFT_RULES[mirror]["fields"])
+            self.assertEqual([s["Sid"] for s in self.document(change, mirror, "before")["Statement"]], kept)
+            self.assertEqual([s["Sid"] for s in self.document(change, mirror, "after")["Statement"]], kept + [added])
+            self.assertEqual(self.document(change, mirror, "after"), json.loads(after(plan, P3A7_GRANT[mirror])["policy"]))
+        self.assertEqual({a: r["policy_mirror"] for a, r in G.P3A7_DRIFT_RULES.items()}, P3A7_GRANT)
+
+    def test_the_previous_value_is_exactly_the_grant_without_its_statement(self):
+        for mirror in (P3A7_ROLE, P3A7_TOPIC):
+            with self.subTest(mirror):
+                self.reject(self.edit(mirror, "before", lambda d: d["Statement"].pop(0)), "PG4 mirror previous value")
+                self.reject(self.edit(mirror, "before", lambda d: d["Statement"][0].update(Action="*")), "PG4 mirror previous value")
+                self.reject(self.edit(mirror, "before", lambda d: d["Statement"][0].update(Effect="Deny")), "PG4 mirror previous value")
+                self.reject(self.edit(mirror, "before", lambda d: d["Statement"].append({"Sid": "Legacy", "Effect": "Allow", "Action": "sns:Publish", "Resource": "*"})), "PG4 mirror previous value")
+                self.reject(self.edit(mirror, "before", lambda d: d["Statement"].reverse()), "PG4 mirror previous value")
+                self.reject(self.edit(mirror, "before", lambda d: d.update(Version="2008-10-17")), "PG4 mirror previous value")
+                self.reject(self.edit(mirror, "before", lambda d: d.update(Statement=[])), "PG4 mirror previous value")
+                # The statement P3-c0 added already there, another one missing.
+                grant = json.loads(GRANTS["resources"][P3A7_GRANT[mirror]]["policy"])
+                self.reject(self.edit(mirror, "before", lambda d, g=grant: d.update(Statement=g["Statement"][1:])), "PG4 mirror previous value")
+                self.reject(lambda p, m=mirror: self.drift(p, m).update(before=copy.deepcopy(self.drift(p, m)["after"])), "PG4 empty drift")
+                # The whole grant before, in another layout: the same document, so it differs from the State only in text.
+                def whole(plan, m=mirror, g=grant):
+                    change = self.drift(plan, m)
+                    text = json.dumps(g, indent=1)
+                    if m == P3A7_ROLE:
+                        change["before"] = {**change["before"], "inline_policy": [{**change["before"]["inline_policy"][0], "policy": text}]}
+                    else:
+                        change["before"] = {**change["before"], "policy": text}
+                self.reject(whole, "PG4 mirror previous value")
+
+    def test_the_refreshed_value_is_exactly_the_stored_grant(self):
+        wide = {"Sid": "Wide", "Effect": "Allow", "Action": "*", "Resource": "*"}
+        for mirror in (P3A7_ROLE, P3A7_TOPIC):
+            with self.subTest(mirror):
+                self.reject(self.edit(mirror, "after", lambda d: d["Statement"].append(dict(wide))), "PG4 mirror refreshed value")
+                self.reject(self.edit(mirror, "after", lambda d: d["Statement"][-1].update(Resource="*")), "PG4 mirror refreshed value")
+                self.reject(self.edit(mirror, "after", lambda d: d["Statement"][-1].update(Sid="Other")), "PG4 mirror refreshed value")
+                self.reject(self.edit(mirror, "after", lambda d: d["Statement"][0].update(Action="*")), "PG4 mirror refreshed value")
+        def wider_rules(plan):
+            arn = after(plan, "aws_cloudwatch_event_rule.origin_guard_signals")["arn"]
+            self.edit(P3A7_TOPIC, "after", lambda d: d["Statement"][-1]["Condition"]["ArnEquals"]["aws:SourceArn"].append(arn))(plan)
+        self.reject(wider_rules, "PG4 mirror refreshed value")
+        def od_standby(plan):
+            arn = after(plan, 'aws_sfn_state_machine.runtime["od_standby"]')["arn"]
+            self.edit(P3A7_ROLE, "after", lambda d: d["Statement"][-1].update(Resource=d["Statement"][-1]["Resource"] + [arn]))(plan)
+        self.reject(od_standby, "PG4 mirror refreshed value")
+
+    def test_the_role_mirror_is_its_one_grant(self):
+        def items(side, value):
+            def mutate(plan):
+                change = self.drift(plan, P3A7_ROLE)
+                change[side] = {**change[side], "inline_policy": value(change[side]["inline_policy"])}
+                if side == "after":
+                    bind_refreshed(plan, P3A7_ROLE, change["after"])
+            return mutate
+        wide = json.dumps({"Version": "2012-10-17", "Statement": [{"Effect": "Allow", "Action": "*", "Resource": "*"}]})
+        self.reject(items("after", lambda v: v + [{"name": "runtime-start-stop", "policy": wide}]), "PG4 mirror inline binding")
+        self.reject(items("before", lambda v: v + [{"name": "runtime-start-stop", "policy": wide}]), "PG4 mirror inline binding")
+        self.reject(items("before", lambda v: []), "PG4 mirror inline binding")
+        self.reject(items("before", lambda v: [{**v[0], "name": "other"}]), "PG4 mirror inline binding")
+        self.reject(items("after", lambda v: [{**v[0], "name": "other"}]), "PG4 mirror inline binding")
+        self.reject(lambda p: (items("before", lambda v: [{**v[0], "name": "other"}])(p), items("after", lambda v: [{**v[0], "name": "other"}])(p)), "PG4 mirror inline binding")
+        self.reject(lambda p: (items("before", lambda v: [{**v[0], "extra": "x"}])(p), items("after", lambda v: [{**v[0], "extra": "y"}])(p)), "PG4 mirror inline binding")
+        self.reject(lambda p: bind_refreshed(p, P3A7_GRANT[P3A7_ROLE], {**after(p, P3A7_GRANT[P3A7_ROLE]), "role": "ec-portfolio-demo-other"}), "PG4 mirror inline binding")
+        self.reject(lambda p: bind_refreshed(p, P3A7_GRANT[P3A7_ROLE], {**after(p, P3A7_GRANT[P3A7_ROLE]), "name": "other"}), "PG4 mirror inline binding")
+
+    def test_the_topic_mirror_is_its_grant(self):
+        self.reject(lambda p: bind_refreshed(p, P3A7_GRANT[P3A7_TOPIC], {**after(p, P3A7_GRANT[P3A7_TOPIC]), "arn": after(p, P3A7_TOPIC)["arn"] + "-other"}), "PG4 mirror topic binding")
+        def no_previous(plan):
+            change = self.drift(plan, P3A7_TOPIC)
+            change["before"] = {**change["before"], "policy": None}
+        self.reject(no_previous, "PG4 mirror document shape")
+
+    def test_only_the_mirror_field_and_only_the_two_mirrors(self):
+        def also(mirror, field, previous, now):
+            def mutate(plan):
+                change = self.drift(plan, mirror)
+                change["after"] = {**change["after"], field: now}
+                change["before"] = {**change["before"], field: previous}
+                bind_refreshed(plan, mirror, change["after"])
+            return mutate
+        self.reject(also(P3A7_ROLE, "description", "previous", "now"), "PG4 unexpected drift fields")
+        self.reject(also(P3A7_ROLE, "assume_role_policy", "{}", '{"Statement":[]}'), "PG4 unexpected drift fields")
+        self.reject(also(P3A7_TOPIC, "delivery_policy", "{}", '{"http":{}}'), "PG4 unexpected drift fields")
+        def other(address, field):
+            def mutate(plan):
+                values = {field: "now", **after(plan, address)}
+                bind_refreshed(plan, address, values)
+                plan["resource_drift"].append({"address": address, "mode": "managed", "type": address.split(".")[0], "change": {"actions": ["update"], "before": {**values, field: "previous"}, "after": copy.deepcopy(values), "after_unknown": {}}})
+            return mutate
+        for address, field in (("aws_iam_role.ecs_spot", "inline_policy"), ("aws_iam_role.runtime_orchestrator", "inline_policy"), (P3A7_GRANT[P3A7_ROLE], "policy"), (P3A7_GRANT[P3A7_TOPIC], "policy"),
+                               ("aws_sns_topic_policy.alerts", "arn"), ("aws_iam_role_policy.runtime_orchestrator", "policy")):
+            self.reject(other(address, field), "PG4 unexpected drift")
+        self.reject(other("aws_instance.demo", "instance_type"), "PG4 unexpected drift fields")
+        def configured(plan):
+            plan["configuration"]["root_module"]["resources"].append({"address": P3A7_ROLE, "mode": "managed", "provider_config_key": "aws", "expressions": {"inline_policy": [{"policy": {"references": ["data.aws_iam_policy_document.x.json"]}}]}})
+        self.reject(configured, "PG4 configured mirror")
+        self.reject(lambda p: self.drift(p, P3A7_ROLE).update(actions=["delete", "create"]), "PG4 drift action/unknown")
+        self.reject(lambda p: self.drift(p, P3A7_TOPIC).update(after_unknown={"policy": True}), "PG4 drift action/unknown")
+        def unbound(plan):
+            for r in plan["prior_state"]["values"]["root_module"]["resources"]:
+                if r["address"] == P3A7_TOPIC:
+                    r["values"] = self.drift(plan, P3A7_TOPIC)["before"]
+        self.reject(unbound, "PG4 drift refreshed no-op binding", direct=True)
+
+    def test_the_rule_itself_binds_the_grant(self):
+        """drift_check alone, so a guard the p3a7 checks before it would also catch is still exercised."""
+        self.reject(lambda p: resource(p, P3A7_GRANT[P3A7_ROLE])["change"].update(actions=["update"]), "PG4 mirror separate-policy binding", direct=True)
+        self.reject(lambda p: resource(p, P3A7_GRANT[P3A7_TOPIC])["change"].update(before={}), "PG4 mirror separate-policy binding", direct=True)
+        def renamed(mirror, edit):
+            """A stored grant that differs from the reviewed one, its mirror consistent with it."""
+            def mutate(plan):
+                grant = P3A7_GRANT[mirror]
+                document = json.loads(after(plan, grant)["policy"])
+                edit(document)
+                bind_refreshed(plan, grant, {**after(plan, grant), "policy": json.dumps(document)})
+                self.put(plan, mirror, "after", document)
+                self.put(plan, mirror, "before", {**document, "Statement": document["Statement"][:-1]})
+            return mutate
+        for mirror in (P3A7_ROLE, P3A7_TOPIC):
+            with self.subTest(mirror):
+                self.reject(renamed(mirror, lambda d: d["Statement"][-1].update(Sid="Other")), "PG4 mirror previous value", direct=True)
+                self.reject(renamed(mirror, lambda d: d["Statement"][0].update(Sid="Other")), "PG4 mirror previous value", direct=True)
+                self.reject(renamed(mirror, lambda d: d["Statement"].append(dict(d["Statement"][-1], Sid="Again"))), "PG4 mirror previous value", direct=True)
+                self.reject(renamed(mirror, lambda d: d.update(Extra=True)), "PG4 mirror previous value", direct=True)
+
+    def test_other_modes_do_not_accept_the_mirrors(self):
+        for name, factory, validate in (("p3c0", p3c0_plan, lambda p: G.validate_p3c0(p, RENDERED, GRANTS)), ("p3a6", p3a6_plan, lambda p: G.validate_p3a6(p, RENDERED))):
+            with self.subTest(name):
+                plan = p3a7_mirrors(factory())
+                with self.assertRaises(G.Rejected) as caught:
+                    validate(plan)
+                self.assertEqual(str(caught.exception), "PG4 unexpected drift")
+        with self.assertRaises(G.Rejected) as caught:
+            G.drift_check(p3a7_mirror_plan(), {})
+        self.assertEqual(str(caught.exception), "PG4 unexpected drift")
+        with self.assertRaises(G.Rejected) as caught:
+            G.drift_check(p3a7_mirror_plan(), G.P3A3_DRIFT_RULES)
+        self.assertEqual(str(caught.exception), "PG4 unexpected drift")
+
+    def test_entry_point(self):
+        entry = EntryTests("test_p3a3_mode_runs_its_own_validation")
+        entry.setUp()
+        with tempfile.TemporaryDirectory() as temporary:
+            plan = p3a7_mirror_plan()
+            entry.show_plan = plan
+            saved, path = entry.files(temporary, plan)
+            code, out, err = entry.call("p3a7", str(saved), str(path), ACCOUNT_SHA)
+            self.assertEqual(code, 0, err)
+            self.assertEqual((json.loads(out)["mode"], json.loads(out)["changes"]), ("p3a7", 1))
+            for other, refusal in (("p3c0", "REJECT P3C0 exact updates"), ("p3a6", "REJECT P3A6 exact updates")):
+                code, out, err = entry.call(other, str(saved), str(path), ACCOUNT_SHA)
+                self.assertEqual(code, 1); self.assertIn(refusal, err)
+
+
 def suite():
     return unittest.TestSuite([unittest.defaultTestLoader.loadTestsFromTestCase(FixtureTests),
                                unittest.defaultTestLoader.loadTestsFromTestCase(RevisionTests),
@@ -2364,6 +2615,7 @@ def suite():
                                unittest.defaultTestLoader.loadTestsFromTestCase(P3a6Tests),
                                unittest.defaultTestLoader.loadTestsFromTestCase(P3c0Tests),
                                unittest.defaultTestLoader.loadTestsFromTestCase(P3a7Tests),
+                               unittest.defaultTestLoader.loadTestsFromTestCase(P3a7MirrorTests),
                                unittest.defaultTestLoader.loadTestsFromTestCase(EntryTests)])
 
 
@@ -2445,8 +2697,22 @@ SCOPE_MUTATIONS = [
     ("p3a7: the wait may return elsewhere", ' == ["OpenMode", "WaitRds"], "P3A7 wait shape "', '[:1] == ["OpenMode"], "P3A7 wait shape "'),
     ("p3a7: a branch may do more", 'all(isinstance(branch, dict) and set(branch) == {"Condition", "Next"} for branch in choice["Choices"])', 'all(isinstance(branch, dict) for branch in choice["Choices"])'),
     ("p3a7: the choice may do more", 'set(choice) == {"Type", "Choices", "Default"} and choice["Type"] == "Choice"', 'choice.get("Type") == "Choice"'),
-    ("p3a7: the mode accepts drift", '    drift_check(plan, {})\n    return {"result": "PASS", "mode": "p3a7"', '    return {"result": "PASS", "mode": "p3a7"'),
-    ("p3a7: the mode accepts the stale role drift", '    drift_check(plan, {})\n    return {"result": "PASS", "mode": "p3a7"', '    drift_check(plan, P3A3_DRIFT_RULES)\n    return {"result": "PASS", "mode": "p3a7"'),
+    ("p3a7: the mode accepts drift", '    drift_check(plan, P3A7_DRIFT_RULES)\n    return {"result": "PASS", "mode": "p3a7"', '    return {"result": "PASS", "mode": "p3a7"'),
+    ("p3a7: the mode accepts the stale role drift", '    drift_check(plan, P3A7_DRIFT_RULES)\n    return {"result": "PASS", "mode": "p3a7"', '    drift_check(plan, {**P3A7_DRIFT_RULES, **P3A3_DRIFT_RULES})\n    return {"result": "PASS", "mode": "p3a7"'),
+    ("p3a7: the mode ignores the mirror rules", 'drift_check(plan, P3A7_DRIFT_RULES)', 'drift_check(plan, {})'),
+    ("p3a7: the topic mirror rule removed", ',\n                    "aws_sns_topic.alerts": {"fields": ["policy"], "policy_mirror": "aws_sns_topic_policy.alerts"}}', '}'),
+    ("p3a7: the role mirror rule allows more fields", '"aws_iam_role.scheduler": {"fields": ["inline_policy"],', '"aws_iam_role.scheduler": {"fields": ["inline_policy", "description"],'),
+    ("p3c0: the mode accepts the mirrors", '    drift_check(plan, {})\n    return {"result": "PASS", "mode": "p3c0"', '    drift_check(plan, P3A7_DRIFT_RULES)\n    return {"result": "PASS", "mode": "p3c0"'),
+    ("p3a6: the mode accepts the mirrors", '    drift_check(plan, {})\n    return {"result": "PASS", "mode": "p3a6"', '    drift_check(plan, P3A7_DRIFT_RULES)\n    return {"result": "PASS", "mode": "p3a6"'),
+    ("mirror: the grant may change", 'changed == {field} and policy_change.get("actions") == ["no-op"] and\n', 'changed == {field} and\n'),
+    ("mirror: the grant change unbound", '                  policy_change.get("before") == policy_change.get("after") == policy, "PG4 mirror separate-policy binding")', '                  True, "PG4 mirror separate-policy binding")'),
+    ("mirror: more than one inline policy", 'isinstance(new, list) and len(old) == len(new) == 1 and', 'isinstance(new, list) and len(old) >= 1 and len(new) >= 1 and'),
+    ("mirror: inline keys", 'isinstance(item, dict) and set(item) == {"name", "policy"} and item["name"]', 'isinstance(item, dict) and item["name"]'),
+    ("mirror: inline name", ' and item["name"] == policy.get("name") for item in old + new)', ' for item in old + new)'),
+    ("mirror: the role of the grant", '                      policy.get("role") == after.get("name"), "PG4 mirror inline binding")', '                      True, "PG4 mirror inline binding")'),
+    ("mirror: any statement ids", '                  [statement.get("Sid") for statement in stored["Statement"]] == [*P3C0_POLICIES[policy_address], P3C0_NEW_SID[policy_address]] and\n', ''),
+    ("mirror: any previous document", 'strict_json(old) == {**stored, "Statement": stored["Statement"][:-1]}, "PG4 mirror previous value"', 'True, "PG4 mirror previous value"'),
+    ("mirror: a document with more keys", 'isinstance(stored, dict) and set(stored) == {"Version", "Statement"} and', 'isinstance(stored, dict) and'),
 ]
 
 
@@ -2471,7 +2737,11 @@ def mutations():
                 "PG4 unexpected drift", "PG4 document permissions", "PG4 configured document permissions",
                 "PG4 unexpected drift fields", "PG5 configuration provider/mode", "PG5 for_each mapping", "PG5 SM logging/tracing/version",
                 "PG5 table extras", "PG5 shared SSM document", "PG5 target extras", "PG5 role extra permissions", "PG0 instance context", "PG0 ENI context", "PG0 EIP context", "PG0 unapproved account", "PG0 planned caller account mismatch",
-                "PG0 database scope", "PG0 ASG scope", "PG0 CloudFront context", "PG2 unknown leaf has concrete value"}
+                "PG0 database scope", "PG0 ASG scope", "PG0 CloudFront context", "PG2 unknown leaf has concrete value",
+                "PG4 mirror separate-policy binding", "PG4 mirror inline binding", "PG4 mirror topic binding", "PG4 mirror refreshed value",
+                "PG4 mirror previous value", "PG4 configured mirror"}
+    # "PG4 mirror document shape" is not mutated: without it a document that is not a string still fails, as a
+    # TypeError the entry point reports as NOT VERIFIED; it stays as the named second line.
     # "PG5 computed setting with a planned value " and "PG5 computed setting
     # configured " are not mutated: an unknown leaf with a value is rejected by
     # PG2 first, and a configured setting by the exact configuration match and
