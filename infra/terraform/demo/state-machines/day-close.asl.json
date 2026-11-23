@@ -1847,7 +1847,7 @@
         }
       ],
       "Assign": {
-        "actualHolder": "{% $states.result.Addresses[0].InstanceId %}",
+        "actualHolder": "{% $exists($states.result.Addresses[0].InstanceId) ? $states.result.Addresses[0].InstanceId : '' %}",
         "attempts": "{% $attempts+1 %}"
       },
       "TimeoutSeconds": 60,

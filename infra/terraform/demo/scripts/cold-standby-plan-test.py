@@ -2616,7 +2616,249 @@ def suite():
                                unittest.defaultTestLoader.loadTestsFromTestCase(P3c0Tests),
                                unittest.defaultTestLoader.loadTestsFromTestCase(P3a7Tests),
                                unittest.defaultTestLoader.loadTestsFromTestCase(P3a7MirrorTests),
+                               unittest.defaultTestLoader.loadTestsFromTestCase(P3a8Tests),
                                unittest.defaultTestLoader.loadTestsFromTestCase(EntryTests)])
+
+
+def p3a8_source(edit):
+    """A render of a changed day_close source: the plan is made to match it, so only the gate's own content checks can refuse."""
+    source = copy.deepcopy(RENDERED)
+    definition = json.loads(source["resources"][ORIGINAL.P3A8_MACHINE]["definition"])
+    edit(definition)
+    source["resources"][ORIGINAL.P3A8_MACHINE]["definition"] = json.dumps(definition)
+    return source
+
+
+def p3a8_stored(definition, edit=None):
+    """What P3-a7 left in day_close: the given definition with the previous holder read, then any further edit."""
+    document = json.loads(definition)
+    read = document["States"].get(ORIGINAL.P3A8_READ)
+    if isinstance(read, dict) and isinstance(read.get("Assign"), dict):
+        read["Assign"]["actualHolder"] = ORIGINAL.P3A8_HOLDER_BEFORE
+    if edit:
+        edit(document)
+    return json.dumps(document)
+
+
+def p3a8_plan(rendered=None, stored=None):
+    """P3-a8 on the converged P3-a7 state: day_open holds its P3-a7 definition (the reviewed source), both grants their
+    statement, all no-op; day_close alone updates, from the reviewed one with the previous holder read to the reviewed one."""
+    plan = p3c0_plan()
+    for address in ORIGINAL.P3C0_POLICIES:
+        bind_refreshed(plan, address, resource(plan, address)["change"]["after"])
+        resource(plan, address)["change"].update(actions=["no-op"], after_unknown={})
+    address = ORIGINAL.P3A8_MACHINE
+    definition = (rendered or RENDERED)["resources"][address]["definition"]
+    values = {**after(plan, address), "definition": p3a8_stored(definition, stored)}
+    bind_refreshed(plan, address, values)
+    resource(plan, address)["change"].update(actions=["update"], after={**values, "definition": definition}, after_unknown={"tags_all": {}})
+    p3a3_sync(plan)
+    return plan
+
+
+class P3a8Tests(unittest.TestCase):
+    """validate_p3a8 on the exact 0 / 1 / 0 plan over the converged P3-a7 state (REHEARSAL-20261122 day-close ReadPark)."""
+    CLOSE = 'aws_sfn_state_machine.runtime["day_close"]'
+    OPEN = 'aws_sfn_state_machine.runtime["day_open"]'
+    GUARD = 'aws_sfn_state_machine.runtime["origin_guard"]'
+
+    def reject(self, mutate, prefix, rendered=None, stored=None, sync=True, plan_factory=None):
+        global FIXTURE_CHECKS
+        FIXTURE_CHECKS += 1
+        plan = plan_factory() if plan_factory else p3a8_plan(rendered, stored)
+        mutate(plan)
+        if sync:
+            p3a3_sync(plan)
+        with self.assertRaises(G.Rejected) as caught:
+            G.validate_p3a8(plan, rendered or RENDERED, GRANTS)
+        self.assertTrue(str(caught.exception).startswith(prefix), str(caught.exception))
+
+    def change(self, plan, address):
+        return resource(plan, address)["change"]
+
+    @staticmethod
+    def states(definition):
+        return definition["States"]
+
+    def test_exact_plan_passes(self):
+        result = G.validate_p3a8(p3a8_plan(), RENDERED, GRANTS)
+        self.assertEqual((result["mode"], result["creates"], result["changes"], result["destroys"]), ("p3a8", 0, 1, 0))
+
+    def test_the_real_source_is_the_reviewed_read(self):
+        self.assertEqual(self.CLOSE, G.P3A8_MACHINE)
+        definition = json.loads(RENDERED["resources"][self.CLOSE]["definition"])
+        self.assertEqual(G.p3a8_park(definition, "after"), G.P3A8_HOLDER_AFTER)
+        self.assertEqual(G.p3a8_park(json.loads(p3a8_stored(RENDERED["resources"][self.CLOSE]["definition"])), "before"), G.P3A8_HOLDER_BEFORE)
+        # The same field read, '' only when it is absent; the poll bound and the On-Demand-only way on unchanged.
+        self.assertEqual(G.P3A8_HOLDER_AFTER, "{% $exists($states.result.Addresses[0].InstanceId) ? $states.result.Addresses[0].InstanceId : '' %}")
+        self.assertEqual(G.P3A8_HOLDER_BEFORE, "{% $states.result.Addresses[0].InstanceId %}")
+        self.assertEqual(G.P3A8_POLL, "{% $attempts<8 %}")
+        self.assertIsNotNone(G.P3A8_ON.fullmatch(self.states(definition)["ParkChoice"]["Choices"][0]["Condition"]))
+        for address in G.P3C0_MACHINES:
+            if address != self.CLOSE:
+                self.assertNotIn(G.P3A8_READ, json.loads(RENDERED["resources"][address]["definition"])["States"], address)
+
+    def test_every_mode_stays_exact(self):
+        for plan_factory in (p3c0_plan, p3a7_plan):
+            self.reject(lambda p: None, "P3A8 exact updates", plan_factory=plan_factory)
+        for validate, refusal in ((lambda p: G.validate_p3a7(p, RENDERED, GRANTS), "P3A7 exact updates"), (lambda p: G.validate_p3c0(p, RENDERED, GRANTS), "P3C0 exact updates"),
+                                  (lambda p: G.validate_p3a6(p, RENDERED), "P3A6 exact updates")):
+            with self.assertRaises(G.Rejected) as caught:
+                validate(p3a8_plan())
+            self.assertEqual(str(caught.exception), refusal)
+
+    def test_anything_else_changing_rejects(self):
+        for other in (self.OPEN, self.GUARD, 'aws_sfn_state_machine.runtime["od_standby"]', 'aws_sfn_state_machine.runtime["ready_check"]', "aws_ssm_document.od_readiness",
+                      "aws_iam_role_policy.runtime_orchestrator", "aws_iam_role_policy.runtime_eip_writer", "aws_iam_role_policy.scheduler_runtime_control", "aws_sns_topic_policy.alerts",
+                      'aws_scheduler_schedule.runtime_orchestration["day_close"]', 'aws_scheduler_schedule.runtime["rds_stop"]', "aws_instance.demo"):
+            self.reject(lambda p, a=other: self.change(p, a).update(actions=["update"]), "P3A8 exact updates")
+        def create(plan):
+            plan["resource_changes"].append({"address": "aws_sfn_state_machine.extra", "mode": "managed", "type": "aws_sfn_state_machine", "change": {"actions": ["create"], "before": None, "after": {}, "after_unknown": {}}})
+        self.reject(create, "P3A8 exact updates")
+        self.reject(lambda p: self.change(p, "aws_instance.demo").update(actions=["delete"], after=None), "P3A8 exact updates")
+        self.reject(lambda p: self.change(p, self.CLOSE).update(actions=["no-op"]), "P3A8 exact updates")
+        self.reject(lambda p: self.change(p, self.GUARD)["after"].update(definition="{}"), "P3A8 existing changed")
+        self.reject(lambda p: self.change(p, self.GUARD).update(after_unknown={"definition": True}), "P3A8 existing unknown/moved")
+
+    def test_root_and_existing_resources(self):
+        def remove_prior(p, address):
+            p["prior_state"]["values"]["root_module"]["resources"] = [r for r in p["prior_state"]["values"]["root_module"]["resources"] if r["address"] != address]
+        self.reject(lambda p: remove_prior(p, "aws_instance.demo"), "P3A8 wrong/incomplete root")
+        self.reject(lambda p: p["resource_changes"].append({"address": "aws_x.unknown", "mode": "managed", "type": "aws_x", "change": {"actions": ["no-op"], "before": {}, "after": {}, "after_unknown": {}}}), "P3A8 all prior resources represented")
+        self.reject(lambda p: p["resource_changes"].remove(resource(p, "aws_instance.demo")), "P3A8 all prior resources represented")
+        self.reject(lambda p: resource(p, "aws_instance.demo").update(previous_address="aws_instance.old"), "P3A8 existing unknown/moved")
+        def returned(p):
+            values = {"name": "origin-eip-promotion"}
+            p["prior_state"]["values"]["root_module"]["resources"].append({"address": ORIGINAL.P3A2_POLICY, "mode": "managed", "type": "aws_iam_role_policy", "values": values})
+            p["resource_changes"].append({"address": ORIGINAL.P3A2_POLICY, "mode": "managed", "type": "aws_iam_role_policy", "change": {"actions": ["no-op"], "before": values, "after": values, "after_unknown": {}}})
+        self.reject(returned, "P3A8 promotion policy returned")
+
+    def test_state_p3a7_left_is_required(self):
+        for address in G.P3A3_DOCUMENTS:
+            self.reject(lambda p, a=address: bind_refreshed(p, a, {**after(p, a), "latest_version": "1"}), "P3A8 document version " + address)
+            self.reject(lambda p, a=address: bind_refreshed(p, a, {**after(p, a), "content": "OTHER"}), "P3A8 document reviewed content " + address)
+        # day_open must hold the P3-a7 wait: the previous one (before P3-a7) is refused.
+        self.reject(lambda p: bind_refreshed(p, self.OPEN, {**after(p, self.OPEN), "definition": p3a7_stored(RENDERED["resources"][self.OPEN]["definition"])}), "P3A8 machine definition " + self.OPEN)
+        for address in G.P3C0_MACHINES:
+            if address != self.CLOSE:
+                definition = json.loads(RENDERED["resources"][address]["definition"])
+                definition["Comment"] = "another revision"
+                self.reject(lambda p, a=address, d=json.dumps(definition): bind_refreshed(p, a, {**after(p, a), "definition": d}), "P3A8 machine definition " + address)
+        for address in G.P3C0_POLICIES:
+            def narrower(plan, a=address):
+                document = json.loads(after(plan, a)["policy"])
+                document["Statement"] = document["Statement"][:-1]
+                bind_refreshed(plan, a, {**after(plan, a), "policy": json.dumps(document)})
+            self.reject(narrower, "P3A8 reviewed policy " + address)
+        for address in G.P3C0_NEW_INERT:
+            self.reject(lambda p, a=address: bind_refreshed(p, a, {**after(p, a), "state": "ENABLED"}), "P3A8 schedule/rule not DISABLED " + address)
+        for address in G.P3C0_LEGACY:
+            self.reject(lambda p, a=address: bind_refreshed(p, a, {**after(p, a), "state": "DISABLED"}), "P3A8 legacy schedule " + address)
+            self.reject(lambda p, a=address: bind_refreshed(p, a, {**after(p, a), "schedule_expression_timezone": "UTC"}), "P3A8 legacy schedule " + address)
+
+    def test_machine_update_shape(self):
+        self.reject(lambda p: self.change(p, self.CLOSE).update(actions=["delete", "create"]), "P3A3 update action")
+        self.reject(lambda p: self.change(p, self.CLOSE)["after_unknown"].update(definition=True), "P3A3 update unknown")
+        self.reject(lambda p: self.change(p, self.CLOSE)["after"].update(publish=True), "P3A8 machine changed fields")
+        self.reject(lambda p: self.change(p, self.CLOSE)["after"].update(role_arn="arn:aws:iam::000000000000:role/other"), "P3A8 machine changed fields")
+        def already_applied(plan):
+            change = self.change(plan, self.CLOSE)
+            bind_refreshed(plan, self.CLOSE, change["after"])
+            change.update(actions=["update"])
+        self.reject(already_applied, "P3A8 machine changed fields")
+        self.reject(lambda p: self.change(p, self.CLOSE)["after"].update(definition=json.dumps({"States": {}})), "P3A8 machine reviewed definition")
+        def unreviewed(plan):
+            definition = json.loads(self.change(plan, self.CLOSE)["after"]["definition"])
+            definition["States"]["WaitPark"]["Seconds"] = 5
+            self.change(plan, self.CLOSE)["after"]["definition"] = json.dumps(definition)
+        self.reject(unreviewed, "P3A8 machine reviewed definition")
+
+    def test_the_stored_definition_is_the_previous_reviewed_one(self):
+        def already_guarded(document):
+            self.states(document)["ReadPark"]["Assign"]["actualHolder"] = G.P3A8_HOLDER_AFTER
+        # Stored already with the new read: not the previous reviewed definition.
+        self.reject(lambda p: None, "P3A8 holder read before", stored=already_guarded)
+        def other_read(document):
+            self.states(document)["ReadPark"]["Assign"]["actualHolder"] = "{% $states.result.Addresses[0].PublicIp %}"
+        self.reject(lambda p: None, "P3A8 holder read before", stored=other_read)
+        def other_timeout(document):
+            document["TimeoutSeconds"] = document["TimeoutSeconds"] + 1
+        self.reject(lambda p: None, "P3A8 definition changes beyond the holder read", stored=other_timeout)
+        def other_stop(document):
+            self.states(document).pop("StopRds")
+        self.reject(lambda p: None, "P3A8 definition changes beyond the holder read", stored=other_stop)
+        def other_wait(document):
+            self.states(document)["WaitPark"]["Seconds"] = 30
+        self.reject(lambda p: None, "P3A8 park wait before", stored=other_wait)
+
+    def test_the_new_read_is_the_reviewed_one(self):
+        od = "i-01aab176822e4e38c"
+        for holder in ("{% $exists($states.result.Addresses[0].InstanceId) ? $states.result.Addresses[0].InstanceId : '" + od + "' %}",
+                       "{% $states.result.Addresses[0].InstanceId ? $states.result.Addresses[0].InstanceId : '' %}", "{% '' %}"):
+            self.reject(lambda p: None, "P3A8 holder read after", rendered=p3a8_source(lambda d, h=holder: self.states(d)["ReadPark"]["Assign"].update(actualHolder=h)))
+        # A render that keeps the previous read is no update at all.
+        self.reject(lambda p: None, "P3A8 machine changed fields", rendered=p3a8_source(lambda d: self.states(d)["ReadPark"]["Assign"].update(actualHolder=G.P3A8_HOLDER_BEFORE)))
+        shapes = {
+            "park wait": ("P3A8 park wait", lambda d: self.states(d)["WaitPark"].update(Seconds=1)),
+            "no wait": ("P3A8 park wait", lambda d: self.states(d).pop("WaitPark")),
+            "read without catch": ("P3A8 park read shape", lambda d: self.states(d)["ReadPark"].pop("Catch")),
+            "read skips the choice": ("P3A8 park read shape", lambda d: self.states(d)["ReadPark"].update(Next="ReacquireClose")),
+            "read caught to Released": ("P3A8 park read shape", lambda d: self.states(d)["ReadPark"].update(Catch=[{"ErrorEquals": ["States.ALL"], "Next": "ReacquireClose"}])),
+            "read another field": ("P3A8 park read shape", lambda d: self.states(d)["ReadPark"]["Assign"].update(extra="{% 1 %}")),
+            "attempts not counted": ("P3A8 park read shape", lambda d: self.states(d)["ReadPark"]["Assign"].update(attempts="{% $attempts %}")),
+            "read another API": ("P3A8 park read shape", lambda d: self.states(d)["ReadPark"].update(Resource="arn:aws:states:::aws-sdk:ec2:describeInstances")),
+            "more reads": ("P3A8 park choice", lambda d: self.states(d)["ParkChoice"]["Choices"][1].update(Condition="{% $attempts<20 %}")),
+            "any holder goes on": ("P3A8 park choice", lambda d: self.states(d)["ParkChoice"]["Choices"][0].update(Condition="{% $actualHolder!='' %}")),
+            "fails open": ("P3A8 park choice", lambda d: self.states(d)["ParkChoice"].update(Default="ReacquireClose")),
+            "branches swapped": ("P3A8 park choice", lambda d: self.states(d)["ParkChoice"]["Choices"].reverse()),
+            "a third branch": ("P3A8 park choice", lambda d: self.states(d)["ParkChoice"]["Choices"].append({"Condition": "{% $actualHolder='' %}", "Next": "ReacquireClose"})),
+            "another key in a branch": ("P3A8 park choice", lambda d: self.states(d)["ParkChoice"]["Choices"][1].update(Assign={"attempts": 0})),
+            "not a choice": ("P3A8 park choice", lambda d: self.states(d)["ParkChoice"].update(Type="Pass")),
+        }
+        for label, (prefix, edit) in shapes.items():
+            with self.subTest(label):
+                self.reject(lambda p: None, prefix, rendered=p3a8_source(edit))
+
+    def test_planned_values_outputs_and_drift(self):
+        def remove_planned(p):
+            p3a3_sync(p)
+            p["planned_values"]["root_module"]["resources"] = [r for r in p["planned_values"]["root_module"]["resources"] if r["address"] != "aws_instance.demo"]
+        self.reject(remove_planned, "P3A8 planned resource coverage", sync=False)
+        def inconsistent(p):
+            p3a3_sync(p)
+            planned = next(r for r in p["planned_values"]["root_module"]["resources"] if r["address"] == self.CLOSE)
+            planned["values"] = {**planned["values"], "definition": "{}"}
+        self.reject(inconsistent, "P3A8 planned value inconsistency", sync=False)
+        self.reject(lambda p: p["output_changes"]["ecs_spot_launch_template_version"].update(actions=["update"]), "P3A8 output changed")
+        def snapshot(p):
+            p3a3_sync(p)
+            p["planned_values"]["outputs"]["ecs_spot_launch_template_version"] = {"value": 6}
+        self.reject(snapshot, "P3A8 output snapshot changed", sync=False)
+        self.reject(lambda p: p3a7_mirrors(p, (P3A7_ROLE,)), "PG4 unexpected drift")
+        def machine_drift(plan):
+            values = self.change(plan, self.GUARD)["before"]
+            plan["resource_drift"] = [{"address": self.GUARD, "mode": "managed", "type": "aws_sfn_state_machine", "change": {"actions": ["update"], "before": {**values, "definition": "{}"}, "after": values, "after_unknown": {}}}]
+        self.reject(machine_drift, "PG4 unexpected drift")
+
+    def test_entry_point_and_mode_separation(self):
+        entry = EntryTests("test_p3a3_mode_runs_its_own_validation")
+        entry.setUp()
+        with tempfile.TemporaryDirectory() as temporary:
+            plan = p3a8_plan()
+            entry.show_plan = plan
+            saved, path = entry.files(temporary, plan)
+            code, out, err = entry.call("p3a8", str(saved), str(path), ACCOUNT_SHA)
+            self.assertEqual(code, 0, err)
+            self.assertEqual((json.loads(out)["mode"], json.loads(out)["changes"]), ("p3a8", 1))
+            for other, refusal in (("p3a7", "REJECT P3A7 exact updates"), ("p3c0", "REJECT P3C0 exact updates")):
+                code, out, err = entry.call(other, str(saved), str(path), ACCOUNT_SHA)
+                self.assertEqual(code, 1); self.assertIn(refusal, err)
+        with tempfile.TemporaryDirectory() as temporary:
+            plan = p3a7_plan()
+            entry.show_plan = plan
+            saved, path = entry.files(temporary, plan)
+            code, out, err = entry.call("p3a8", str(saved), str(path), ACCOUNT_SHA)
+            self.assertEqual(code, 1); self.assertIn("REJECT P3A8 exact updates", err)
 
 
 SCOPE_MUTATIONS = [
@@ -2686,6 +2928,15 @@ SCOPE_MUTATIONS = [
     ("p3a4: the guard may send a command", 'check(p3a3_pins(definition) == [], "P3A3 commandless', 'check(True, "P3A3 commandless'),
     ("the p3a7 entry runs the p3c0 check", 'result = validate_p3a7(plan, exporter.export(context), exporter.export_grants(context))', 'result = validate_p3c0(plan, exporter.export(context), exporter.export_grants(context))'),
     ("the p3a7 mode has no entry", 'elif mode == "p3a7":', 'elif mode == "never":'),
+    ("the p3a8 mode has no entry", 'elif mode == "p3a8":', 'elif mode == "never":'),
+    ("p3a8: another resource may change too", 'check(changed == {P3A8_MACHINE}, "P3A8 exact updates")', 'check(changed >= {P3A8_MACHINE}, "P3A8 exact updates")'),
+    ("p3a8: the other definitions are not compared", '        if address != P3A8_MACHINE:\n', '        if address == "never":\n'),
+    ("p3a8: the holder may be read from any read", 'and read.get("Next") == P3A8_CHOICE and isinstance(read.get("Assign"), dict)', 'and isinstance(read.get("Assign"), dict)'),
+    ("p3a8: more reads allowed", '    and choice["Choices"][1]["Condition"] == P3A8_POLL, "P3A8 park choice "', '    and isinstance(choice["Choices"][1]["Condition"], str), "P3A8 park choice "'),
+    ("p3a8: any holder goes on", 'and P3A8_ON.fullmatch(choice["Choices"][0]["Condition"]) is not None', 'and True'),
+    ("p3a8: a branch may do more", 'all(isinstance(entry, dict) and set(entry) == {"Condition", "Next"} for entry in choice["Choices"])', 'all(isinstance(entry, dict) for entry in choice["Choices"])'),
+    ("p3a8: the read may fail open", 'and read.get("Catch") == [{"ErrorEquals": ["States.ALL"], "Next": "Failure"}]', 'and True'),
+    ("p3a8: the rest of the definition may change", '    check(old == new, "P3A8 definition changes beyond the holder read")', '    check(True, "P3A8 definition changes beyond the holder read")'),
     ("p3a7: another resource may change too", 'check(changed == {P3A7_MACHINE}, "P3A7 exact updates")', 'check(changed >= {P3A7_MACHINE}, "P3A7 exact updates")'),
     ("p3a7: only latest_version read", 'versions == [P3A3_VERSION_AFTER] * 3, "P3A7 document version "', 'versions[-1:] == [P3A3_VERSION_AFTER], "P3A7 document version "'),
     ("p3a7: the other definitions are not compared", '        if address != P3A7_MACHINE:\n', '        if address == "never":\n'),
@@ -2755,7 +3006,7 @@ def mutations():
             continue
         message = call.args[1]
         code = message.value if isinstance(message, ast.Constant) else message.left.value if isinstance(message, ast.BinOp) and isinstance(message.left, ast.Constant) else None
-        if code in selected or code in prefixes or (code or "").startswith(("P3A2 ", "P3A3 ", "P3A6 ", "P3C0 ", "P3A7 ", "PG4 removed inline")):
+        if code in selected or code in prefixes or (code or "").startswith(("P3A2 ", "P3A3 ", "P3A6 ", "P3C0 ", "P3A7 ", "P3A8 ", "PG4 removed inline")):
             chosen.append((call, code))
     revision_codes = {"PG0 refreshed caller account mismatch", "PG0 caller provider binding", "PG0 provider credential override",
                       "PG4 unexpected drift", "PG4 document permissions", "PG4 configured document permissions",

@@ -720,7 +720,11 @@ def day_close():
  b.choice('DrainChoice',[("$count($group.Instances)=0 and $group.DesiredCapacity=0 and $od.State.Name='stopped'",'PublicOff'),("$polls<150",'WaitDrain')],'Failure')
  b.write('PublicOff','ec2','modifyNetworkInterfaceAttribute',{'NetworkInterfaceId':'${od_eni_id}','AssociatePublicIpAddress':False},'ParkEip',['day-close'],True)
  b.child('ParkEip','${origin_guard_arn}',{'intent':'park-od'},'ReleasePark',['day-close']);b.release('ReleasePark','WaitPark')
- b.wait('WaitPark',15,'ReadPark');b.read('ReadPark','ec2','describeAddresses',{'AllocationIds':['${eip_allocation_id}']},'ParkChoice',{'actualHolder':E('$states.result.Addresses[0].InstanceId'),'attempts':E('$attempts+1')})
+ # The park child moves the EIP on its own schedule: between the Spot host and the On-Demand host it can read unassociated.
+ # An unassociated read is holder '' and is polled again inside the same 8 attempts; only the On-Demand holder goes on.
+ # (REHEARSAL-20261122: a read 15 s after ReleasePark had no InstanceId, the Assign failed and the close went to Failure
+ # while the park child succeeded about a minute later.)
+ b.wait('WaitPark',15,'ReadPark');b.read('ReadPark','ec2','describeAddresses',{'AllocationIds':['${eip_allocation_id}']},'ParkChoice',{'actualHolder':E("$exists($states.result.Addresses[0].InstanceId) ? $states.result.Addresses[0].InstanceId : ''"),'attempts':E('$attempts+1')})
  b.choice('ParkChoice',[("$actualHolder='${od_instance_id}'",'ReacquireClose'),("$attempts<8",'WaitPark')],'Failed');b.reacquire('ReacquireClose','RdsStopChoice',['day-close'])
  b.choice('RdsStopChoice',[("$request.rdsStop='self'",'ReadRdsBeforeStop')],'ReleaseNightWait')
  b.read('ReadRdsBeforeStop','rds','describeDBInstances',{'DbInstanceIdentifier':'${db_instance_identifier}'},'RdsNeedsStop',{'dbStatus':E('$states.result.DbInstances[0].DbInstanceStatus')})
