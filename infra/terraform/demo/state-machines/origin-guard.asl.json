@@ -3889,7 +3889,10 @@
                   "S": "{% $dayKey %}"
                 }
               },
-              "UpdateExpression": "SET launchWindowStart=:window, launchCount=:count, abandonCount=:abandon, ttl=:ttl",
+              "UpdateExpression": "SET launchWindowStart=:window, launchCount=:count, abandonCount=:abandon, #ttl=:ttl",
+              "ExpressionAttributeNames": {
+                "#ttl": "ttl"
+              },
               "ExpressionAttributeValues": {
                 ":window": {
                   "N": "{% $string($exists($launchDay.launchWindowStart.N) and $number($launchDay.launchWindowStart.N)>$millis()-3600000 ? $number($launchDay.launchWindowStart.N) : $millis()) %}"
