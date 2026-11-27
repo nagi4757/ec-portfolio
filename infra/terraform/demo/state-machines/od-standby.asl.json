@@ -1398,8 +1398,11 @@
                   "S": "{% $dayKey %}"
                 }
               },
-              "UpdateExpression": "SET odStartedAt=:started, odDeadline=:deadline, ttl=:ttl ADD starts :one",
+              "UpdateExpression": "SET odStartedAt=:started, odDeadline=:deadline, #ttl=:ttl ADD starts :one",
               "ConditionExpression": "attribute_not_exists(starts) OR starts < :max",
+              "ExpressionAttributeNames": {
+                "#ttl": "ttl"
+              },
               "ExpressionAttributeValues": {
                 ":started": {
                   "N": "{% $string($millis()) %}"

@@ -98,6 +98,21 @@ export async function replay(doc,m,input={trigger:'manual',scheduledTime:'manual
  return {status:'LIMIT',m};
 }
 function walk(obj,fn){if(typeof obj==='string'){if(obj.startsWith('{% '))fn(obj)}else if(Array.isArray(obj))obj.forEach(v=>walk(v,fn));else if(obj&&typeof obj==='object')Object.values(obj).forEach(v=>walk(v,fn))}
+// DynamoDB rejects a reserved word used as a bare attribute name at run time (ValidationException), which the strict
+// fixture interpreter above does not model. #name aliases and :value placeholders are escaped by definition; clause keywords
+// and operators are syntax, and a function name is syntax only when a parenthesis follows it.
+const DDB_EXPRESSION_KEYS=['UpdateExpression','ConditionExpression','ProjectionExpression','KeyConditionExpression','FilterExpression'];
+const DDB_KEYWORDS=new Set(['SET','REMOVE','ADD','DELETE','AND','OR','NOT','IN','BETWEEN']);
+const DDB_FUNCTIONS=new Set(['ATTRIBUTE_EXISTS','ATTRIBUTE_NOT_EXISTS','ATTRIBUTE_TYPE','BEGINS_WITH','CONTAINS','SIZE','IF_NOT_EXISTS','LIST_APPEND']);
+export const ddbReservedWords=()=>new Set(fs.readFileSync(path.join(here,'fixtures/dynamodb-reserved-words.txt'),'utf8').split('\n').map(x=>x.trim()).filter(x=>x&&!x.startsWith('#')).map(x=>x.toUpperCase()));
+export function bareNames(expr){
+ const out=[];for(const m of expr.replace(/[#:][A-Za-z0-9_]+/g,' ').matchAll(/[A-Za-z_][A-Za-z0-9_]*(\s*\()?/g)){const word=m[0].replace(/\s*\($/,''),upper=word.toUpperCase();if(DDB_KEYWORDS.has(upper)||(m[1]&&DDB_FUNCTIONS.has(upper)))continue;out.push(word)}
+ return out;
+}
+export function unescapedReserved(doc,reserved){
+ const out=[];const visit=(x,at)=>{if(Array.isArray(x))x.forEach((v,i)=>visit(v,at+'['+i+']'));else if(x&&typeof x==='object')for(const[k,v]of Object.entries(x)){if(DDB_EXPRESSION_KEYS.includes(k)&&typeof v==='string'){assert.ok(!v.startsWith('{% '),'DynamoDB expression is a literal string '+at+'.'+k);for(const word of bareNames(v))if(reserved.has(word.toUpperCase()))out.push(at+'.'+k+': '+word)}else visit(v,at+'.'+k)}};
+ visit(doc.States,'States');return out;
+}
 export function contract(doc,name){
  assert.equal(doc.StartAt,'ReadMode');assert.equal(doc.QueryLanguage,'JSONata');assert.ok(doc.TimeoutSeconds>0);const states=doc.States,reachable=new Set(),queue=[doc.StartAt],parents={};
  for(const[n,s]of Object.entries(states)){assert.ok(['Task','Pass','Choice','Wait','Succeed','Fail'].includes(s.Type),n);const edges=[s.Next,s.Default,...(s.Choices??[]).map(x=>x.Next),...(s.Catch??[]).map(x=>x.Next)].filter(Boolean);for(const next of edges){assert.ok(states[next],n+' -> '+next);(parents[next]??=[]).push(n)}if(s.Type==='Task')assert.ok(s.Catch?.length,n+' has failure path');walk(s,x=>jsonata(x.slice(3,-3)));}
@@ -137,6 +152,16 @@ export async function main(){
   await test('ArmGate/'+name+'/valid manual',async()=>assert.equal(await evaluate(doc.States.ArmGate.Choices[0].Condition,bindings(armMode())),true));
   await test('interlock/'+name,async()=>{const m=fixture({badLegacy:true});const r=await replay(doc,m);assert.equal(r.error,'Legacy.Interlock');assert.equal(m.writes.length,0)});
  }
+ const reserved=ddbReservedWords();
+ await test('DynamoDB reserved-word check: bare names only, case-insensitive',()=>{
+  assert.ok(reserved.size>500&&reserved.has('TTL')&&reserved.has('STATUS'),'official reserved word list loaded');
+  assert.deepEqual(bareNames('SET odStartedAt=:started, #ttl=:ttl ADD starts :one'),['odStartedAt','starts']);
+  assert.deepEqual(bareNames('attribute_not_exists(pk) OR size (#t) > :n AND #at IN (:a, :b)'),['pk']);
+  const doc={States:{A:{Arguments:{TransactItems:[{Update:{UpdateExpression:'SET ttl=:ttl, Status = :status, #at = :at, size = :size',ConditionExpression:'attribute_exists(pk)',ExpressionAttributeNames:{'#at':'at'}}}]}}}};
+  const at='States.A.Arguments.TransactItems[0].Update.UpdateExpression: ';
+  assert.deepEqual(unescapedReserved(doc,reserved),[at+'ttl',at+'Status',at+'size']);
+ });
+ for(const name of names)await test('DynamoDB expressions never use a reserved word unescaped/'+name,()=>{const bad=unescapedReserved(readDoc(name),reserved);assert.deepEqual(bad,[],name+': '+bad.join('; '))});
  await test('day-open real expression happy path',async()=>{const m=fixture();const r=await replay(readDoc('day-open'),m);assert.equal(r.status,'PASS',JSON.stringify({r:r.error,trace:m.trace}));assert.equal(m.o.odState,'stopped');assert.equal(m.o.holder,SPOT);assert.ok(m.writes.some(x=>x.operation==='setDesiredCapacity'));assert.ok(m.writes.filter(x=>x.operation==='sendCommand').some(x=>x.args.Parameters.checkMode[0]==='endToEnd'))});
  await test('RDS never ready blocks Spot and OD',async()=>{const m=fixture({dbStatus:'stopped',rdsNeverReady:true});const r=await replay(readDoc('day-open'),m);assert.equal(r.status,'FAIL');assert.ok(!m.writes.some(x=>['setDesiredCapacity','startInstances'].includes(x.operation)))});
  await test('bad live SHA blocks all writes',async()=>{const m=fixture({badSha:true});const r=await replay(readDoc('day-open'),m);assert.equal(r.status,'FAIL');assert.equal(m.writes.length,0)});
